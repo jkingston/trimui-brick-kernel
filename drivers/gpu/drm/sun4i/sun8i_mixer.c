@@ -512,6 +512,51 @@ static void sun8i_mixer_init(struct sun8i_mixer *mixer)
 			   SUN8I_MIXER_BLEND_PIPE_CTL_EN_MSK, 0);
 }
 
+/* The Brick maps SRAM C to DE and enables the DE-local
+ * reset, bus and memory clocks before touching mixer registers. CCU CLK_DE
+ * alone does not provide these gates. Keep this scoped to the tested board.
+ */
+static int sun8i_mixer_brick_de_init(struct device *dev)
+{
+	void __iomem *sram, *clocks;
+	u32 old_sram, value;
+	int ret = 0;
+
+	if (!of_machine_is_compatible("trimui,brick") ||
+	    !of_device_is_compatible(dev->of_node, "allwinner,sun50i-a133-de2-mixer-0"))
+		return 0;
+	sram = ioremap(0x03000004, 4);
+	clocks = ioremap(0x06000000, 16);
+	if (!sram || !clocks) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	old_sram = readl(sram);
+	writel(old_sram & ~BIT(24), sram);
+	if (readl(sram) & BIT(24)) {
+		ret = -EIO;
+		goto out;
+	}
+	/* Stock __de_clk_enable order: reset, bus gate, module/memory gate. */
+	writel(readl(clocks + 8) | BIT(0), clocks + 8);
+	writel(readl(clocks + 4) | BIT(0), clocks + 4);
+	writel(readl(clocks) | BIT(0), clocks);
+	value = readl(clocks) & readl(clocks + 4) & readl(clocks + 8);
+	if (!(value & BIT(0))) {
+		dev_err(dev, "Brick DE internal clocks did not enable\n");
+		ret = -EIO;
+		goto out;
+	}
+	dev_info(dev, "Brick DE SRAM %08x->%08x internal clocks %08x/%08x/%08x\n",
+		  old_sram, readl(sram), readl(clocks), readl(clocks + 4), readl(clocks + 8));
+out:
+	if (clocks)
+		iounmap(clocks);
+	if (sram)
+		iounmap(sram);
+	return ret;
+}
+
 static int sun8i_mixer_bind(struct device *dev, struct device *master,
 			      void *data)
 {
@@ -643,6 +688,12 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 		clk_set_rate(mixer->mod_clk, mixer->cfg->mod_rate);
 
 	clk_prepare_enable(mixer->mod_clk);
+
+	ret = sun8i_mixer_brick_de_init(dev);
+	if (ret) {
+		clk_disable_unprepare(mixer->mod_clk);
+		goto err_disable_bus_clk;
+	}
 
 	list_add_tail(&mixer->engine.list, &drv->engine_list);
 
