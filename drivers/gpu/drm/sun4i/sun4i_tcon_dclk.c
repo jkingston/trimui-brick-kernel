@@ -23,12 +23,19 @@ static inline struct sun4i_dclk *hw_to_dclk(struct clk_hw *hw)
 	return container_of(hw, struct sun4i_dclk, hw);
 }
 
+/* A133 stock DSI enables all four DCLK gates; preserve other SoCs. */
+static u32 sun4i_dclk_gate_mask(struct sun4i_dclk *dclk)
+{
+	return dclk->tcon->quirks->a133_dsi_timing ? GENMASK(31, 28) :
+		BIT(SUN4I_TCON0_DCLK_GATE_BIT);
+}
+
 static void sun4i_dclk_disable(struct clk_hw *hw)
 {
 	struct sun4i_dclk *dclk = hw_to_dclk(hw);
 
 	regmap_update_bits(dclk->regmap, SUN4I_TCON0_DCLK_REG,
-			   BIT(SUN4I_TCON0_DCLK_GATE_BIT), 0);
+			   sun4i_dclk_gate_mask(dclk), 0);
 }
 
 static int sun4i_dclk_enable(struct clk_hw *hw)
@@ -36,8 +43,8 @@ static int sun4i_dclk_enable(struct clk_hw *hw)
 	struct sun4i_dclk *dclk = hw_to_dclk(hw);
 
 	return regmap_update_bits(dclk->regmap, SUN4I_TCON0_DCLK_REG,
-				  BIT(SUN4I_TCON0_DCLK_GATE_BIT),
-				  BIT(SUN4I_TCON0_DCLK_GATE_BIT));
+				  sun4i_dclk_gate_mask(dclk),
+				  sun4i_dclk_gate_mask(dclk));
 }
 
 static int sun4i_dclk_is_enabled(struct clk_hw *hw)
@@ -47,7 +54,7 @@ static int sun4i_dclk_is_enabled(struct clk_hw *hw)
 
 	regmap_read(dclk->regmap, SUN4I_TCON0_DCLK_REG, &val);
 
-	return val & BIT(SUN4I_TCON0_DCLK_GATE_BIT);
+	return (val & sun4i_dclk_gate_mask(dclk)) == sun4i_dclk_gate_mask(dclk);
 }
 
 static unsigned long sun4i_dclk_recalc_rate(struct clk_hw *hw,
