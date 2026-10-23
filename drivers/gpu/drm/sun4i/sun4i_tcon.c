@@ -861,6 +861,18 @@ static void sun4i_tcon_finish_page_flip(struct drm_device *dev,
 	spin_unlock_irqrestore(&dev->event_lock, flags);
 }
 
+/* External DSI frame IRQ uses the same retirement/engine work as TCON IRQ. */
+void sun4i_tcon_external_vblank(struct sun4i_crtc *scrtc)
+{
+	struct sunxi_engine *engine = scrtc->engine;
+
+	drm_crtc_handle_vblank(&scrtc->crtc);
+	sun4i_tcon_finish_page_flip(scrtc->crtc.dev, scrtc);
+	if (engine->ops->vblank_quirk)
+		engine->ops->vblank_quirk(engine);
+}
+EXPORT_SYMBOL_GPL(sun4i_tcon_external_vblank);
+
 static irqreturn_t sun4i_tcon_handler(int irq, void *private)
 {
 	struct sun4i_tcon *tcon = private;

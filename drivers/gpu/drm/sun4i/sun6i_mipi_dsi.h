@@ -9,6 +9,7 @@
 #ifndef _SUN6I_MIPI_DSI_H_
 #define _SUN6I_MIPI_DSI_H_
 
+#include <linux/spinlock.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_mipi_dsi.h>
@@ -42,6 +43,12 @@ struct sun6i_dsi {
 	bool			mode_rejected;
 	bool supply_on, reset_deasserted, clock_on, phy_initialized, phy_on;
 	bool panel_prepared, panel_enabled;
+	/* Brick-only IRQ path; function pointer avoids a reverse module dependency. */
+	spinlock_t irq_lock;
+	void __iomem *irq_base;
+	struct sun4i_crtc *irq_crtc;
+	int irq;
+	bool irq_live, irq_enabled, irq_wanted, irq_bus_on;
 	const struct sun6i_dsi_variant *variant;
 };
 

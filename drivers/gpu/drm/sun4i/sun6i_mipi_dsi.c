@@ -10,6 +10,8 @@
 #include <linux/component.h>
 #include <linux/crc-ccitt.h>
 #include <linux/module.h>
+#include <linux/interrupt.h>
+#include <linux/io.h>
 #include <linux/of_address.h>
 #include <linux/phy/phy-mipi-dphy.h>
 #include <linux/phy/phy.h>
@@ -713,10 +715,89 @@ static int sun6i_dsi_start(struct sun6i_dsi *dsi,
 	return 0;
 }
 
+/* Installed stock dsi_irq_{enable,query}: low16 enable, high16 W1C status.
+ * VIDEO_VBLK is ID2. No line interrupt, timer or synthetic frame completion.
+ */
+#define BRICK_DSI_GINT0 0x004
+#define BRICK_DSI_VBLANK_ENABLE BIT(2)
+#define BRICK_DSI_VBLANK_STATUS BIT(18)
+
+static int sun6i_dsi_brick_set_vblank(void *data, bool enable)
+{
+	struct sun6i_dsi *dsi = data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dsi->irq_lock, flags);
+	dsi->irq_wanted = enable;
+	if (dsi->irq_live)
+		writel((enable ? BRICK_DSI_VBLANK_ENABLE : 0) |
+		       BRICK_DSI_VBLANK_STATUS, dsi->irq_base + BRICK_DSI_GINT0);
+	spin_unlock_irqrestore(&dsi->irq_lock, flags);
+	return 0;
+}
+
+static irqreturn_t sun6i_dsi_brick_irq(int irq, void *data)
+{
+	struct sun6i_dsi *dsi = data;
+	struct sun4i_crtc *scrtc = NULL;
+	unsigned long flags;
+	u32 status;
+
+	spin_lock_irqsave(&dsi->irq_lock, flags);
+	if (dsi->irq_live) {
+		status = readl(dsi->irq_base + BRICK_DSI_GINT0);
+		if ((status & BRICK_DSI_VBLANK_STATUS) &&
+		    (status & BRICK_DSI_VBLANK_ENABLE) && dsi->irq_wanted) {
+			/* Write-one acknowledgement: never read/modify/write status. */
+			writel(BRICK_DSI_VBLANK_ENABLE | BRICK_DSI_VBLANK_STATUS,
+			       dsi->irq_base + BRICK_DSI_GINT0);
+			scrtc = dsi->irq_crtc;
+		}
+	}
+	spin_unlock_irqrestore(&dsi->irq_lock, flags);
+	if (!scrtc)
+		return IRQ_NONE;
+	/* disable_irq() drains this callback before the CRTC/clock can go away. */
+	sun4i_tcon_external_vblank(scrtc);
+	return IRQ_HANDLED;
+}
+
+static void sun6i_dsi_brick_irq_stop(struct sun6i_dsi *dsi)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dsi->irq_lock, flags);
+	if (dsi->irq_live)
+		writel(BRICK_DSI_VBLANK_STATUS, dsi->irq_base + BRICK_DSI_GINT0);
+	dsi->irq_live = false;
+	spin_unlock_irqrestore(&dsi->irq_lock, flags);
+	if (dsi->irq_enabled) {
+		disable_irq(dsi->irq);
+		dsi->irq_enabled = false;
+	}
+	dsi->irq_crtc = NULL;
+}
+
+static void sun6i_dsi_brick_irq_start(struct sun6i_dsi *dsi)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dsi->irq_lock, flags);
+	dsi->irq_crtc = drm_crtc_to_sun4i_crtc(dsi->encoder.crtc);
+	dsi->irq_live = true;
+	writel((dsi->irq_wanted ? BRICK_DSI_VBLANK_ENABLE : 0) |
+	       BRICK_DSI_VBLANK_STATUS, dsi->irq_base + BRICK_DSI_GINT0);
+	spin_unlock_irqrestore(&dsi->irq_lock, flags);
+	enable_irq(dsi->irq);
+	dsi->irq_enabled = true;
+}
+
 /* Opt-in Brick experiment only. Failed cleanup retains ownership for retry. */
 static int sun6i_dsi_brick_stop(struct sun6i_dsi *dsi)
 {
 	int ret, panel_error = 0;
+
+	sun6i_dsi_brick_irq_stop(dsi);
 
 	if (dsi->panel_enabled) {
 		drm_panel_disable(dsi->panel);
@@ -753,6 +834,10 @@ static int sun6i_dsi_brick_stop(struct sun6i_dsi *dsi)
 		if (ret) return ret;
 		dsi->supply_on = false;
 	}
+	if (dsi->irq_bus_on) {
+		clk_disable_unprepare(dsi->bus_clk);
+		dsi->irq_bus_on = false;
+	}
 	return panel_error;
 }
 
@@ -777,6 +862,11 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 	ret = clk_prepare_enable(dsi->mod_clk);
 	if (ret) goto failed;
 	dsi->clock_on = true;
+	ret = clk_prepare_enable(dsi->bus_clk);
+	if (ret) goto failed;
+	dsi->irq_bus_on = true;
+	/* Mask inherited interrupt enables before command programming. */
+	writel(BRICK_DSI_VBLANK_STATUS, dsi->irq_base + BRICK_DSI_GINT0);
 	/*
 	 * Enable the DSI block.
 	 */
@@ -832,6 +922,7 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 	udelay(1000);
 	ret = sun6i_dsi_start(dsi, DSI_START_HSD);
 	if (ret) goto failed;
+	sun6i_dsi_brick_irq_start(dsi);
 	/* Only the explicitly matched panel's delay-only enable is permitted. */
 	drm_panel_enable(dsi->panel);
 	if (!dsi->panel->enabled) { ret = -EIO; goto failed; }
@@ -1158,7 +1249,8 @@ static int sun6i_dsi_detach(struct mipi_dsi_host *host,
 	dsi->panel = NULL;
 	dsi->device = NULL;
 
-	drm_kms_helper_hotplug_event(dsi->drm);
+	if (!dsi->variant->brick_experimental || dsi->drm)
+		drm_kms_helper_hotplug_event(dsi->drm);
 
 	return 0;
 }
@@ -1247,6 +1339,20 @@ static int sun6i_dsi_bind(struct device *dev, struct device *master,
 
 	drm_connector_attach_encoder(&dsi->connector, &dsi->encoder);
 
+	if (dsi->variant->brick_experimental) {
+		struct drm_crtc *crtc = drm_crtc_from_index(drm, 0);
+		struct sun4i_crtc *scrtc;
+
+		/* possible_crtcs above is BIT(0); TCON binds before its encoder. */
+		if (!crtc) {
+			ret = -ENODEV;
+			drm_connector_cleanup(&dsi->connector);
+			goto err_cleanup_connector;
+		}
+		scrtc = drm_crtc_to_sun4i_crtc(crtc);
+		scrtc->external_vblank_data = dsi;
+		scrtc->external_vblank = sun6i_dsi_brick_set_vblank;
+	}
 	dsi->drm = drm;
 
 	return 0;
@@ -1345,6 +1451,15 @@ static int sun6i_dsi_probe(struct platform_device *pdev)
 		goto err_unprotect_clk;
 	}
 
+	if (variant->brick_experimental) {
+		dsi->irq_base = base;
+		spin_lock_init(&dsi->irq_lock);
+		dsi->irq = platform_get_irq(pdev, 0);
+		if (dsi->irq < 0) { ret = dsi->irq; goto err_unprotect_clk; }
+		ret = devm_request_irq(dev, dsi->irq, sun6i_dsi_brick_irq,
+				       IRQF_NO_AUTOEN, dev_name(dev), dsi);
+		if (ret) goto err_unprotect_clk;
+	}
 	ret = mipi_dsi_host_register(&dsi->host);
 	if (ret) {
 		dev_err(dev, "Couldn't register MIPI-DSI host\n");

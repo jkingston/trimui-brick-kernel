@@ -172,6 +172,8 @@ static int sun4i_crtc_enable_vblank(struct drm_crtc *crtc)
 	if (!sun4i_tcon_mode_ready(scrtc->tcon))
 		return -EINVAL;
 
+	if (scrtc->external_vblank)
+		return scrtc->external_vblank(scrtc->external_vblank_data, true);
 	sun4i_tcon_enable_vblank(scrtc->tcon, true);
 
 	return 0;
@@ -183,7 +185,10 @@ static void sun4i_crtc_disable_vblank(struct drm_crtc *crtc)
 
 	DRM_DEBUG_DRIVER("Disabling VBLANK on crtc %p\n", crtc);
 
-	sun4i_tcon_enable_vblank(scrtc->tcon, false);
+	if (scrtc->external_vblank)
+		scrtc->external_vblank(scrtc->external_vblank_data, false);
+	else
+		sun4i_tcon_enable_vblank(scrtc->tcon, false);
 }
 
 static const struct drm_crtc_funcs sun4i_crtc_funcs = {
