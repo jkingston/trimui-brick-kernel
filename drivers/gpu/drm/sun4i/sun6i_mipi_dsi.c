@@ -716,20 +716,18 @@ static int sun6i_dsi_start(struct sun6i_dsi *dsi,
 /* Opt-in Brick experiment only. Failed cleanup retains ownership for retry. */
 static int sun6i_dsi_brick_stop(struct sun6i_dsi *dsi)
 {
-	int ret;
-
-	if (dsi->panel_fault) return -EIO;
+	int ret, panel_error = 0;
 
 	if (dsi->panel_enabled) {
 		drm_panel_disable(dsi->panel);
-		if (dsi->panel->enabled) return -EIO;
-		dsi->panel_enabled = false;
+		dsi->panel_enabled = dsi->panel->enabled;
+		if (dsi->panel_enabled) panel_error = -EIO;
 	}
 	if (dsi->panel_prepared) {
 		/* DCS transfer aborts HS instructions before sending sleep commands. */
 		drm_panel_unprepare(dsi->panel);
-		if (dsi->panel->prepared) return -EIO;
-		dsi->panel_prepared = false;
+		dsi->panel_prepared = dsi->panel->prepared;
+		if (dsi->panel_prepared) panel_error = -EIO;
 	}
 	if (dsi->phy_on) {
 		ret = phy_power_off(dsi->dphy);
@@ -755,7 +753,7 @@ static int sun6i_dsi_brick_stop(struct sun6i_dsi *dsi)
 		if (ret) return ret;
 		dsi->supply_on = false;
 	}
-	return 0;
+	return panel_error;
 }
 
 static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
@@ -821,12 +819,12 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 	dsi->phy_on = true;
 	drm_panel_prepare(dsi->panel);
 	if (!dsi->panel->prepared) {
-		/* Core cannot expose failed-prepare cleanup status. Keep transport
-		 * resources held rather than assume the panel rails are off.
+		/* The matched panel quiesces reset/pins on failed prepare and
+		 * owns any outstanding regulator references. Cleanup retries
+		 * never send DCS after that point, so transport can stop.
 		 */
-		dsi->panel_fault = true;
-		dev_err(dsi->dev, "panel prepare failed; resources retained, reboot required\n");
-		return;
+		ret = -EIO;
+		goto failed;
 	}
 	dsi->panel_prepared = true;
 	ret = sun6i_dsi_start(dsi, DSI_START_HSC);

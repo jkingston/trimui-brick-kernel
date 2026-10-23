@@ -41,7 +41,7 @@ struct sun6i_dsi {
 	/* Paired disable must not release resources when enable was skipped. */
 	bool			mode_rejected;
 	bool supply_on, reset_deasserted, clock_on, phy_initialized, phy_on;
-	bool panel_prepared, panel_enabled, panel_fault;
+	bool panel_prepared, panel_enabled;
 	const struct sun6i_dsi_variant *variant;
 };
 
