@@ -530,6 +530,17 @@ struct fb_info {
      */
 
 extern int fb_set_var(struct fb_info *info, struct fb_var_screeninfo *var);
+/*
+ * Acquire a registered framebuffer reference by index. Returns NULL when no
+ * framebuffer is registered, or ERR_PTR(-ENODEV) for an invalid index.
+ * Pair every successful non-NULL/non-error result with put_fb_info().
+ * The reference pins fb_info, not framebuffer storage, mode or registration.
+ * Clients must additionally pin fbops->owner, serialize callbacks with
+ * lock_fb_info(), and arrange provider-specific scanout/storage lifetime.
+ */
+extern struct fb_info *get_fb_info(unsigned int idx);
+extern void put_fb_info(struct fb_info *info);
+
 extern int fb_pan_display(struct fb_info *info, struct fb_var_screeninfo *var);
 extern int fb_blank(struct fb_info *info, int blank);
 

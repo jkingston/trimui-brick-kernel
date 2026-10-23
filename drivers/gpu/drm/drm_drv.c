@@ -1102,7 +1102,9 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags)
 	if (ret)
 		goto err_minors;
 
+	mutex_lock(&dev->clientlist_mutex);
 	dev->registered = true;
+	mutex_unlock(&dev->clientlist_mutex);
 	dev->unplugged = false;
 
 	if (driver->load) {
@@ -1167,7 +1169,9 @@ EXPORT_SYMBOL(drm_dev_register);
  */
 void drm_dev_unregister(struct drm_device *dev)
 {
+	mutex_lock(&dev->clientlist_mutex);
 	dev->registered = false;
+	mutex_unlock(&dev->clientlist_mutex);
 
 	drm_client_sysrq_unregister(dev);
 	drm_panic_unregister(dev);

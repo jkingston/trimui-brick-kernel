@@ -380,7 +380,18 @@ int drm_open(struct inode *inode, struct file *filp)
 	if (drm_dev_needs_global_mutex(dev))
 		mutex_lock(&drm_global_mutex);
 
+	/* A fixed kernel presentation owner excludes all userspace opens on
+	 * this DRM device. Account for a new open before dropping this lock,
+	 * including driver-open callbacks and failure cleanup.
+	 */
+	mutex_lock(&dev->master_mutex);
+	if (dev->kernel_master_owner) {
+		mutex_unlock(&dev->master_mutex);
+		retcode = -EBUSY;
+		goto err_release;
+	}
 	atomic_fetch_inc(&dev->open_count);
+	mutex_unlock(&dev->master_mutex);
 
 	/* share address_space across all char-devs of a single device */
 	filp->f_mapping = dev->anon_inode->i_mapping;
@@ -396,6 +407,7 @@ int drm_open(struct inode *inode, struct file *filp)
 
 err_undo:
 	atomic_dec(&dev->open_count);
+err_release:
 	if (drm_dev_needs_global_mutex(dev))
 		mutex_unlock(&drm_global_mutex);
 	drm_minor_release(minor);
@@ -409,6 +421,23 @@ static void drm_lastclose(struct drm_device *dev)
 
 	if (dev_is_pci(dev->dev))
 		vga_switcheroo_process_delayed_switch();
+}
+
+/* Filelist removal precedes framebuffer cleanup; open_count reaches zero
+ * before lastclose can restore a client. Cover both intervals without holding
+ * master_mutex across callbacks which may themselves need that mutex.
+ */
+static void drm_master_close_begin(struct drm_device *dev)
+{
+	guard(mutex)(&dev->master_mutex);
+	dev->master_closes_in_progress++;
+}
+
+static void drm_master_close_end(struct drm_device *dev)
+{
+	guard(mutex)(&dev->master_mutex);
+	WARN_ON(!dev->master_closes_in_progress);
+	dev->master_closes_in_progress--;
 }
 
 /**
@@ -435,10 +464,12 @@ int drm_release(struct inode *inode, struct file *filp)
 
 	drm_dbg_core(dev, "open_count = %d\n", atomic_read(&dev->open_count));
 
+	drm_master_close_begin(dev);
 	drm_close_helper(filp);
 
 	if (atomic_dec_and_test(&dev->open_count))
 		drm_lastclose(dev);
+	drm_master_close_end(dev);
 
 	if (drm_dev_needs_global_mutex(dev))
 		mutex_unlock(&drm_global_mutex);
@@ -500,12 +531,14 @@ int drm_release_noglobal(struct inode *inode, struct file *filp)
 	struct drm_minor *minor = file_priv->minor;
 	struct drm_device *dev = minor->dev;
 
+	drm_master_close_begin(dev);
 	drm_close_helper(filp);
 
 	if (atomic_dec_and_mutex_lock(&dev->open_count, &drm_global_mutex)) {
 		drm_lastclose(dev);
 		mutex_unlock(&drm_global_mutex);
 	}
+	drm_master_close_end(dev);
 
 	drm_minor_release(minor);
 

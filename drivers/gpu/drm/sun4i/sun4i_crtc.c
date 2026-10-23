@@ -56,6 +56,8 @@ static int sun4i_crtc_atomic_check(struct drm_crtc *crtc,
 
 	if (engine && engine->ops && engine->ops->atomic_check)
 		ret = engine->ops->atomic_check(engine, crtc_state);
+	if (!ret)
+		ret = sun4i_tcon_atomic_check(scrtc->tcon, crtc_state);
 
 	return ret;
 }

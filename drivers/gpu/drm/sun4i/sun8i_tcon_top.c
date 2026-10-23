@@ -16,6 +16,8 @@
 #include "sun8i_tcon_top.h"
 
 struct sun8i_tcon_top_quirks {
+	bool has_tcon_tv0;
+	bool early_clock_provider;
 	bool has_tcon_tv1;
 	bool has_dsi;
 };
@@ -71,6 +73,7 @@ static unsigned int sun8i_tcon_top_park_index(struct sun8i_tcon_top *tcon_top,
 int sun8i_tcon_top_set_hdmi_src(struct device *dev, int tcon)
 {
 	struct sun8i_tcon_top *tcon_top = dev_get_drvdata(dev);
+	const struct sun8i_tcon_top_quirks *quirks;
 	unsigned long flags;
 	u32 val;
 
@@ -78,6 +81,10 @@ int sun8i_tcon_top_set_hdmi_src(struct device *dev, int tcon)
 		dev_err(dev, "Device is not TCON TOP!\n");
 		return -EINVAL;
 	}
+
+	quirks = of_device_get_match_data(dev);
+	if (!quirks->has_tcon_tv0)
+		return -EOPNOTSUPP;
 
 	if (tcon < 2 || tcon > 3) {
 		dev_err(dev, "TCON index must be 2 or 3!\n");
@@ -171,8 +178,7 @@ static struct clk_hw *sun8i_tcon_top_register_gate(struct device *dev,
 				    bit, 0, lock);
 };
 
-static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
-			       void *data)
+static int sun8i_tcon_top_init(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct clk_hw_onecell_data *clk_data;
@@ -238,10 +244,11 @@ static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
 	 * to TVE clock parent.
 	 */
 	i = 0;
-	clk_data->hws[CLK_TCON_TOP_TV0] =
-		sun8i_tcon_top_register_gate(dev, "tcon-tv0", regs,
-					     &tcon_top->reg_lock,
-					     TCON_TOP_TCON_TV0_GATE, i++);
+	if (quirks->has_tcon_tv0)
+		clk_data->hws[CLK_TCON_TOP_TV0] =
+			sun8i_tcon_top_register_gate(dev, "tcon-tv0", regs,
+						     &tcon_top->reg_lock,
+						     TCON_TOP_TCON_TV0_GATE, i++);
 
 	if (quirks->has_tcon_tv1)
 		clk_data->hws[CLK_TCON_TOP_TV1] =
@@ -281,8 +288,7 @@ err_assert_reset:
 	return ret;
 }
 
-static void sun8i_tcon_top_unbind(struct device *dev, struct device *master,
-				  void *data)
+static void sun8i_tcon_top_fini(struct device *dev)
 {
 	struct sun8i_tcon_top *tcon_top = dev_get_drvdata(dev);
 	struct clk_hw_onecell_data *clk_data = tcon_top->clk_data;
@@ -297,32 +303,72 @@ static void sun8i_tcon_top_unbind(struct device *dev, struct device *master,
 	reset_control_assert(tcon_top->rst);
 }
 
+static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
+			       void *data)
+{
+	const struct sun8i_tcon_top_quirks *quirks = of_device_get_match_data(dev);
+
+	return quirks->early_clock_provider ? 0 : sun8i_tcon_top_init(dev);
+}
+
+static void sun8i_tcon_top_unbind(struct device *dev, struct device *master,
+				  void *data)
+{
+	const struct sun8i_tcon_top_quirks *quirks = of_device_get_match_data(dev);
+
+	if (!quirks->early_clock_provider)
+		sun8i_tcon_top_fini(dev);
+}
+
 static const struct component_ops sun8i_tcon_top_ops = {
-	.bind	= sun8i_tcon_top_bind,
-	.unbind	= sun8i_tcon_top_unbind,
+	.bind = sun8i_tcon_top_bind,
+	.unbind = sun8i_tcon_top_unbind,
 };
 
 static int sun8i_tcon_top_probe(struct platform_device *pdev)
 {
-	return component_add(&pdev->dev, &sun8i_tcon_top_ops);
+	const struct sun8i_tcon_top_quirks *quirks = of_device_get_match_data(&pdev->dev);
+	int ret;
+
+	/* DSI must resolve this clock before the DRM component aggregate binds. */
+	if (quirks->early_clock_provider) {
+		ret = sun8i_tcon_top_init(&pdev->dev);
+		if (ret)
+			return ret;
+	}
+	ret = component_add(&pdev->dev, &sun8i_tcon_top_ops);
+	if (ret && quirks->early_clock_provider)
+		sun8i_tcon_top_fini(&pdev->dev);
+	return ret;
 }
 
 static void sun8i_tcon_top_remove(struct platform_device *pdev)
 {
+	const struct sun8i_tcon_top_quirks *quirks = of_device_get_match_data(&pdev->dev);
+
 	component_del(&pdev->dev, &sun8i_tcon_top_ops);
+	if (quirks->early_clock_provider)
+		sun8i_tcon_top_fini(&pdev->dev);
 }
 
 static const struct sun8i_tcon_top_quirks sun8i_r40_tcon_top_quirks = {
+	.has_tcon_tv0 = true,
 	.has_tcon_tv1	= true,
 	.has_dsi	= true,
 };
 
 static const struct sun8i_tcon_top_quirks sun20i_d1_tcon_top_quirks = {
+	.has_tcon_tv0 = true,
 	.has_dsi	= true,
 };
 
 static const struct sun8i_tcon_top_quirks sun50i_h6_tcon_top_quirks = {
-	/* Nothing special */
+	.has_tcon_tv0 = true,
+};
+
+static const struct sun8i_tcon_top_quirks sun50i_a133_tcon_top_quirks = {
+	.has_dsi = true,
+	.early_clock_provider = true,
 };
 
 /* sun4i_drv uses this list to check if a device node is a TCON TOP */
@@ -338,6 +384,10 @@ const struct of_device_id sun8i_tcon_top_of_table[] = {
 	{
 		.compatible = "allwinner,sun50i-h6-tcon-top",
 		.data = &sun50i_h6_tcon_top_quirks
+	},
+	{
+		.compatible = "allwinner,sun50i-a133-tcon-top",
+		.data = &sun50i_a133_tcon_top_quirks
 	},
 	{ /* sentinel */ }
 };

@@ -149,6 +149,49 @@ void drm_client_register(struct drm_client_dev *client)
 EXPORT_SYMBOL(drm_client_register);
 
 /**
+ * drm_client_init_and_register - Atomically initialize/register a late client
+ * @dev: live referenced DRM device
+ * @client: zeroed client with callback-private state initialized
+ * @name: client name
+ * @funcs: callbacks ready for immediate invocation
+ *
+ * Device unregister's registered transition is protected by clientlist_mutex.
+ * Keep that lock across initialization as modeset creation accesses the live
+ * mode configuration too. On failure no client ownership is transferred.
+ * On success only the unregister callback may release the client, as for
+ * drm_client_register(). Initial hotplug is delivered before returning.
+ *
+ * Return: 0 on success, negative error otherwise.
+ */
+int drm_client_init_and_register(struct drm_device *dev,
+				struct drm_client_dev *client,
+				const char *name,
+				const struct drm_client_funcs *funcs)
+{
+	int ret;
+
+	mutex_lock(&dev->clientlist_mutex);
+	if (!dev->registered) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	ret = drm_client_init(dev, client, name, funcs);
+	if (ret)
+		goto unlock;
+	list_add(&client->list, &dev->clientlist);
+	if (funcs && funcs->hotplug) {
+		int hotplug_ret = funcs->hotplug(client);
+		if (hotplug_ret)
+			drm_dbg_kms(dev, "late client hotplug ret=%d\n", hotplug_ret);
+	}
+unlock:
+	mutex_unlock(&dev->clientlist_mutex);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(drm_client_init_and_register);
+
+
+/**
  * drm_client_release - Release DRM client resources
  * @client: DRM client
  *

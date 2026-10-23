@@ -53,6 +53,8 @@ struct fb_info *get_fb_info(unsigned int idx)
 	return fb_info;
 }
 
+EXPORT_SYMBOL_GPL(get_fb_info);
+
 void put_fb_info(struct fb_info *fb_info)
 {
 	if (!refcount_dec_and_test(&fb_info->count))
@@ -60,6 +62,7 @@ void put_fb_info(struct fb_info *fb_info)
 	if (fb_info->fbops->fb_destroy)
 		fb_info->fbops->fb_destroy(fb_info);
 }
+EXPORT_SYMBOL_GPL(put_fb_info);
 
 /*
  * Helpers

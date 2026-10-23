@@ -9,6 +9,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/extcon.h>
 #include <linux/io.h>
@@ -53,9 +54,6 @@
 #define SUNXI_MUSB_RXHUBPORT			0x009f
 #define SUNXI_MUSB_CONFIGDATA			0x00c0
 
-/* VEND0 bits */
-#define SUNXI_MUSB_VEND0_PIO_MODE		0
-
 /* flags */
 #define SUNXI_MUSB_FL_ENABLED			0
 #define SUNXI_MUSB_FL_HOSTMODE			1
@@ -69,6 +67,7 @@
 
 struct sunxi_musb_cfg {
 	const struct musb_hdrc_config *hdrc_config;
+	u8 vend0_value; /* Zero selects upstream PIO initialization. */
 	bool has_sram;
 	bool has_reset;
 	bool no_configdata;
@@ -79,6 +78,7 @@ static struct musb *sunxi_musb;
 
 struct sunxi_glue {
 	struct device		*dev;
+	u8			vend0_value;
 	struct musb		*musb;
 	struct platform_device	*musb_pdev;
 	struct clk		*clk;
@@ -244,7 +244,13 @@ static int sunxi_musb_init(struct musb *musb)
 			goto error_clk_disable;
 	}
 
-	writeb(SUNXI_MUSB_VEND0_PIO_MODE, musb->mregs + SUNXI_MUSB_VEND0);
+	/* Stock Brick waits 10 us after the OTG clock/reset is enabled. */
+	if (glue->vend0_value)
+		udelay(10);
+	writeb(glue->vend0_value, musb->mregs + SUNXI_MUSB_VEND0);
+	if (glue->vend0_value)
+		dev_info(glue->dev, "stock VEND0 control: %#x\n",
+			 readb(musb->mregs + SUNXI_MUSB_VEND0));
 
 	/* Register notifier before calling phy_init() */
 	ret = devm_extcon_register_notifier(glue->dev, glue->extcon,
@@ -723,6 +729,10 @@ static int sunxi_musb_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	pdata.config = cfg->hdrc_config;
+	if (cfg->vend0_value && pdata.mode != MUSB_PERIPHERAL)
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "stock VEND0 quirk requires peripheral mode\n");
+	glue->vend0_value = cfg->vend0_value;
 
 	glue->dev = &pdev->dev;
 	INIT_WORK(&glue->work, sunxi_musb_work);
@@ -827,6 +837,16 @@ static const struct sunxi_musb_cfg sun8i_a33_musb_cfg = {
 	.no_configdata = true,
 };
 
+/* Local Brick experiment. Stock uses VEND0=1 with CPU-driven FIFO I/O;
+ * bit 0's A133 meaning is not established. Keep upstream PIO/DMA handling.
+ */
+static const struct sunxi_musb_cfg trimui_brick_musb_cfg = {
+	.hdrc_config = &sunxi_musb_hdrc_config_5eps,
+	.has_reset = true,
+	.no_configdata = true,
+	.vend0_value = 1,
+};
+
 static const struct sunxi_musb_cfg sun8i_h3_musb_cfg = {
 	.hdrc_config = &sunxi_musb_hdrc_config_4eps,
 	.has_reset = true,
@@ -841,6 +861,8 @@ static const struct sunxi_musb_cfg suniv_f1c100s_musb_cfg = {
 };
 
 static const struct of_device_id sunxi_musb_match[] = {
+	{ .compatible = "trimui,brick-musb",
+	  .data = &trimui_brick_musb_cfg, },
 	{ .compatible = "allwinner,sun4i-a10-musb",
 	  .data = &sun4i_a10_musb_cfg, },
 	{ .compatible = "allwinner,sun6i-a31-musb",

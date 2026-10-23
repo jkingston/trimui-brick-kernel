@@ -412,7 +412,13 @@ static void sun8i_mixer_mode_set(struct sunxi_engine *engine,
 			 interlaced ? "on" : "off");
 }
 
+static unsigned long sun8i_mixer_get_clk_rate(struct sunxi_engine *engine)
+{
+	return clk_get_rate(engine_to_sun8i_mixer(engine)->mod_clk);
+}
+
 static const struct sunxi_engine_ops sun8i_engine_ops = {
+	.get_clk_rate = sun8i_mixer_get_clk_rate,
 	.commit		= sun8i_mixer_commit,
 	.layers_init	= sun8i_layers_init,
 	.mode_set	= sun8i_mixer_mode_set,
@@ -853,6 +859,46 @@ static const struct sun8i_mixer_cfg sun50i_a64_mixer1_cfg = {
 	.vi_num		= 1,
 };
 
+/*
+ * A133 (sun50iw10) has no public register documentation. This config
+ * is derived from Allwinner's GPL disp2 driver (de_feat.c/de_rtmx.c,
+ * lowlevel_v2x/sun50iw10 tree), which confirms it is a standard DE2.0
+ * dual-pipe mixer: DISP0 has 4 channels (2 VI + 2 UI, all 4 scaler
+ * capable), DISP1 has 3 channels (1 VI + 2 UI, all 3 scaler capable).
+ * de_rtmx_init() places mixer1's register block at DE0 base + 0x200000
+ * and mixer0's at DE0 base + 0x100000, matching the existing A64/H3/R40
+ * DE2.0 layout convention already used below.
+ */
+static const struct sun8i_mixer_cfg sun50i_a133_mixer0_cfg = {
+	.lay_cfg = {
+		.ccsc		= CCSC_MIXER0_LAYOUT,
+		.de_type	= SUN8I_MIXER_DE2,
+		.vi_scaler_num	= 2,
+		.scaler_mask	= 0xf,
+		.scanline_yuv	= 2560,
+		.de2_fcc_alpha	= 1,
+	},
+	.de_type	= SUN8I_MIXER_DE2,
+	.mod_rate	= 297000000,
+	.ui_num		= 2,
+	.vi_num		= 2,
+};
+
+static const struct sun8i_mixer_cfg sun50i_a133_mixer1_cfg = {
+	.lay_cfg = {
+		.ccsc		= CCSC_MIXER1_LAYOUT,
+		.de_type	= SUN8I_MIXER_DE2,
+		.vi_scaler_num	= 1,
+		.scaler_mask	= 0x7,
+		.scanline_yuv	= 2048,
+		.de2_fcc_alpha	= 1,
+	},
+	.de_type	= SUN8I_MIXER_DE2,
+	.mod_rate	= 297000000,
+	.ui_num		= 2,
+	.vi_num		= 1,
+};
+
 static const struct sun8i_mixer_cfg sun50i_h6_mixer0_cfg = {
 	.lay_cfg = {
 		.de_type	= SUN8I_MIXER_DE3,
@@ -919,6 +965,14 @@ static const struct of_device_id sun8i_mixer_of_table[] = {
 	{
 		.compatible = "allwinner,sun50i-a64-de2-mixer-1",
 		.data = &sun50i_a64_mixer1_cfg,
+	},
+	{
+		.compatible = "allwinner,sun50i-a133-de2-mixer-0",
+		.data = &sun50i_a133_mixer0_cfg,
+	},
+	{
+		.compatible = "allwinner,sun50i-a133-de2-mixer-1",
+		.data = &sun50i_a133_mixer1_cfg,
 	},
 	{
 		.compatible = "allwinner,sun50i-h6-de3-mixer-0",

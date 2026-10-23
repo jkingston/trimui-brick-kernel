@@ -252,6 +252,8 @@ int drm_setmaster_ioctl(struct drm_device *dev, void *data,
 	ret = drm_master_check_perm(dev, file_priv);
 	if (ret)
 		return ret;
+	if (dev->kernel_master_owner)
+		return -EBUSY;
 
 	if (drm_is_current_master_locked(file_priv))
 		return ret;
@@ -323,6 +325,8 @@ int drm_master_open(struct drm_file *file_priv)
 	 * any master object for render clients
 	 */
 	guard(mutex)(&dev->master_mutex);
+	if (dev->kernel_master_owner)
+		return -EBUSY;
 	if (!dev->master) {
 		ret = drm_new_set_master(dev, file_priv);
 	} else {
@@ -448,3 +452,59 @@ void drm_master_internal_release(struct drm_device *dev)
 	mutex_unlock(&dev->master_mutex);
 }
 EXPORT_SYMBOL(drm_master_internal_release);
+
+/**
+ * drm_master_kernel_claim - Exclude userspace masters for fixed presentation
+ * @dev: referenced DRM device with registered teardown notification
+ * @owner: non-NULL stable identity token for this claim
+ *
+ * Experimental API for a kernel display adapter whose buffer retirement
+ * assumes no competing userspace modesets. Existing userspace files are
+ * rejected, including former masters, so an already-authorized ioctl cannot
+ * remain in flight across the claim. File cleanup and lastclose restoration
+ * must also have completed. Userspace opens and SET_MASTER are
+ * subsequently rejected. Internal fbdev/client commits remain permitted.
+ *
+ * This does not exclude other kernel DRM clients, fbdev access, or privileged
+ * direct hardware access. The owner must separately arrange those constraints
+ * and hold device/storage references through teardown. Release only after GPU
+ * references have drained and scanout is parked on owner-independent storage.
+ *
+ * Return: 0 on success, -EINVAL for NULL owner, -EBUSY if ownership or existing
+ * userspace files prevent exclusive access.
+ */
+int drm_master_kernel_claim(struct drm_device *dev, const void *owner)
+{
+	if (!owner)
+		return -EINVAL;
+
+	guard(mutex)(&dev->master_mutex);
+	if (dev->master || dev->kernel_master_owner ||
+	    atomic_read(&dev->open_count) || dev->master_closes_in_progress)
+		return -EBUSY;
+
+	/* Normal open establishes master before adding to filelist. Normal
+	 * close drops filelist_mutex before releasing master, so this nesting
+	 * does not invert those paths. In-flight syscalls retain their file.
+	 */
+	guard(mutex)(&dev->filelist_mutex);
+	if (!list_empty(&dev->filelist))
+		return -EBUSY;
+	dev->kernel_master_owner = owner;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(drm_master_kernel_claim);
+
+/**
+ * drm_master_kernel_release - Release an exclusive kernel presentation claim
+ * @dev: referenced device previously claimed
+ * @owner: exact identity token passed to drm_master_kernel_claim()
+ */
+void drm_master_kernel_release(struct drm_device *dev, const void *owner)
+{
+	guard(mutex)(&dev->master_mutex);
+	if (WARN_ON(!owner || dev->kernel_master_owner != owner))
+		return;
+	dev->kernel_master_owner = NULL;
+}
+EXPORT_SYMBOL_GPL(drm_master_kernel_release);

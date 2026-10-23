@@ -236,6 +236,7 @@
 struct sun4i_tcon;
 
 struct sun4i_tcon_quirks {
+	bool a133_dsi_timing; /* Checked vendor trigger fields, DSI video only. */
 	bool	has_channel_0;	/* a83t does not have channel 0 on second TCON */
 	bool	has_channel_1;	/* a33 does not have channel 1 */
 	bool	has_lvds_alt;	/* Does the LVDS clock have a parent other than the TCON clock? */
@@ -253,6 +254,7 @@ struct sun4i_tcon_quirks {
 };
 
 struct sun4i_tcon {
+	bool a133_mode_valid;
 	struct device			*dev;
 	struct drm_device		*drm;
 	struct regmap			*regs;
@@ -290,6 +292,9 @@ struct sun4i_tcon {
 
 struct drm_bridge *sun4i_tcon_find_bridge(struct device_node *node);
 struct drm_panel *sun4i_tcon_find_panel(struct device_node *node);
+
+int sun4i_tcon_atomic_check(struct sun4i_tcon *tcon,
+			    struct drm_crtc_state *state);
 
 void sun4i_tcon_enable_vblank(struct sun4i_tcon *tcon, bool enable);
 void sun4i_tcon_mode_set(struct sun4i_tcon *tcon,

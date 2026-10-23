@@ -171,6 +171,23 @@ struct drm_device {
 	 */
 	struct drm_master *master;
 
+	/**
+	 * @kernel_master_owner:
+	 *
+	 * Experimental exclusive kernel presentation owner. Non-NULL prevents
+	 * userspace opens and acquisition of DRM master. Internal
+	 * DRM clients remain usable. Protected by &master_mutex.
+	 */
+	const void *kernel_master_owner;
+
+	/**
+	 * @master_closes_in_progress:
+	 *
+	 * Final file cleanup and lastclose restoration still running, including
+	 * the interval after open_count reaches zero. Protected by &master_mutex.
+	 */
+	unsigned int master_closes_in_progress;
+
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	/**
 	 * @huge_mnt:

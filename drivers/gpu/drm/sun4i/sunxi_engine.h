@@ -21,6 +21,9 @@ struct sunxi_engine;
  * implement the proper behaviour.
  */
 struct sunxi_engine_ops {
+	/** @get_clk_rate: Return the active engine module clock rate in Hz. */
+	unsigned long (*get_clk_rate)(struct sunxi_engine *engine);
+
 	/**
 	 * @atomic_begin:
 	 *

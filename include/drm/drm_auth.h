@@ -135,5 +135,7 @@ void drm_master_put(struct drm_master **master);
 bool drm_is_current_master(struct drm_file *fpriv);
 
 struct drm_master *drm_master_create(struct drm_device *dev);
+int drm_master_kernel_claim(struct drm_device *dev, const void *owner);
+void drm_master_kernel_release(struct drm_device *dev, const void *owner);
 
 #endif

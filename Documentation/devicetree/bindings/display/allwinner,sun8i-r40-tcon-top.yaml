@@ -43,6 +43,7 @@ properties:
       - allwinner,sun8i-r40-tcon-top
       - allwinner,sun20i-d1-tcon-top
       - allwinner,sun50i-h6-tcon-top
+      - allwinner,sun50i-a133-tcon-top
 
   reg:
     maxItems: 1
@@ -99,8 +100,6 @@ properties:
     required:
       - port@0
       - port@1
-      - port@4
-      - port@5
 
 required:
   - "#clock-cells"
@@ -115,6 +114,35 @@ required:
 additionalProperties: false
 
 allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: allwinner,sun50i-a133-tcon-top
+    then:
+      properties:
+        clocks:
+          items:
+            - description: DPSS TOP interface clock
+            - description: MIPI DSI parent clock
+        clock-names:
+          items:
+            - const: bus
+            - const: dsi
+        clock-output-names:
+          items:
+            - description: DSI output clock name
+        ports:
+          properties:
+            port@4: false
+            port@5: false
+    else:
+      properties:
+        ports:
+          required:
+            - port@4
+            - port@5
+
   - if:
       properties:
         compatible:

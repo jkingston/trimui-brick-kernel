@@ -23,6 +23,8 @@ properties:
       - allwinner,sun20i-d1-de2-mixer-1
       - allwinner,sun50i-a64-de2-mixer-0
       - allwinner,sun50i-a64-de2-mixer-1
+      - allwinner,sun50i-a133-de2-mixer-0
+      - allwinner,sun50i-a133-de2-mixer-1
       - allwinner,sun50i-h6-de3-mixer-0
       - allwinner,sun50i-h616-de33-mixer-0
 

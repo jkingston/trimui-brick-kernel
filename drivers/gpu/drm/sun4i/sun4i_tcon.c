@@ -39,6 +39,7 @@
 #include "sun4i_tcon_dclk.h"
 #include "sun8i_tcon_top.h"
 #include "sunxi_engine.h"
+#include "sun50i_a133_tcon.h"
 
 static struct drm_connector *sun4i_tcon_get_connector(const struct drm_encoder *encoder)
 {
@@ -193,6 +194,10 @@ void sun4i_tcon_set_status(struct sun4i_tcon *tcon,
 	bool is_lvds = false;
 	int channel;
 
+	if (enabled && tcon->quirks->a133_dsi_timing &&
+	    !tcon->a133_mode_valid)
+		return;
+
 	switch (encoder->encoder_type) {
 	case DRM_MODE_ENCODER_LVDS:
 		is_lvds = true;
@@ -343,6 +348,69 @@ static void sun4i_tcon0_mode_set_dithering(struct sun4i_tcon *tcon,
 	regmap_write(tcon->regs, SUN4I_TCON_FRM_CTL_REG, val);
 }
 
+/* Validate before any register writes; no panel or clock defaults are supplied. */
+static int sun50i_a133_tcon_prepare(struct sun4i_tcon *tcon,
+				  const struct drm_encoder *encoder,
+				  const struct drm_display_mode *mode,
+				  struct sun50i_a133_tcon_trigger *trigger)
+{
+	struct sunxi_engine *engine = tcon->crtc->engine;
+	struct sun6i_dsi *dsi;
+	struct mipi_dsi_device *device;
+	struct sun50i_a133_tcon_timing timing;
+	unsigned long rate;
+	int bpp;
+
+	if (encoder->encoder_type != DRM_MODE_ENCODER_DSI || !engine ||
+	    !engine->ops || !engine->ops->get_clk_rate)
+		return -EOPNOTSUPP;
+	dsi = encoder_to_sun6i_dsi(encoder);
+	device = dsi->device;
+	if (!device || !(device->mode_flags & MIPI_DSI_MODE_VIDEO))
+		return -EOPNOTSUPP; /* Command-mode TE/refresh is not implemented. */
+	bpp = mipi_dsi_pixel_format_to_bpp(device->format);
+	if (bpp <= 0 || !device->lanes || device->lanes > 4 ||
+	    bpp % device->lanes ||
+	    mode->crtc_clock <= 0 || mode->crtc_clock % 1000 ||
+	    mode->crtc_clock / 1000 > 4095 / 15 ||
+	    mode->crtc_hdisplay <= 0 || mode->crtc_vdisplay <= 0 ||
+	    mode->crtc_htotal <= 0 || mode->crtc_vtotal <= 0 ||
+	    mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN))
+		return -EINVAL;
+	rate = engine->ops->get_clk_rate(engine);
+	if (!rate || rate / 1000000 > U32_MAX)
+		return -ERANGE;
+	timing = (struct sun50i_a133_tcon_timing) {
+		.width = mode->crtc_hdisplay, .height = mode->crtc_vdisplay,
+		.htotal = mode->crtc_htotal, .vtotal = mode->crtc_vtotal,
+		.de_mhz = rate / 1000000, .pixel_mhz = mode->crtc_clock / 1000,
+		.pixel_bits = bpp, .lanes = device->lanes,
+		.tcon_div = SUN6I_DSI_TCON_DIV,
+	};
+	return sun50i_a133_tcon_calc_trigger(&timing, trigger);
+}
+
+int sun4i_tcon_atomic_check(struct sun4i_tcon *tcon,
+			   struct drm_crtc_state *state)
+{
+	struct sun50i_a133_tcon_trigger trigger;
+	struct drm_encoder *encoder;
+	unsigned int count = 0;
+	int ret;
+
+	if (!tcon->quirks->a133_dsi_timing || !state->enable)
+		return 0;
+	drm_for_each_encoder_mask(encoder, tcon->drm, state->encoder_mask) {
+		if (++count > 1)
+			return -EINVAL;
+		ret = sun50i_a133_tcon_prepare(tcon, encoder, &state->adjusted_mode,
+					   &trigger);
+		if (ret)
+			return ret;
+	}
+	return count == 1 ? 0 : -EINVAL;
+}
+
 static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
 				     const struct drm_encoder *encoder,
 				     const struct drm_display_mode *mode)
@@ -354,14 +422,35 @@ static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
 	u8 lanes = device->lanes;
 	u32 block_space, start_delay;
 	u32 tcon_div;
+	unsigned long requested_dclk;
+	struct sun50i_a133_tcon_trigger trigger;
+	int ret;
+
+	if (tcon->quirks->a133_dsi_timing) {
+		tcon->a133_mode_valid = false;
+		ret = sun50i_a133_tcon_prepare(tcon, encoder, mode, &trigger);
+		if (ret) {
+			dev_err(tcon->dev, "A133 trigger validation failed: %d\n", ret);
+			return;
+		}
+	}
 
 	/*
 	 * dclk is required to run at 1/4 the DSI per-lane bit rate.
 	 */
 	tcon->dclk_min_div = SUN6I_DSI_TCON_DIV;
 	tcon->dclk_max_div = SUN6I_DSI_TCON_DIV;
-	clk_set_rate(tcon->dclk, mode->crtc_clock * 1000 * (bpp / lanes)
-						  / SUN6I_DSI_TCON_DIV);
+	requested_dclk = (unsigned long)mode->crtc_clock * 1000 *
+			 (bpp / lanes) / SUN6I_DSI_TCON_DIV;
+	ret = clk_set_rate(tcon->dclk, requested_dclk);
+	if (ret && tcon->quirks->a133_dsi_timing)
+		return;
+	if (tcon->quirks->a133_dsi_timing) {
+		ret = regmap_read(tcon->regs, SUN4I_TCON0_DCLK_REG, &tcon_div);
+		if (ret || clk_get_rate(tcon->dclk) != requested_dclk ||
+		    (tcon_div & GENMASK(6, 0)) != SUN6I_DSI_TCON_DIV)
+			return;
+	}
 
 	/* Set the resolution */
 	regmap_write(tcon->regs, SUN4I_TCON0_BASIC0_REG,
@@ -380,9 +469,25 @@ static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
 
 	regmap_write(tcon->regs, SUN4I_TCON0_CPU_IF_REG,
 		     SUN4I_TCON0_CPU_IF_MODE_DSI |
-		     SUN4I_TCON0_CPU_IF_TRI_FIFO_FLUSH |
+		     (tcon->quirks->a133_dsi_timing ? 0 :
+		      SUN4I_TCON0_CPU_IF_TRI_FIFO_FLUSH) |
 		     SUN4I_TCON0_CPU_IF_TRI_FIFO_EN |
 		     SUN4I_TCON0_CPU_IF_TRI_EN);
+
+	if (tcon->quirks->a133_dsi_timing) {
+		/* Raw vendor fields: the legacy BLOCK_SPACE macro subtracts one. */
+		regmap_write(tcon->regs, SUN4I_TCON0_CPU_TRI0_REG,
+			     trigger.block_space << 16 | trigger.block_size);
+		regmap_write(tcon->regs, SUN4I_TCON0_CPU_TRI1_REG,
+			     trigger.block_num);
+		regmap_write(tcon->regs, SUN4I_TCON0_CPU_TRI2_REG,
+			     trigger.start_delay << 16 | trigger.trans_start_set);
+		regmap_write(tcon->regs, SUN4I_TCON_SAFE_PERIOD_REG,
+			     SUN4I_TCON_SAFE_PERIOD_NUM(mode->crtc_clock / 1000 * 15) |
+			     SUN4I_TCON_SAFE_PERIOD_MODE(3));
+		tcon->a133_mode_valid = true;
+		goto output;
+	}
 
 	/*
 	 * This looks suspicious, but it works...
@@ -417,6 +522,7 @@ static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
 		     SUN4I_TCON_SAFE_PERIOD_NUM(3000) |
 		     SUN4I_TCON_SAFE_PERIOD_MODE(3));
 
+output:
 	/* Enable the output on the pins */
 	regmap_write(tcon->regs, SUN4I_TCON0_IO_TRI_REG,
 		     0xe0000000);
@@ -1547,7 +1653,13 @@ static const struct sun4i_tcon_quirks sun20i_d1_lcd_quirks = {
 };
 
 /* sun4i_drv uses this list to check if a device node is a TCON */
+static const struct sun4i_tcon_quirks sun50i_a133_lcd_quirks = {
+	.has_channel_0 = true,
+	.a133_dsi_timing = true,
+};
+
 const struct of_device_id sun4i_tcon_of_table[] = {
+	{ .compatible = "allwinner,sun50i-a133-tcon-lcd", .data = &sun50i_a133_lcd_quirks },
 	{ .compatible = "allwinner,sun4i-a10-tcon", .data = &sun4i_a10_quirks },
 	{ .compatible = "allwinner,sun5i-a13-tcon", .data = &sun5i_a13_quirks },
 	{ .compatible = "allwinner,sun6i-a31-tcon", .data = &sun6i_a31_quirks },

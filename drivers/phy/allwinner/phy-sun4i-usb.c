@@ -100,6 +100,9 @@ struct sun4i_usb_phy_cfg {
 	int hsic_index;
 	u32 disc_thresh;
 	u32 hci_phy_ctl_clear;
+	u32 phy0_ctl_clear;
+	u32 phy0_ctl_init_clear;
+	bool needs_phy1_clock;
 	u8 phyctl_offset;
 	bool dedicated_clocks;
 	bool phy0_dual_route;
@@ -115,6 +118,7 @@ struct sun4i_usb_phy_data {
 	enum usb_dr_mode dr_mode;
 	spinlock_t reg_lock; /* guard access to phyctl reg */
 	int num_phys;
+	struct reset_control *phy1_bus_reset;
 	struct sun4i_usb_phy {
 		struct phy *phy;
 		void __iomem *pmu;
@@ -253,6 +257,47 @@ static void sun4i_usb_phy_passby(struct sun4i_usb_phy *phy, int enable)
 	writel(reg_value, phy->pmu);
 }
 
+/* Brick-only auxiliary clocks; PHY1 is not exposed to consumers. */
+static int sun4i_usb_phy1_clock_enable(struct sun4i_usb_phy_data *data)
+{
+	struct sun4i_usb_phy *phy1 = &data->phys[1];
+	int ret;
+
+	ret = clk_prepare_enable(phy1->clk2);
+	if (ret)
+		return ret;
+	ret = reset_control_deassert(data->phy1_bus_reset);
+	if (ret)
+		goto disable_bus_clock;
+	ret = clk_prepare_enable(phy1->clk);
+	if (ret)
+		goto assert_bus_reset;
+	ret = reset_control_deassert(phy1->reset);
+	if (ret)
+		goto disable_phy_clock;
+	return 0;
+
+disable_phy_clock:
+	clk_disable_unprepare(phy1->clk);
+assert_bus_reset:
+	reset_control_assert(data->phy1_bus_reset);
+disable_bus_clock:
+	clk_disable_unprepare(phy1->clk2);
+	return ret;
+}
+
+static void sun4i_usb_phy1_clock_disable(struct sun4i_usb_phy_data *data)
+{
+	struct sun4i_usb_phy *phy1 = &data->phys[1];
+
+	reset_control_assert(phy1->reset);
+	clk_disable_unprepare(phy1->clk);
+	reset_control_assert(data->phy1_bus_reset);
+	clk_disable_unprepare(phy1->clk2);
+}
+
+static void sun4i_usb_phy0_reroute(struct sun4i_usb_phy_data *data, int id_det);
+
 static int sun4i_usb_phy_init(struct phy *_phy)
 {
 	struct sun4i_usb_phy *phy = phy_get_drvdata(_phy);
@@ -275,6 +320,18 @@ static int sun4i_usb_phy_init(struct phy *_phy)
 		clk_disable_unprepare(phy->clk2);
 		clk_disable_unprepare(phy->clk);
 		return ret;
+	}
+
+	if (data->cfg->needs_phy1_clock && phy->index == 0) {
+		ret = sun4i_usb_phy1_clock_enable(data);
+		if (ret) {
+			reset_control_assert(phy->reset);
+			clk_disable_unprepare(phy->clk2);
+			clk_disable_unprepare(phy->clk);
+			return ret;
+		}
+		/* Stock waits again once all four USB clocks are enabled. */
+		udelay(10);
 	}
 
 	/* Some PHYs on some SoCs need the help of PHY2 to work. */
@@ -330,6 +387,7 @@ static int sun4i_usb_phy_init(struct phy *_phy)
 	if (data->cfg->siddq_in_base) {
 		if (phy->index == 0) {
 			val = readl(data->base + data->cfg->phyctl_offset);
+			val &= ~data->cfg->phy0_ctl_init_clear;
 			val |= PHY_CTL_VBUSVLDEXT;
 			val &= ~PHY_CTL_SIDDQ;
 			writel(val, data->base + data->cfg->phyctl_offset);
@@ -355,6 +413,30 @@ static int sun4i_usb_phy_init(struct phy *_phy)
 		/* Enable pull-ups */
 		sun4i_usb_phy0_update_iscr(_phy, 0, ISCR_DPDM_PULLUP_EN);
 		sun4i_usb_phy0_update_iscr(_phy, 0, ISCR_ID_PULLUP_EN);
+
+		/* Board diagnostic quirk, recovered from the stock USB init. */
+		if (data->cfg->phy0_ctl_clear) {
+			/* Match stock ordering before clearing the control bit. */
+			sun4i_usb_phy0_set_id_detect(_phy, 1);
+			sun4i_usb_phy0_set_vbus_detect(_phy, 1);
+			sun4i_usb_phy0_reroute(data, 1);
+			val = readl(data->base + data->cfg->phyctl_offset);
+			writel(val & ~data->cfg->phy0_ctl_clear,
+			       data->base + data->cfg->phyctl_offset);
+			dev_info(&_phy->dev, "stock PHY0 control: %#x -> %#x\n",
+				 val, readl(data->base + data->cfg->phyctl_offset));
+		}
+		if (data->cfg->needs_phy1_clock) {
+			void __iomem *phy1_ctl = data->phys[1].pmu + REG_HCI_PHY_CTL;
+
+			/* Stock device_enable/resume clears PHY1 SIDDQ after
+			 * PHY0 setup. Clocks alone leave this analog block off.
+			 */
+			val = readl(phy1_ctl);
+			writel(val & ~data->cfg->hci_phy_ctl_clear, phy1_ctl);
+			dev_info(&_phy->dev, "stock PHY1 control: %#x -> %#x\n",
+				 val, readl(phy1_ctl));
+		}
 
 		/* Force ISCR and cable state updates */
 		data->id_det = -1;
@@ -395,6 +477,9 @@ static int sun4i_usb_phy_exit(struct phy *_phy)
 	reset_control_assert(phy->reset);
 	clk_disable_unprepare(phy->clk2);
 	clk_disable_unprepare(phy->clk);
+
+	if (data->cfg->needs_phy1_clock && phy->index == 0)
+		sun4i_usb_phy1_clock_disable(data);
 
 	return 0;
 }
@@ -686,6 +771,10 @@ static struct phy *sun4i_usb_phy_xlate(struct device *dev,
 {
 	struct sun4i_usb_phy_data *data = dev_get_drvdata(dev);
 
+	/* Auxiliary PHY1 is reserved for the Brick PHY0 clock dependency. */
+	if (data->cfg->needs_phy1_clock && args->args[0] != 0)
+		return ERR_PTR(-ENODEV);
+
 	if (args->args[0] >= data->num_phys)
 		return ERR_PTR(-ENODEV);
 
@@ -766,7 +855,11 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 	}
 
 	data->dr_mode = of_usb_get_dr_mode_by_phy(np, 0);
-
+	if (data->cfg->needs_phy1_clock &&
+	    (data->dr_mode != USB_DR_MODE_PERIPHERAL ||
+	     data->vbus_det_gpio || data->vbus_power_supply))
+		return dev_err_probe(dev, -EINVAL,
+				     "Brick PHY requires fixed peripheral mode without VBUS detection\n");
 	data->extcon = devm_extcon_dev_allocate(dev, sun4i_usb_phy0_cable);
 	if (IS_ERR(data->extcon)) {
 		dev_err(dev, "Couldn't allocate our extcon device\n");
@@ -854,6 +947,16 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 		phy_set_drvdata(phy->phy, &data->phys[i]);
 	}
 	data->num_phys = i;
+	if (data->cfg->needs_phy1_clock) {
+		if (data->num_phys < 2 || !data->phys[1].clk2)
+			return dev_err_probe(dev, -EINVAL,
+					     "Brick PHY requires PHY1 and pmu1_clk\n");
+		data->phy1_bus_reset = devm_reset_control_get_exclusive(dev,
+								"usb1_bus_reset");
+		if (IS_ERR(data->phy1_bus_reset))
+			return dev_err_probe(dev, PTR_ERR(data->phy1_bus_reset),
+					     "Missing Brick PHY1 bus reset\n");
+	}
 
 	data->id_det_irq = gpiod_to_irq(data->id_det_gpio);
 	if (data->id_det_irq > 0) {
@@ -987,6 +1090,21 @@ static const struct sun4i_usb_phy_cfg sun20i_d1_cfg = {
 	.siddq_in_base = true,
 };
 
+/* Experimental Brick-only variant: bit 1 meaning is not yet documented.
+ * Stock sunxi_udc_bsp_init calls USBC_PHY_Clear_Ctl(base, 1), clearing
+ * USB base + 0x410 bit 1. Do not apply this to other D1-compatible boards.
+ */
+static const struct sun4i_usb_phy_cfg trimui_brick_cfg = {
+	.phyctl_offset = REG_PHYCTL_A33,
+	.dedicated_clocks = true,
+	.hci_phy_ctl_clear = PHY_CTL_SIDDQ,
+	.phy0_dual_route = true,
+	.siddq_in_base = true,
+	.phy0_ctl_clear = BIT(1),
+	.phy0_ctl_init_clear = BIT(7), /* Stock open_usb_clock operation. */
+	.needs_phy1_clock = true,
+};
+
 static const struct sun4i_usb_phy_cfg sun50i_a64_cfg = {
 	.disc_thresh = 3,
 	.phyctl_offset = REG_PHYCTL_A33,
@@ -1014,6 +1132,7 @@ static const struct sun4i_usb_phy_cfg sun50i_h616_cfg = {
 };
 
 static const struct of_device_id sun4i_usb_phy_of_match[] = {
+	{ .compatible = "trimui,brick-usb-phy", .data = &trimui_brick_cfg },
 	{ .compatible = "allwinner,sun4i-a10-usb-phy", .data = &sun4i_a10_cfg },
 	{ .compatible = "allwinner,sun5i-a13-usb-phy", .data = &sun5i_a13_cfg },
 	{ .compatible = "allwinner,sun6i-a31-usb-phy", .data = &sun6i_a31_cfg },
