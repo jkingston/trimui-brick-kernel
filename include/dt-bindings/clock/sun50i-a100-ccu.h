@@ -7,6 +7,8 @@
 #define _DT_BINDINGS_CLK_SUN50I_A100_H_
 
 #define CLK_PLL_PERIPH0		3
+#define CLK_PLL_PERIPH0_2X	4
+#define CLK_PLL_VIDEO0_4X	10
 
 #define CLK_CPUX		24
 

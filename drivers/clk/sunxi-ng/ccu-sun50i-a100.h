@@ -15,13 +15,11 @@
 
 /* PLL_PERIPH0 exported for PRCM */
 
-#define CLK_PLL_PERIPH0_2X	4
 #define CLK_PLL_PERIPH1		5
 #define CLK_PLL_PERIPH1_2X	6
 #define CLK_PLL_GPU		7
 #define CLK_PLL_VIDEO0		8
 #define CLK_PLL_VIDEO0_2X	9
-#define CLK_PLL_VIDEO0_4X	10
 #define CLK_PLL_VIDEO1		11
 #define CLK_PLL_VIDEO1_2X	12
 #define CLK_PLL_VIDEO1_4X	13
