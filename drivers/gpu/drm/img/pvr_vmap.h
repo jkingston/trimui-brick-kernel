@@ -51,7 +51,7 @@
 
 
 
-#ifndef CACHE_TEST
+#if defined(CONFIG_RISCV) && !defined(CACHE_TEST)
 #define RISCV_STARFIVE_CACHE_COHERENT_FIX
 #endif
 #ifndef RISCV_STARFIVE_CACHE_COHERENT_FIX
@@ -70,6 +70,14 @@ static inline void *pvr_vmap(struct page **pages,
 	else
 		return vmap(pages, count, flags, prot);
 #endif /* !defined(CONFIG_64BIT) || defined(PVRSRV_FORCE_SLOWER_VMAP_ON_64BIT_BUILDS) */
+}
+
+/* On ARM64 the pgprot argument already selects the CPU cache policy;
+ * there is no StarFive cached/noncached physical-address alias. */
+static inline void *pvr_vmap_cached(struct page **pages, unsigned int count,
+                                  unsigned long flags, pgprot_t prot)
+{
+	return pvr_vmap(pages, count, flags, prot);
 }
 
 static inline void pvr_vunmap(void *pages,

@@ -567,4 +567,16 @@ struct dma_buf_map {
 	#endif
 #endif
 
+/* API adapters validated against Linux 7.3 headers. Keep changes scoped to
+ * this explicit target until older release boundaries are verified. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+/* Modern DRM has no legacy global ioctl lock or DRM_UNLOCKED flag. */
+#define DRM_UNLOCKED 0
+#define from_timer(var, timer, member) timer_container_of(var, timer, member)
+#define del_timer_sync(timer) timer_delete_sync(timer)
+#define pvr_vm_flags_set(vma, flags) vm_flags_set(vma, flags)
+#else
+#define pvr_vm_flags_set(vma, flags) ((vma)->vm_flags |= (flags))
+#endif
+
 #endif /* __KERNEL_COMPATIBILITY_H__ */
