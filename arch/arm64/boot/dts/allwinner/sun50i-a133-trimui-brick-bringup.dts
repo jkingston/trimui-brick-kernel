@@ -7,7 +7,7 @@
  *
  * Memory size/address MUST be populated by the validated bootloader's DRAM
  * fixup; deliberately not inferred from advertised RAM. Supply an initramfs.
- * PMIC/regulator bindings omitted until rail wiring is verified. This relies
+ * PMIC control is omitted. The SD fixed supply describes stock CLDO3. This relies
  * on bootloader-established rails. No GPU/display/input support claimed.
  */
 /dts-v1/;
@@ -19,6 +19,17 @@
 		serial0 = &uart0;
 		mmc0 = &mmc0;
 	};
+	/* Stock SD0 vmmc is CLDO3 at 3.3V. SPL programs and retains this rail.
+	 * No GPIO or PMIC control: describe its fixed voltage for MMC OCR.
+	 */
+	reg_sd_3v3: regulator-sd-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "sd-cldo3-boot-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
@@ -29,6 +40,7 @@
 	status = "okay";
 };
 &mmc0 {
+	vmmc-supply = <&reg_sd_3v3>;
 	bus-width = <4>;
 	broken-cd;
 	/* Conservative SD default-speed bring-up; no UHS voltage switching. */

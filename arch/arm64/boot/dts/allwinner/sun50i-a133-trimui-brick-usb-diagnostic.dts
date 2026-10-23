@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* USB-only development variant. Not device-tested. Inherits disabled eMMC.
+ * Live stock evidence: UDC at0x05100000, IRQ32; upstream A100 USB definitions.
+ * Fixed peripheral role: no host VBUS supply or guessed ID/PMIC GPIO writes.
+ * No VBUS detector supplied: upstream PHY fallback assumes VBUS present.
+ * Board routing/rails rely on boot-established state until verified.
+ */
+#include "sun50i-a133-trimui-brick-bringup.dts"
+#include <dt-bindings/gpio/gpio.h>
+/ {
+    model = "TrimUI Brick (experimental USB diagnostic)";
+};
+&usb_otg {
+    compatible = "trimui,brick-musb", "allwinner,sun8i-a33-musb";
+    dr_mode = "peripheral";
+    status = "okay";
+};
+&usbphy {
+    /* Local stock-alignment experiment; host controllers remain disabled. */
+    compatible = "trimui,brick-usb-phy", "allwinner,sun20i-d1-usb-phy";
+    clocks = <&ccu CLK_USB_PHY0>, <&ccu CLK_USB_PHY1>, <&ccu CLK_BUS_EHCI1>;
+    clock-names = "usb0_phy", "usb1_phy", "pmu1_clk";
+    resets = <&ccu RST_USB_PHY0>, <&ccu RST_USB_PHY1>, <&ccu RST_BUS_EHCI1>;
+    reset-names = "usb0_reset", "usb1_reset", "usb1_bus_reset";
+    status = "okay";
+};
+&ehci0 { status = "disabled"; };
+&ohci0 { status = "disabled"; };
+&ehci1 { status = "disabled"; };
+&ohci1 { status = "disabled"; };
+
+
+/* Two userspace milestones only; PH3 motor wiring confirmed on this unit. */
+/ {
+    diagnostic_motor {
+        compatible = "gpio-leds";
+        motor {
+            label = "brick-status-motor";
+            gpios = <&pio 7 3 GPIO_ACTIVE_HIGH>;
+            default-state = "off";
+        };
+    };
+};
