@@ -528,7 +528,7 @@ static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
 output:
 	/* Enable the output on the pins */
 	regmap_write(tcon->regs, SUN4I_TCON0_IO_TRI_REG,
-		     0xe0000000);
+		     tcon->quirks->a133_dsi_timing ? 0 : 0xe0000000);
 }
 
 static void sun4i_tcon0_mode_set_lvds(struct sun4i_tcon *tcon,
