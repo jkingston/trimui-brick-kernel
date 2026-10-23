@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-only
 config DRM_IMG_ROGUE
-	bool "DRM support for PowerVR GPU"
-	select DRM_IMG
-	default n
+	tristate "PowerVR GE8300 vendor driver for Allwinner A133"
+	depends on DRM && ARM64 && ARCH_SUNXI
+	select FW_LOADER
 	help
-	  Enable img powerVR GPU
+	  Vendor DDK 1.19 driver for the GE8300 (BVNC 22.102.54.38).
+	  Requires matching firmware and userspace libraries.

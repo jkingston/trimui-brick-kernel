@@ -867,3 +867,11 @@ config PWM_XILINX
 	  allowing driver logic to be written in safe Rust.
 
 endif
+
+config PWM_SUN50I_A133
+	tristate "Allwinner A133 backlight PWM"
+	depends on ARCH_SUNXI || COMPILE_TEST
+	depends on COMMON_CLK && OF
+	help
+	  Channel zero at 50 kHz for the TrimUI Brick backlight.
+	  Other channels, rates and suspend are not supported.

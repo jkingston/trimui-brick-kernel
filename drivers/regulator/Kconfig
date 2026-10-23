@@ -1897,3 +1897,11 @@ config REGULATOR_QCOM_LABIBB
 	  for LCD display panel.
 
 endif
+
+config REGULATOR_TRIMUI_BRICK_PANEL
+	tristate "TrimUI Brick panel supplies"
+	depends on I2C && OF
+	select REGMAP_I2C
+	help
+	  Fixed-voltage CLDO1/CLDO4 support for the Brick panel.
+	  Preserves shared CLDO1; does not configure charging or voltages.
