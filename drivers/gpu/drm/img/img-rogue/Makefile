@@ -57,10 +57,10 @@ INTERNAL_EXTRA_KBUILD_OBJECTS=""
 TOP:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))
 TOP:=$(TOP:/=)
 BRIDGE_SOURCE_ROOT=$(TOP)/generated/rogue
-TARGET_PRIMARY_ARCH=target_riscv64
+TARGET_PRIMARY_ARCH ?= target_riscv64
 PVR_ARCH=rogue
 PVR_ARCH_DEFS=rogue
-PVR_SYSTEM := sf_7110
+PVR_SYSTEM ?= sf_7110
 #PDUMP ?= 1
 BUILD ?= release
 RGX_BVNC ?= 36.50.54.182
@@ -71,9 +71,12 @@ PVR_SERVICES_DEBUG=1
 WINDOW_SYSTEM=nulldrmws
 
 #include $(OUT)/config_kernel.mk
-include $(srctree)/$(src)/config_kernel.mk
+include $(TOP)/config_kernel.mk
+ifeq ($(PVR_SYSTEM),rgx_sunxi)
+ccflags-y += -DPVR_PLATFORM_BRICK
+endif
 
-.SECONDARY:
+# Intermediate object lifetime is managed by the enclosing kernel Kbuild.
 
 define symlink-source-file
 @if [ ! -e $(dir $@) ]; then mkdir -p $(dir $@); fi
@@ -94,15 +97,16 @@ bridge_base := $(BRIDGE_SOURCE_ROOT)
 #ccflags-y += -D__linux__ -include $(OUT)/config_kernel.h \
 # -include kernel_config_compatibility.h \
 # -I$(OUT)/include -I$(TOP)/kernel/drivers/staging/imgtec
-ccflags-y += -D__linux__ -include $(srctree)/$(src)/config_kernel.h \
- -include $(srctree)/drivers/gpu/drm/img/kernel_config_compatibility.h \
+ccflags-y += -D__linux__ -include $(TOP)/config_kernel.h \
+ -include $(TOP)/../pvr_string_compat.h \
+ -include $(TOP)/../kernel_config_compatibility.h \
  -I$(OUT)/include \
- -I$(srctree)/drivers/gpu/drm/img \
- -I$(srctree)/$(src)/hwdefs/rogue \
- -I$(srctree)/$(src)/hwdefs/rogue/km
+ -I$(TOP)/.. \
+ -I$(TOP)/hwdefs/rogue \
+ -I$(TOP)/hwdefs/rogue/km
 
-include $(srctree)/$(src)/services/server/env/linux/Kbuild.mk
-include $(srctree)/$(src)/services/system/rogue/sf_7110/Kbuild.mk
+include $(TOP)/services/server/env/linux/Kbuild.mk
+include $(TOP)/services/system/rogue/$(PVR_SYSTEM)/Kbuild.mk
 
 #include $(INTERNAL_KBUILD_MAKEFILES)
 

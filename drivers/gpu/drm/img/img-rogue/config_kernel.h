@@ -209,3 +209,23 @@
 #define RGX_NUM_DRIVERS_SUPPORTED 1
 #define RGX_VZ_CONNECTION_TIMEOUT_US 60000000
 #define SUPPORT_RGXKICKSYNC_BRIDGE
+
+/* Brick bring-up overrides; stock configuration equivalence still requires
+ * build-option/firmware-interface checks beyond bridge layout equality. */
+#if defined(PVR_PLATFORM_BRICK)
+#undef PVR_BUILD_DIR
+#define PVR_BUILD_DIR "rgx_sunxi"
+#undef RGX_BVNC_CORE_KM_HEADER
+#define RGX_BVNC_CORE_KM_HEADER "cores/rgxcore_km_22.102.54.38.h"
+#undef RGX_BNC_CONFIG_KM_HEADER
+#define RGX_BNC_CONFIG_KM_HEADER "configs/rgxconfig_km_22.V.54.38.h"
+#define PVR_LDM_PLATFORM_PRE_REGISTERED 1
+#undef SUPPORT_NATIVE_FENCE_SYNC
+#undef SUPPORT_BUFFER_SYNC
+#undef SUPPORT_DMA_FENCE
+#define SUPPORT_DISPLAY_CLASS 1
+#define SUPPORT_FALLBACK_FENCE_SYNC 1
+#define PVR_USE_FENCE_SYNC_MODEL 1
+/* Stock firmware has one geometry core; AGP changes shared command layouts. */
+#undef SUPPORT_AGP
+#endif

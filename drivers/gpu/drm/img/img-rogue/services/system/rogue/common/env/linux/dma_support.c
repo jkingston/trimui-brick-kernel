@@ -58,7 +58,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 static IMG_BOOL gbEnableDmaIoRemapping = IMG_FALSE;
 static DMA_ALLOC gsDmaIoRemapArray[DMA_MAX_IOREMAP_ENTRIES] = {{0}};
 
+#if defined(CONFIG_RISCV)
 extern void do_invalid_range(unsigned long start, unsigned long len);
+#endif
 
 static void*
 SysDmaAcquireKernelAddress(struct page *psPage, IMG_UINT64 ui64Size, DMA_ALLOC *psDmaAlloc)
@@ -140,7 +142,9 @@ SysDmaAcquireKernelAddress(struct page *psPage, IMG_UINT64 ui64Size, DMA_ALLOC *
 		}
 	}
 
+#if defined(CONFIG_RISCV)
     do_invalid_range(0x0, 0x200000);
+#endif
 
 	/* Remap pages into VMALLOC space */
 	pvVirtAddr = pvr_vmap(pagearray, ui32PgCount, VM_MAP, prot);

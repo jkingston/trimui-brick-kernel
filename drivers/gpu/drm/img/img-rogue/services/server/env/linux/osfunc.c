@@ -69,7 +69,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/utsname.h>
 #include <linux/scatterlist.h>
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-#include <linux/pfn_t.h>
+#include "pvr_pfn_compat.h"
 #include <linux/pfn.h>
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) */
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0))
@@ -1733,7 +1733,7 @@ PVRSRV_ERROR OSChangeSparseMemCPUAddrMap(void **psPageArray,
                                          IMG_BOOL bIsLMA)
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-	pfn_t sPFN;
+	pvr_pfn_t sPFN;
 #else
 	IMG_UINT64 uiPFN;
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) */
@@ -1796,7 +1796,7 @@ PVRSRV_ERROR OSChangeSparseMemCPUAddrMap(void **psPageArray,
 
 	if ((psVMA->vm_flags & VM_MIXEDMAP) || bIsLMA)
 	{
-		psVMA->vm_flags |= VM_MIXEDMAP;
+		pvr_vm_flags_set(psVMA, VM_MIXEDMAP);
 		bMixedMap = IMG_TRUE;
 	}
 	else
@@ -1808,9 +1808,9 @@ PVRSRV_ERROR OSChangeSparseMemCPUAddrMap(void **psPageArray,
 
 				psPage = (struct page *)psPageArray[pai32AllocIndices[ui32Loop]];
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-				sPFN = page_to_pfn_t(psPage);
+				sPFN = pvr_page_to_pfn(psPage);
 
-				if (!pfn_t_valid(sPFN) || page_count(pfn_t_to_page(sPFN)) == 0)
+				if (!pvr_pfn_valid(sPFN) || page_count(pvr_pfn_to_page(sPFN)) == 0)
 #else
 				uiPFN = page_to_pfn(psPage);
 
@@ -1818,7 +1818,7 @@ PVRSRV_ERROR OSChangeSparseMemCPUAddrMap(void **psPageArray,
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) */
 				{
 					bMixedMap = IMG_TRUE;
-					psVMA->vm_flags |= VM_MIXEDMAP;
+					pvr_vm_flags_set(psVMA, VM_MIXEDMAP);
 					break;
 				}
 			}
@@ -1840,8 +1840,8 @@ PVRSRV_ERROR OSChangeSparseMemCPUAddrMap(void **psPageArray,
 				phys_addr_t uiAddr = sCpuPAHeapBase.uiAddr +
 				                     ((IMG_DEV_PHYADDR *)psPageArray)[pai32AllocIndices[ui32Loop]].uiAddr;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-				sPFN = phys_to_pfn_t(uiAddr, 0);
-				psPage = pfn_t_to_page(sPFN);
+				sPFN = pvr_phys_to_pfn(uiAddr);
+				psPage = pvr_pfn_to_page(sPFN);
 #else
 				uiPFN = uiAddr >> PAGE_SHIFT;
 				psPage = pfn_to_page(uiPFN);
@@ -1851,7 +1851,7 @@ PVRSRV_ERROR OSChangeSparseMemCPUAddrMap(void **psPageArray,
 			{
 				psPage = (struct page *)psPageArray[pai32AllocIndices[ui32Loop]];
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-				sPFN = page_to_pfn_t(psPage);
+				sPFN = pvr_page_to_pfn(psPage);
 #else
 				uiPFN = page_to_pfn(psPage);
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) */

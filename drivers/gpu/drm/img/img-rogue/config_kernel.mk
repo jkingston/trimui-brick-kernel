@@ -3,9 +3,9 @@ override HOST_PRIMARY_ARCH := host_x86_64
 override HOST_32BIT_ARCH := host_i386
 override HOST_FORCE_32BIT := -m32
 override HOST_ALL_ARCH := host_x86_64 host_i386
-override TARGET_PRIMARY_ARCH := target_riscv64
+override TARGET_PRIMARY_ARCH := $(if $(filter arm64,$(ARCH)),target_aarch64,target_riscv64)
 override TARGET_SECONDARY_ARCH :=
-override TARGET_ALL_ARCH := target_riscv64
+override TARGET_ALL_ARCH := $(TARGET_PRIMARY_ARCH)
 override TARGET_FORCE_32BIT :=
 override PVR_ARCH := rogue
 override METAG_VERSION_NEEDED := 2.8.1.0.3
@@ -22,7 +22,7 @@ override PVR_BUILD_DIR := sf_7110
 override PVR_BUILD_TYPE := release
 override SUPPORT_RGX := 1
 override DISPLAY_CONTROLLER := drm_starfive
-override PVR_SYSTEM := sf_7110
+PVR_SYSTEM ?= sf_7110
 override PVR_LOADER :=
 override BUILD := release
 override SORT_BRIDGE_STRUCTS := 1
@@ -56,3 +56,13 @@ override RGX_NUM_OS_SUPPORTED := 1
 override RGX_FW_HEAP_OSID_ASSIGNMENT := RGX_FW_HEAP_USES_FIRMWARE_OSID
 override RGX_NUM_DRIVERS_SUPPORTED := 1
 override SUPPORT_RGXKICKSYNC_BRIDGE := 1
+
+ifeq ($(PVR_SYSTEM),rgx_sunxi)
+# Stock1.19 ELF contains dc_server and sync_fallback_server, not native fences.
+override SUPPORT_DISPLAY_CLASS := 1
+override SUPPORT_FALLBACK_FENCE_SYNC := 1
+override SUPPORT_NATIVE_FENCE_SYNC := 0
+override SUPPORT_BUFFER_SYNC := 0
+override SUPPORT_DMA_FENCE := 0
+override RGX_BNC := 22.V.54.38
+endif

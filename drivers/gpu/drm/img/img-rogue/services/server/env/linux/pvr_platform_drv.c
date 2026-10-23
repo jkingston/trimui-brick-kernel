@@ -66,7 +66,11 @@
 /* This header must always be included last */
 #include "kernel_compatibility.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
 MODULE_IMPORT_NS(DMA_BUF);
+#endif
 
 static struct drm_driver pvr_drm_platform_driver;
 
@@ -222,7 +226,11 @@ err_drm_dev_put:
 #endif
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+static void pvr_remove(struct platform_device *pdev)
+#else
 static int pvr_remove(struct platform_device *pdev)
+#endif
 {
 	struct drm_device *ddev = platform_get_drvdata(pdev);
 
@@ -241,7 +249,9 @@ static int pvr_remove(struct platform_device *pdev)
 #else
 	drm_put_dev(ddev);
 #endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
 	return 0;
+#endif
 }
 
 static void pvr_shutdown(struct platform_device *pdev)

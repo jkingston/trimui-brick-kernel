@@ -762,7 +762,9 @@ static PVRSRV_ERROR RGXWriteMetaRegThroughSP(const void *hPrivate, IMG_UINT32 ui
 }
 #endif
 
+#if defined(CONFIG_RISCV)
 extern void do_invalid_range(unsigned long start, unsigned long len);
+#endif
 /*
  * The fabric coherency test is performed when platform supports fabric coherency
  * either in the form of ACE-lite or Full-ACE. This test is done quite early
@@ -1018,7 +1020,9 @@ PVRSRV_ERROR RGXFabricCoherencyTest(const void *hPrivate)
 								sCpuPhyAddrStart,
 								sCpuPhyAddrEnd,
 								PVRSRV_CACHE_OP_INVALIDATE);
+#if defined(CONFIG_RISCV)
                         do_invalid_range(0x0, 0x200000);
+#endif
 					}
 				}
 				else

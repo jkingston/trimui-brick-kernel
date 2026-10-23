@@ -1,0 +1,67 @@
+A133 Linux7.x GPU platform candidate — NOT hardware validated
+
+Evidence inputs:
+1. Official TrimUI Brickv1.1.1-20251126 pvrsrvkm.ko:
+ SHA256ce2097f29c225e2b95333e15ed651b43552d8faa3a8c2cd41746227942544e12
+ DDK1.19@6345021, unstripped DWARF4.
+ SysDevInit disassembly saved in firmware/metadata/stock-SysDevInit.disasm.
+ At+0x44: DMA mask0x0000ffffffffffff.
+ At+0xd4..+0xf4: two64-byte heap configs, typeUMA(1),
+ first usage2 (GPU_LOCAL), second usage0x40000000(FW_SHARED).
+ At+0x108:100ms active latency. Identity address callbacks retained.
+ sunxi_platform_init disassembly directly confirms PPU0x07001000 size0x34
+ and DFS0x01880020 size4.
+2. Creality public Allwinner Linux4.9 source, original rgx_sunxi files:
+ gpu-driver/lichee/linux-4.9/modules/gpu/img-rgx/linux/rogue_km/services/system/rgx_sunxi
+ Original copyright/license retained. Source documents JTAG/GPU reset ordering
+ erratum and boot0 initialization requirement for early A133 revisions.
+ DFS formula is one-hot1<<(16-freq/(core/16)).
+3. Stock DTB hash e0172dcfdcf5850a096fe5f23ec64f09a694add22bea4ece2f93ba9cb68843ce:
+ GPU0x01800000 size0x80000, IRQGPU GIC_SPI97 levelhigh.
+ PPU separate power-domain consumes ppu clock. Modern clock binding translates
+ to CLK_GPU,CLK_BUS_GPU,CLK_R_APB1_PPU; this mapping needs physical validation.
+
+Implementation choices, NOT claims of equivalence:
+- Mainline names core,bus,ppu are required; no StarFive register aliases.
+- Retains boot-established PPU domain, inherited frequency and DFS.
+- Checks power status and timing; refuses initialization if inconsistent.
+- Does not alter regulator voltage, PLL rate or reset ordering.
+- ActivePM and DVFS intentionally disabled during bring-up; firmware internal
+  power islands enabled. System suspend explicitly returns failure rather than
+  claiming unimplemented resume works.
+- Pre/post callbacks keep platform domain powered. The empty post callback is
+  deliberate pinned-power policy, not hardware-emulation success.
+- Actual GPU submissions, firmware load, interrupts and memory management are
+  provided by the real vendor driver, not emulated/stubbed.
+- Hardware-dependent DMA/cache coherence and boot-retention assumptions are
+  unresolved until device tests. This candidate is not the finished OS.
+
+Build validation:
+ sysconfig.o compiled against actual Linux7.3 ARM64 headers with GCC14.3,
+ strict kernel warnings and no platform-warning suppressions.
+ Full module validation is coordinated with generic-driver work.
+
+Boot/resource prerequisites:
+- Mainline U-Boot may never initialize the GPU PPU as vendor boot0 does.
+  Do not assume a fresh SD-only mainline boot meets the retained-state gate.
+- clk_disable_unused can alter inherited clocks before module loading.
+  Diagnostic clk_ignore_unused may preserve evidence but is not a production
+  power solution. Capture PPU/DFS and clock state before/after kernel transition.
+- MMIO PPU/DFS ownership currently uses ioremap, not a shared regmap/domain
+  provider. Do not enable this driver alongside another PPU owner. A production
+  power-domain provider and managed resource ownership remain required work.
+
+Inherited-state preflight guards (2026-10-23):
+- Before clock enables or PPU/GPU register reads, inspect always-on CCU
+  GPU_BGR0x0300167c and R-CCU PPU_BGR0x0701017c bit16 reset release.
+  Addresses/bits are from Linux7.3 ccu-sun50i-a100{,-r}.c reset maps.
+- After PPU clock enable, require PPU internal reset+gate bit0 set, both
+  domain isolation bits clear, status3D, control modeHW2 and power-request
+  IRQ bit0 clear. These are vendor pm_domains.c plus
+  ppu_mode_switch(POWER_CTRL_MODE_HW,false) prerequisites; no writes added.
+- SW mode is rejected because this glue lacks the domain-B request IRQ
+  handler and acknowledgement. HW-mode acceptance is only a precondition,
+  not proof of GPU firmware functionality or board power sequencing.
+- Pinned reference: gpu-driver/port/reference/allwinner-4.9-pm_domains.c,
+  original Creality7f37a7fbf4ad59907034715e3d967b9177de1cd4.
+- DFS mapping/read is postponed until PPU validation and GPU clocks enabled.

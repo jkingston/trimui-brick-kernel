@@ -413,7 +413,13 @@ _GetPoolListHead(IMG_UINT32 ui32CPUCacheFlags,
 	return IMG_TRUE;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+static struct shrinker *g_psShrinker;
+#define PVR_PAGE_POOL_SHRINKER g_psShrinker
+#else
 static struct shrinker g_sShrinker;
+#define PVR_PAGE_POOL_SHRINKER (&g_sShrinker)
+#endif
 
 /* Returning the number of pages that still reside in the page pool. */
 static unsigned long
@@ -429,7 +435,7 @@ _CountObjectsInPagePool(struct shrinker *psShrinker, struct shrink_control *psSh
 {
 	int remain;
 
-	PVR_ASSERT(psShrinker == &g_sShrinker);
+	PVR_ASSERT(psShrinker == PVR_PAGE_POOL_SHRINKER);
 	(void)psShrinker;
 	(void)psShrinkControl;
 
@@ -449,7 +455,7 @@ _ScanObjectsInPagePool(struct shrinker *psShrinker, struct shrink_control *psShr
 	unsigned long uNumToScan = psShrinkControl->nr_to_scan;
 	IMG_UINT32 uiPagesFreed;
 
-	PVR_ASSERT(psShrinker == &g_sShrinker);
+	PVR_ASSERT(psShrinker == PVR_PAGE_POOL_SHRINKER);
 	(void)psShrinker;
 
 	/* In order to avoid possible deadlock use mutex_trylock in place of mutex_lock */
@@ -494,7 +500,7 @@ static struct shrinker g_sShrinker =
 	.shrink = _ShrinkPagePool,
 	.seeks = DEFAULT_SEEKS
 };
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
 static struct shrinker g_sShrinker =
 {
 	.count_objects = _CountObjectsInPagePool,
@@ -512,7 +518,21 @@ void LinuxInitPhysmem(void)
 	if (g_psLinuxPagePoolCache)
 	{
 		/* Only create the shrinker if we created the cache OK */
+		#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+		g_psShrinker = shrinker_alloc(0, "pvr-pp");
+		if (g_psShrinker) {
+			g_psShrinker->count_objects = _CountObjectsInPagePool;
+			g_psShrinker->scan_objects = _ScanObjectsInPagePool;
+			g_psShrinker->seeks = DEFAULT_SEEKS;
+			shrinker_register(g_psShrinker);
+		} else {
+			/* Disable caching if its reclaim callback cannot be registered. */
+			kmem_cache_destroy(g_psLinuxPagePoolCache);
+			g_psLinuxPagePoolCache = NULL;
+		}
+#else
 		register_shrinker(&g_sShrinker, "pvr-pp");
+#endif
 	}
 
 	OSAtomicWrite(&g_iPoolCleanTasks, 0);
@@ -542,6 +562,13 @@ void LinuxDeinitPhysmem(void)
 {
 	IMG_UINT32 uiPagesFreed;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	/* Drain registered callbacks before destroying their pool/cache. Do not
+	 * hold the page-pool lock while waiting for shrinker references. */
+	shrinker_free(g_psShrinker);
+	g_psShrinker = NULL;
+#endif
+
 	if (OSAtomicRead(&g_iPoolCleanTasks) > 0)
 	{
 		PVR_DPF((PVR_DBG_WARNING, "Still deferred cleanup tasks running "
@@ -561,7 +588,9 @@ void LinuxDeinitPhysmem(void)
 	/* Free the page cache */
 	kmem_cache_destroy(g_psLinuxPagePoolCache);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
 	unregister_shrinker(&g_sShrinker);
+#endif
 	_PagePoolUnlock();
 
 	kmem_cache_destroy(g_psLinuxPageArray);
@@ -1074,7 +1103,7 @@ _PutPagesToPoolLocked(IMG_UINT32 ui32CPUCacheFlags,
 
 		/* Check for number of current page pool entries and whether
 		 * we have other asynchronous tasks in-flight */
-		if ( (uiEntries < g_ui32PagePoolMaxEntries) &&
+		if (g_psLinuxPagePoolCache && (uiEntries < g_ui32PagePoolMaxEntries) &&
 		     ((uiEntries + uiNumPages) <
 		      (g_ui32PagePoolMaxEntries + g_ui32PagePoolMaxExcessEntries) ))
 		{

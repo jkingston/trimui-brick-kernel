@@ -86,6 +86,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "kerneldisplay.h"
 EXPORT_SYMBOL(DCRegisterDevice);
 EXPORT_SYMBOL(DCUnregisterDevice);
+EXPORT_SYMBOL(DCUnregisterDeviceChecked);
 EXPORT_SYMBOL(DCDisplayConfigurationRetired);
 EXPORT_SYMBOL(DCDisplayHasPendingCommand);
 EXPORT_SYMBOL(DCImportBufferAcquire);
@@ -361,7 +362,11 @@ void PVRSRVDeviceDeinit(PVRSRV_DEVICE_NODE *psDeviceNode)
 	PVRSRVDeInitialiseDMA(psDeviceNode);
 #endif
 
+/* Match Kbuild: no pvr_fence contexts exist in the stock-style fallback
+	 * fence build. Do not flush unrelated system work in that configuration. */
+#if defined(SUPPORT_BUFFER_SYNC) || (defined(SUPPORT_NATIVE_FENCE_SYNC) && defined(SUPPORT_DMA_FENCE))
 	pvr_fence_cleanup();
+#endif
 }
 
 /**************************************************************************/ /*!
@@ -461,6 +466,7 @@ int PVRSRVDeviceResume(struct drm_device *psDev)
 	return 0;
 }
 
+#if defined(CONFIG_RISCV)
 int sPVRSRVDeviceSuspend(PVRSRV_DEVICE_NODE *psDeviceNode)
 {
 	struct sf7110_cfg *sft = sys_get_privdata();
@@ -480,6 +486,8 @@ int sPVRSRVDeviceResume(PVRSRV_DEVICE_NODE *psDeviceNode)
 
 	return 0;
 }
+
+#endif /* StarFive runtime-PM callbacks */
 
 /**************************************************************************/ /*!
 @Function     PVRSRVDeviceServicesOpen

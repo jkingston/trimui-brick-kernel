@@ -1,0 +1,5 @@
+/* SPDX-License-Identifier: MIT OR GPL-2.0-only */
+#ifndef BRICK_SUNXI_SYSCONFIG_H
+#define BRICK_SUNXI_SYSCONFIG_H
+#define SYS_RGX_ACTIVE_POWER_LATENCY_MS 100
+#endif

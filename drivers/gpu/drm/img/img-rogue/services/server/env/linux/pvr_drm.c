@@ -110,6 +110,7 @@ static int pvr_pm_resume(struct device *dev)
 }
 
 
+#if defined(CONFIG_RISCV)
 static int pvr_pm_runtime_suspend(struct device *dev)
 {
 	struct drm_device *ddev = dev_get_drvdata(dev);
@@ -128,6 +129,8 @@ static int pvr_pm_runtime_resume(struct device *dev)
 	return 0;
 }
 
+
+#endif /* StarFive runtime-PM callbacks */
 
 /* Executed before the hibernation image is created. This callback allows to
  * preserve the content of the video RAM into the system RAM which in turn
@@ -196,8 +199,10 @@ const struct dev_pm_ops pvr_pm_ops = {
 	 */
 	.suspend = pvr_pm_suspend,
 	.resume = pvr_pm_resume,
+#if defined(CONFIG_RISCV)
         .runtime_suspend = pvr_pm_runtime_suspend,
         .runtime_resume = pvr_pm_runtime_resume,
+#endif
 
 
 	/* Hibernation (suspend-to-disk/S4) callbacks.
@@ -435,6 +440,10 @@ static long pvr_compat_ioctl(struct file *file, unsigned int cmd,
 #endif /* defined(CONFIG_COMPAT) */
 
 const struct file_operations pvr_drm_fops = {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
+	/* Linux 641bb4394f40 moved FMODE_UNSIGNED_OFFSET into fops. */
+	.fop_flags		= FOP_UNSIGNED_OFFSET,
+#endif
 	.owner			= THIS_MODULE,
 	.open			= drm_open,
 	.release		= drm_release,
@@ -469,7 +478,9 @@ const struct drm_driver pvr_drm_generic_driver = {
 
 	.name			= PVR_DRM_DRIVER_NAME,
 	.desc			= PVR_DRM_DRIVER_DESC,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
 	.date			= PVR_DRM_DRIVER_DATE,
+#endif
 	.major			= PVRVERSION_MAJ,
 	.minor			= PVRVERSION_MIN,
 	.patchlevel		= PVRVERSION_BUILD,

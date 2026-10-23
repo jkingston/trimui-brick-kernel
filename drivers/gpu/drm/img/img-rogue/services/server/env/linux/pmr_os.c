@@ -46,7 +46,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/dma-mapping.h>
 #include <linux/version.h>
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-#include <linux/pfn_t.h>
+#include "pvr_pfn_compat.h"
 #include <linux/pfn.h>
 #endif
 
@@ -206,19 +206,17 @@ static INLINE int _OSMMapPMR(PVRSRV_DEVICE_NODE *psDevNode,
 							IMG_CPU_PHYADDR *psCpuPAddr,
 							IMG_UINT32 uiLog2PageSize,
 							IMG_BOOL bUseVMInsertPage,
-							IMG_BOOL bUseMixedMap,
-							int riscv_cached)
+							IMG_BOOL bUseMixedMap)
 {
 	IMG_INT32 iStatus;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-	pfn_t sPFN;
+	pvr_pfn_t sPFN;
 #else
 	unsigned long uiPFN;
 #endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-	sPFN = riscv_cached ? phys_to_pfn_t(psCpuPAddr->uiAddr, 0) :
-		phys_to_pfn_t(psCpuPAddr->uiAddr + SYSPORT_MEM_OFFSET, 0);
+	sPFN = pvr_phys_to_pfn(psCpuPAddr->uiAddr);
 #else
 	uiPFN = psCpuPAddr->uiAddr >> PAGE_SHIFT;
 	PVR_ASSERT(((IMG_UINT64)uiPFN << PAGE_SHIFT) == psCpuPAddr->uiAddr);
@@ -266,7 +264,7 @@ static INLINE int _OSMMapPMR(PVRSRV_DEVICE_NODE *psDevNode,
 			iStatus = vm_insert_page(ps_vma,
 									 ps_vma->vm_start + uiOffset,
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-									 pfn_t_to_page(sPFN));
+									 pvr_pfn_to_page(sPFN));
 #else
 									 pfn_to_page(uiPFN));
 #endif
@@ -315,7 +313,7 @@ static INLINE int _OSMMapPMR(PVRSRV_DEVICE_NODE *psDevNode,
 		iStatus = remap_pfn_range(ps_vma,
 								  ps_vma->vm_start + uiOffset,
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-								  pfn_t_to_pfn(sPFN),
+								  pvr_pfn_to_pfn(sPFN),
 #else
 								  uiPFN,
 #endif
@@ -346,7 +344,6 @@ OSMMapPMRGeneric(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 	IMG_BOOL *pbValid;
 	IMG_BOOL bUseMixedMap = IMG_FALSE;
 	IMG_BOOL bUseVMInsertPage = IMG_FALSE;
-	int riscv_cached = 0;
 
 	/* if writeable but not shared mapping is requested then fail */
 	PVR_RETURN_IF_INVALID_PARAM(((ps_vma->vm_flags & VM_WRITE) == 0) ||
@@ -387,7 +384,6 @@ OSMMapPMRGeneric(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 				if (PhysHeapGetType(psPhysHeap) == PHYS_HEAP_TYPE_LMA)
 					sPageProt = pgprot_writecombine(sPageProt);
 #endif
-				riscv_cached = 1;
 				break;
 		}
 
@@ -397,19 +393,19 @@ OSMMapPMRGeneric(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 	}
 	ps_vma->vm_page_prot = sPageProt;
 
-	ps_vma->vm_flags |= VM_IO;
+	pvr_vm_flags_set(ps_vma, VM_IO);
 
 	/* Don't include the mapping in core dumps */
-	ps_vma->vm_flags |= VM_DONTDUMP;
+	pvr_vm_flags_set(ps_vma, VM_DONTDUMP);
 
 	/*
 	 * Disable mremap because our nopage handler assumes all
 	 * page requests have already been validated.
 	 */
-	ps_vma->vm_flags |= VM_DONTEXPAND;
+	pvr_vm_flags_set(ps_vma, VM_DONTEXPAND);
 
 	/* Don't allow mapping to be inherited across a process fork */
-	ps_vma->vm_flags |= VM_DONTCOPY;
+	pvr_vm_flags_set(ps_vma, VM_DONTCOPY);
 
 	uiLength = ps_vma->vm_end - ps_vma->vm_start;
 
@@ -468,7 +464,7 @@ OSMMapPMRGeneric(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 	if (bUseVMInsertPage)
 	{
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-		pfn_t sPFN;
+		pvr_pfn_t sPFN;
 #else
 		unsigned long uiPFN;
 #endif
@@ -478,11 +474,9 @@ OSMMapPMRGeneric(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 			if (pbValid[uiOffsetIdx])
 			{
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-	sPFN = riscv_cached ? phys_to_pfn_t(psCpuPAddr->uiAddr, 0) :
-		phys_to_pfn_t(psCpuPAddr->uiAddr + SYSPORT_MEM_OFFSET, 0);
-				sPFN = phys_to_pfn_t(psCpuPAddr[uiOffsetIdx].uiAddr, 0);
+				sPFN = pvr_phys_to_pfn(psCpuPAddr[uiOffsetIdx].uiAddr);
 
-				if (!pfn_t_valid(sPFN) || page_count(pfn_t_to_page(sPFN)) == 0)
+				if (!pvr_pfn_valid(sPFN) || page_count(pvr_pfn_to_page(sPFN)) == 0)
 #else
 				uiPFN = psCpuPAddr[uiOffsetIdx].uiAddr >> PAGE_SHIFT;
 				PVR_ASSERT(((IMG_UINT64)uiPFN << PAGE_SHIFT) == psCpuPAddr[uiOffsetIdx].uiAddr);
@@ -498,12 +492,12 @@ OSMMapPMRGeneric(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 
 		if (bUseMixedMap)
 		{
-			ps_vma->vm_flags |= VM_MIXEDMAP;
+			pvr_vm_flags_set(ps_vma, VM_MIXEDMAP);
 		}
 	}
 	else
 	{
-		ps_vma->vm_flags |= VM_PFNMAP;
+		pvr_vm_flags_set(ps_vma, VM_PFNMAP);
 	}
 
 	/* For each PMR page-size contiguous bytes, map page(s) into user VMA */
@@ -523,7 +517,7 @@ OSMMapPMRGeneric(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 								 &psCpuPAddr[uiOffsetIdx],
 								 uiLog2PageSize,
 								 bUseVMInsertPage,
-								 bUseMixedMap, riscv_cached);
+								 bUseMixedMap);
 			if (iStatus)
 			{
 				/* Failure error code doesn't get propagated */
