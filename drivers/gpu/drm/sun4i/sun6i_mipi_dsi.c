@@ -1252,7 +1252,7 @@ static int sun6i_dsi_attach(struct mipi_dsi_host *host,
 		return PTR_ERR(panel);
 	if (dsi->variant->brick_experimental &&
 	    (!of_device_is_compatible(device->dev.of_node,
-		"trimui,brick-experimental-jd9168") ||
+		"trimui,brick-jd9168") ||
 	     !(device->mode_flags & MIPI_DSI_MODE_VIDEO) ||
 	     device->format != MIPI_DSI_FMT_RGB888 || device->lanes != 4)) {
 		drm_panel_put(panel);
@@ -1570,7 +1570,7 @@ static const struct sun6i_dsi_variant brick_experimental_variant = {
 
 static const struct of_device_id sun6i_dsi_of_table[] = {
 	{
-		.compatible = "trimui,brick-experimental-a133-dsi",
+		.compatible = "allwinner,sun50i-a133-mipi-dsi",
 		.data = &brick_experimental_variant,
 	},
 	{

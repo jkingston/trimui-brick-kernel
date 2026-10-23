@@ -44,7 +44,7 @@ static int cldo4_enable(struct regulator_dev *rdev)
 static int retain_shared(struct device_node *node,
 	const struct regulator_desc *desc, struct regulator_config *config)
 {
-	/* SD/codec ownership is not represented by this display experiment.
+	/* SD/codec ownership is not represented by this panel supply driver.
 	 * Preserve the boot-enabled shared rail, regardless of panel refcount.
 	 */
 	return of_property_read_bool(node, "regulator-always-on") ? 0 : -EINVAL;
@@ -109,7 +109,7 @@ static int brick_probe(struct i2c_client *client)
 	return 0;
 }
 static const struct of_device_id brick_match[] = {
-	{ .compatible = "trimui,brick-experimental-panel-power" }, { }
+	{ .compatible = "trimui,brick-panel-supplies" }, { }
 };
 MODULE_DEVICE_TABLE(of, brick_match);
 static struct i2c_driver brick_driver = {

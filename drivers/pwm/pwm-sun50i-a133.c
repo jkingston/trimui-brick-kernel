@@ -224,7 +224,7 @@ static void brick_remove(struct platform_device *pdev)
 	brick_shutdown(pdev);
 }
 static const struct of_device_id brick_match[] = {
-	{ .compatible = "trimui,brick-experimental-pwm0" }, { }
+	{ .compatible = "allwinner,sun50i-a133-pwm" }, { }
 };
 MODULE_DEVICE_TABLE(of, brick_match);
 static int brick_pm_prepare(struct device *dev)
@@ -237,9 +237,9 @@ static struct platform_driver brick_driver = {
 	.probe = brick_probe,
 	.remove = brick_remove,
 	.shutdown = brick_shutdown,
-	.driver = { .name = "brick-experimental-pwm0", .of_match_table = brick_match,
+	.driver = { .name = "sun50i-a133-pwm", .of_match_table = brick_match,
 		.pm = &brick_pm_ops },
 };
 module_platform_driver(brick_driver);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Unqualified opt-in A133 channel0 50kHz backlight PWM");
+MODULE_DESCRIPTION("Allwinner A133 channel 0 backlight PWM");

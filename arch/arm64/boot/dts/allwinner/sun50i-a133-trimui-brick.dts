@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/dts-v1/;
+#include "sun50i-a133.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	model = "TrimUI Brick";
+	compatible = "trimui,brick", "allwinner,sun50i-a133", "allwinner,sun50i-a100";
+
+	aliases {
+		serial0 = &uart0;
+		mmc0 = &mmc0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm 0 20000 0>;
+		enable-gpios = <&pio 7 18 GPIO_ACTIVE_HIGH>;
+		brightness-levels = <0 16 32 64 128 192 255>;
+		default-brightness-level = <1>;
+	};
+
+	/* SPL establishes CLDO3; no voltage switching is supported. */
+	reg_sd_3v3: regulator-sd-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "sd-cldo3-boot-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+};
+
+&display_engine {
+	status = "okay";
+};
+
+&dphy0 {
+	assigned-clocks = <&ccu CLK_MIPI_DSI>;
+	assigned-clock-parents = <&ccu CLK_PLL_PERIPH0>;
+	assigned-clock-rates = <150000000>;
+	status = "okay";
+};
+
+&dsi0 {
+	/* Analogue supply remains boot-established; its physical rail is unknown. */
+	status = "okay";
+
+	panel@0 {
+		compatible = "trimui,brick-jd9168";
+		reg = <0>;
+		dsi-lanes = <4>;
+		reset-gpios = <&pio 3 22 GPIO_ACTIVE_LOW>;
+		backlight = <&backlight>;
+		power0-supply = <&cldo1>;
+		power1-supply = <&cldo4>;
+		pinctrl-names = "active", "sleep";
+		pinctrl-0 = <&dsi_active_pins>;
+		pinctrl-1 = <&dsi_sleep_pins>;
+
+		display-timings {
+			native-mode = <&panel_timing>;
+			panel_timing: timing0 {
+				clock-frequency = <51000000>;
+				hactive = <1024>;
+				vactive = <768>;
+				hfront-porch = <36>;
+				hback-porch = <16>;
+				hsync-len = <4>;
+				vfront-porch = <7>;
+				vback-porch = <5>;
+				vsync-len = <4>;
+			};
+		};
+	};
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_pd {
+	status = "okay";
+};
+
+&mixer0 {
+	assigned-clocks = <&ccu CLK_DE>;
+	assigned-clock-parents = <&ccu CLK_PLL_PERIPH0_2X>;
+	assigned-clock-rates = <300000000>;
+	status = "okay";
+};
+
+&mmc0 {
+	vmmc-supply = <&reg_sd_3v3>;
+	bus-width = <4>;
+	broken-cd;
+	max-frequency = <25000000>;
+	no-1-8-v;
+	status = "okay";
+};
+
+&mmc1 {
+	status = "disabled";
+};
+
+/* Keep internal eMMC unavailable. */
+&mmc2 {
+	status = "disabled";
+};
+
+&pio {
+	dsi_active_pins: dsi-active-pins {
+		pins = "PD0", "PD1", "PD2", "PD3", "PD4",
+		       "PD5", "PD6", "PD7", "PD8", "PD9";
+		function = "dsi0";
+	};
+
+	dsi_sleep_pins: dsi-sleep-pins {
+		pins = "PD0", "PD1", "PD2", "PD3", "PD4",
+		       "PD5", "PD6", "PD7", "PD8", "PD9";
+		function = "io_disabled";
+		bias-disable;
+	};
+
+	pwm0_pin: pwm0-pin {
+		pins = "PD23";
+		function = "pwm0";
+	};
+};
+
+&pwm {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm0_pin>;
+	status = "okay";
+};
+
+&r_i2c0 {
+	status = "okay";
+
+	pmic@34 {
+		compatible = "trimui,brick-panel-supplies";
+		reg = <0x34>;
+
+		regulators {
+			cldo1: cldo1 {
+				regulator-name = "brick-panel-cldo1";
+				regulator-always-on;
+			};
+			cldo4: cldo4 {
+				regulator-name = "brick-panel-cldo4";
+			};
+		};
+	};
+};
+
+&tcon_lcd0 {
+	assigned-clocks = <&ccu CLK_PLL_VIDEO0_4X>, <&ccu CLK_TCON_LCD>;
+	assigned-clock-parents = <0>, <&ccu CLK_PLL_VIDEO0_4X>;
+	assigned-clock-rates = <612000000>, <306000000>;
+	status = "okay";
+};
+
+&tcon_top {
+	status = "okay";
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pb_pins>;
+	status = "okay";
+};
+
+&usb_otg {
+	compatible = "trimui,brick-musb", "allwinner,sun8i-a33-musb";
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+&usbphy {
+	compatible = "trimui,brick-usb-phy", "allwinner,sun20i-d1-usb-phy";
+	clocks = <&ccu CLK_USB_PHY0>, <&ccu CLK_USB_PHY1>, <&ccu CLK_BUS_EHCI1>;
+	clock-names = "usb0_phy", "usb1_phy", "pmu1_clk";
+	resets = <&ccu RST_USB_PHY0>, <&ccu RST_USB_PHY1>, <&ccu RST_BUS_EHCI1>;
+	reset-names = "usb0_reset", "usb1_reset", "usb1_bus_reset";
+	status = "okay";
+};

@@ -34,3 +34,5 @@ ARM64 Architecture
     tagged-pointers
 
     features
+
+    trimui-brick

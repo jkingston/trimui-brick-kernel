@@ -15,6 +15,12 @@ properties:
     const: '/'
   compatible:
     oneOf:
+      - description: TrimUI Brick
+        items:
+          - const: trimui,brick
+          - const: allwinner,sun50i-a133
+          - const: allwinner,sun50i-a100
+
 
       - description: Allwinner A100 Perf1 Board
         items:

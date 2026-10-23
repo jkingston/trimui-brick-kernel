@@ -3,7 +3,8 @@ Display-class compatibility
 
 The StarFive DDK 1.19@6345021 source omits display class. This implementation
 adapts the licensed Allwinner DDK 1.11 code from Creality commit
-7f37a7fbf4ad59907034715e3d967b9177de1cd4 to the Brick's DDK 1.19 interfaces.
+7f37a7fbf4ad59907034715e3d967b9177de1cd4
+(https://github.com/CrealityTech/sonic_pad_os) to the Brick's DDK 1.19 interfaces.
 Original copyright and license notices are retained. It is not an original
 Imagination DDK 1.19 display-class release.
 

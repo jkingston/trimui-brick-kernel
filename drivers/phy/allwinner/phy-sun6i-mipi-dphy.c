@@ -679,7 +679,7 @@ static const struct sun6i_dphy_variant brick_a133_mipi_dphy_variant = {
 
 static const struct of_device_id sun6i_dphy_of_table[] = {
 	{
-		.compatible = "trimui,brick-experimental-a133-dphy",
+		.compatible = "allwinner,sun50i-a133-dphy",
 		.data = &brick_a133_mipi_dphy_variant,
 	},
 	{

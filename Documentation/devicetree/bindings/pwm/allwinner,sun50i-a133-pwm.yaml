@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pwm/allwinner,sun50i-a133-pwm.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Allwinner A133 PWM controller
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+allOf:
+  - $ref: pwm.yaml#
+
+properties:
+  compatible:
+    const: allwinner,sun50i-a133-pwm
+  reg:
+    maxItems: 1
+  clocks:
+    items:
+      - description: Bus clock
+      - description: 24 MHz oscillator
+  clock-names:
+    items:
+      - const: bus
+      - const: osc24M
+  resets:
+    maxItems: 1
+  '#pwm-cells':
+    const: 3
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - clock-names
+  - resets
+  - '#pwm-cells'
+
+unevaluatedProperties: false

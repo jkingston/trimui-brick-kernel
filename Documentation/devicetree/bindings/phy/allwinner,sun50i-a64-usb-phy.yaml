@@ -22,6 +22,7 @@ properties:
       - items:
           - enum:
               - allwinner,sun50i-a100-usb-phy
+              - trimui,brick-usb-phy
               - allwinner,sun55i-a523-usb-phy
           - const: allwinner,sun20i-d1-usb-phy
 
@@ -38,24 +39,32 @@ properties:
       - const: pmu1
 
   clocks:
+    minItems: 2
     items:
       - description: USB OTG PHY bus clock
       - description: USB Host 0 PHY bus clock
+      - description: USB Host 1 PMU bus clock
 
   clock-names:
+    minItems: 2
     items:
       - const: usb0_phy
       - const: usb1_phy
+      - const: pmu1_clk
 
   resets:
+    minItems: 2
     items:
       - description: USB OTG reset
       - description: USB Host 1 Controller reset
+      - description: USB Host 1 bus reset
 
   reset-names:
+    minItems: 2
     items:
       - const: usb0_reset
       - const: usb1_reset
+      - const: usb1_bus_reset
 
   usb0_id_det-gpios:
     maxItems: 1
@@ -83,6 +92,33 @@ required:
   - reg-names
   - resets
   - reset-names
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: trimui,brick-usb-phy
+    then:
+      properties:
+        clocks:
+          minItems: 3
+        clock-names:
+          minItems: 3
+        resets:
+          minItems: 3
+        reset-names:
+          minItems: 3
+    else:
+      properties:
+        clocks:
+          maxItems: 2
+        clock-names:
+          maxItems: 2
+        resets:
+          maxItems: 2
+        reset-names:
+          maxItems: 2
 
 additionalProperties: false
 

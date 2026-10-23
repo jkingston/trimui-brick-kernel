@@ -2,7 +2,8 @@ Allwinner A133 platform adaptation
 
 Vendor source: StarFive Linux 6d6aee034b81121f75bf939d8305a42ef03fb5ef,
 DDK 1.19@6345021. Allwinner platform reference: Creality Linux 4.9,
-7f37a7fbf4ad59907034715e3d967b9177de1cd4, modules/gpu/img-rgx/linux/rogue_km.
+7f37a7fbf4ad59907034715e3d967b9177de1cd4
+(https://github.com/CrealityTech/sonic_pad_os), modules/gpu/img-rgx/linux/rogue_km.
 Original copyright and license notices are retained.
 
 ABI and register configuration were checked against the TrimUI Brick 1.1.1

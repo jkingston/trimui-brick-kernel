@@ -1759,6 +1759,8 @@ patternProperties:
     description: Transpeed
   "^traverse,.*":
     description: Traverse Technologies Australia Pty Ltd
+  "^trimui,.*":
+    description: TrimUI
   "^tronfy,.*":
     description: Tronfy
   "^tronsmart,.*":

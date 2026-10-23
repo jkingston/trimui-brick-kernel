@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#include "sun50i-a100.dtsi"
+#include <dt-bindings/clock/sun50i-a100-r-ccu.h>
+#include <dt-bindings/clock/sun8i-tcon-top.h>
+#include <dt-bindings/reset/sun50i-a100-r-ccu.h>
+
+/ {
+	display_engine: display-engine {
+		compatible = "allwinner,sun50i-a133-display-engine";
+		allwinner,pipelines = <&mixer0>;
+		status = "disabled";
+	};
+};
+
+&{/soc} {
+	pwm: pwm@300a000 {
+		compatible = "allwinner,sun50i-a133-pwm";
+		reg = <0x0300a000 0x400>;
+		clocks = <&ccu CLK_BUS_PWM>, <&dcxo24M>;
+		clock-names = "bus", "osc24M";
+		resets = <&ccu RST_BUS_PWM>;
+		#pwm-cells = <3>;
+		status = "disabled";
+	};
+
+	mixer0: mixer@6100000 {
+		compatible = "allwinner,sun50i-a133-de2-mixer-0";
+		reg = <0x06100000 0x100000>;
+		clocks = <&ccu CLK_BUS_DE>, <&ccu CLK_DE>;
+		clock-names = "bus", "mod";
+		resets = <&ccu RST_BUS_DE>;
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@1 {
+				reg = <1>;
+				mixer0_out: endpoint {
+					remote-endpoint = <&tcon_top_in>;
+				};
+			};
+		};
+	};
+
+	tcon_top: dpss-top@6510000 {
+		compatible = "allwinner,sun50i-a133-tcon-top";
+		reg = <0x06510000 0x1000>;
+		clocks = <&ccu CLK_BUS_DPSS_TOP0>, <&ccu CLK_MIPI_DSI>;
+		clock-names = "bus", "dsi";
+		clock-output-names = "tcon-top-dsi";
+		resets = <&ccu RST_BUS_DPSS_TOP0>;
+		#clock-cells = <1>;
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				tcon_top_in: endpoint {
+					remote-endpoint = <&mixer0_out>;
+				};
+			};
+			port@1 {
+				reg = <1>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				tcon_top_out: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&tcon_lcd0_in>;
+				};
+			};
+		};
+	};
+
+	tcon_lcd0: lcd-controller@6511000 {
+		compatible = "allwinner,sun50i-a133-tcon-lcd";
+		reg = <0x06511000 0x1000>;
+		interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&ccu CLK_BUS_TCON_LCD>, <&ccu CLK_TCON_LCD>;
+		clock-names = "ahb", "tcon-ch0";
+		clock-output-names = "tcon-lcd0-pixel";
+		resets = <&ccu RST_BUS_TCON_LCD>;
+		reset-names = "lcd";
+		#clock-cells = <0>;
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				tcon_lcd0_in: endpoint {
+					remote-endpoint = <&tcon_top_out>;
+				};
+			};
+			port@1 {
+				reg = <1>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				tcon_lcd0_out: endpoint@1 {
+					reg = <1>;
+					remote-endpoint = <&dsi0_in>;
+				};
+			};
+		};
+	};
+
+	dphy0: phy@6505000 {
+		compatible = "allwinner,sun50i-a133-dphy";
+		reg = <0x06505000 0x1000>, <0x03000024 0x4>;
+		reg-names = "phy", "soc-revision";
+		clocks = <&ccu CLK_BUS_MIPI_DSI>, <&ccu CLK_MIPI_DSI>;
+		clock-names = "bus", "mod";
+		resets = <&ccu RST_BUS_MIPI_DSI>;
+		#phy-cells = <0>;
+		status = "disabled";
+	};
+
+	dsi0: dsi@6504000 {
+		compatible = "allwinner,sun50i-a133-mipi-dsi";
+		reg = <0x06504000 0x1000>;
+		interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&ccu CLK_BUS_MIPI_DSI>, <&tcon_top CLK_TCON_TOP_DSI>;
+		clock-names = "bus", "mod";
+		resets = <&ccu RST_BUS_MIPI_DSI>;
+		phys = <&dphy0>;
+		phy-names = "dphy";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+
+		port {
+			dsi0_in: endpoint {
+				remote-endpoint = <&tcon_lcd0_out>;
+			};
+		};
+	};
+
+	gpu_pd: power-controller@7001000 {
+		compatible = "allwinner,sun50i-a133-gpu-power-domain";
+		reg = <0x07001000 0x34>;
+		#power-domain-cells = <0>;
+		clocks = <&ccu CLK_GPU>, <&ccu CLK_BUS_GPU>, <&r_ccu CLK_R_APB1_PPU>;
+		clock-names = "core", "bus", "ppu";
+		resets = <&ccu RST_BUS_GPU>, <&r_ccu RST_R_APB1_PPU>;
+		reset-names = "gpu", "ppu";
+		status = "disabled";
+	};
+
+	gpu: gpu@1800000 {
+		compatible = "allwinner,sun50i-a133-gpu", "img,gpu";
+		reg = <0x01800000 0x80000>;
+		interrupts = <GIC_SPI 97 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "IRQGPU";
+		clocks = <&ccu CLK_GPU>, <&ccu CLK_BUS_GPU>, <&r_ccu CLK_R_APB1_PPU>;
+		clock-names = "core", "bus", "ppu";
+		power-domains = <&gpu_pd>;
+		status = "disabled";
+	};
+};

@@ -1335,6 +1335,13 @@ config DRM_PANEL_TPO_TPG110
 	  400CH LTPS TFT LCD Single Chip Digital Driver for up to
 	  800x400 LCD panels.
 
+config DRM_PANEL_TRIMUI_BRICK
+	tristate "TrimUI Brick JD9168 panel"
+	depends on OF && DRM_MIPI_DSI && BACKLIGHT_CLASS_DEVICE
+	depends on REGULATOR
+	help
+	  JD9168-based 1024x768 DSI panel fitted to the TrimUI Brick.
+
 config DRM_PANEL_TRULY_NT35597_WQXGA
 	tristate "Truly WQXGA"
 	depends on OF
@@ -1416,10 +1423,3 @@ config DRM_PANEL_XINPENG_XPP055C272
 	  XPP055C272 controller for 720x1280 LCD panels with MIPI/RGB/SPI
 	  system interfaces.
 endmenu
-
-config DRM_PANEL_TRIMUI_BRICK
-	tristate "TrimUI Brick JD9168 panel"
-	depends on OF && DRM_MIPI_DSI && BACKLIGHT_CLASS_DEVICE
-	depends on REGULATOR
-	help
-	  JD9168-based 1024x768 DSI panel fitted to the TrimUI Brick.

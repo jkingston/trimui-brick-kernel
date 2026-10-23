@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* TrimUI Brick JD9168 panel. See docs/hardware.md for board wiring. */
+/* TrimUI Brick JD9168 panel. See Documentation/arch/arm64/trimui-brick.rst for wiring. */
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
@@ -22,7 +22,7 @@ struct brick_panel {
 	const struct brick_desc *desc;
 	struct drm_display_mode mode;
 	struct regulator *power0, *power1;
-	struct gpio_desc *gpio0;
+	struct gpio_desc *reset;
 	struct backlight_device *backlight;
 	bool backlight_attempted;
 	bool commands_allowed;
@@ -56,11 +56,11 @@ static int brick_power_off(struct brick_panel *p)
 		msleep(20);
 	}
 	if (!p->gpio_output) {
-		err = gpiod_direction_output_raw(p->gpio0, 0);
+		err = gpiod_direction_output_raw(p->reset, 0);
 		if (err) { if (!ret) ret = err; }
 		else p->gpio_output = true;
 	} else {
-		gpiod_set_raw_value_cansleep(p->gpio0, 0);
+		gpiod_set_raw_value_cansleep(p->reset, 0);
 	}
 	msleep(5);
 	if (p->power1_on) {
@@ -98,13 +98,13 @@ static int brick_prepare(struct drm_panel *panel)
 	if (ret) goto power_off;
 	p->pins_active = true;
 	msleep(50);
-	ret = gpiod_direction_output_raw(p->gpio0, 1);
+	ret = gpiod_direction_output_raw(p->reset, 1);
 	if (ret) goto power_off;
 	p->gpio_output = true;
 	msleep(20);
-	gpiod_set_raw_value_cansleep(p->gpio0, 0);
+	gpiod_set_raw_value_cansleep(p->reset, 0);
 	msleep(120);
-	gpiod_set_raw_value_cansleep(p->gpio0, 1);
+	gpiod_set_raw_value_cansleep(p->reset, 1);
 	msleep(20);
 	/* Vendor open-flow adds 10ms after power-on. */
 	msleep(10);
@@ -193,8 +193,7 @@ static int brick_probe(struct mipi_dsi_device *dsi)
 {
 	struct device *dev = &dsi->dev;
 	struct brick_panel *p;
-	u32 lanes, flags, bus_flags;
-	const char *format;
+	u32 lanes, bus_flags;
 	int ret;
 
 	p = devm_drm_panel_alloc(dev, struct brick_panel, panel, &brick_funcs,
@@ -209,11 +208,6 @@ static int brick_probe(struct mipi_dsi_device *dsi)
 		return -EINVAL;
 	ret = device_property_read_u32(dev, "dsi-lanes", &lanes);
 	if (ret || lanes != 4) return -EINVAL;
-	/* Research-only property: flags must be reviewed against the host driver. */
-	ret = device_property_read_u32(dev, "trimui,dsi-mode-flags", &flags);
-	if (ret) return ret;
-	ret = device_property_read_string(dev, "trimui,dsi-format", &format);
-	if (ret || strcmp(format, "rgb888")) return -EINVAL;
 	if (!device_property_present(dev, "power0-supply") ||
 	    !device_property_present(dev, "power1-supply") ||
 	    !device_property_present(dev, "backlight"))
@@ -222,8 +216,8 @@ static int brick_probe(struct mipi_dsi_device *dsi)
 	if (IS_ERR(p->power0)) return dev_err_probe(dev, PTR_ERR(p->power0), "power0\n");
 	p->power1 = devm_regulator_get(dev, "power1");
 	if (IS_ERR(p->power1)) return dev_err_probe(dev, PTR_ERR(p->power1), "power1\n");
-	p->gpio0 = devm_gpiod_get(dev, "gpio0", GPIOD_ASIS);
-	if (IS_ERR(p->gpio0)) return dev_err_probe(dev, PTR_ERR(p->gpio0), "gpio0\n");
+	p->reset = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
+	if (IS_ERR(p->reset)) return dev_err_probe(dev, PTR_ERR(p->reset), "reset\n");
 	p->pins = devm_pinctrl_get(dev);
 	if (IS_ERR(p->pins)) return PTR_ERR(p->pins);
 	p->active = pinctrl_lookup_state(p->pins, "active");
@@ -239,7 +233,7 @@ static int brick_probe(struct mipi_dsi_device *dsi)
 	p->panel.prepare_prev_first = true;
 	dsi->lanes = lanes;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = flags;
+	dsi->mode_flags = MIPI_DSI_MODE_VIDEO;
 	mipi_dsi_set_drvdata(dsi, p);
 	drm_panel_add(&p->panel);
 	ret = mipi_dsi_attach(dsi);
@@ -270,14 +264,14 @@ static void brick_remove(struct mipi_dsi_device *dsi)
 	drm_panel_remove(&p->panel);
 }
 static const struct of_device_id brick_of_match[] = {
-	{ .compatible = "trimui,brick-experimental-jd9168", .data = &jd9168_desc },
+	{ .compatible = "trimui,brick-jd9168", .data = &jd9168_desc },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, brick_of_match);
 static struct mipi_dsi_driver brick_driver = {
 	.probe = brick_probe, .remove = brick_remove, .shutdown = brick_shutdown,
-	.driver = { .name = "panel-trimui-brick-experimental", .of_match_table = brick_of_match },
+	.driver = { .name = "panel-trimui-brick", .of_match_table = brick_of_match },
 };
 module_mipi_dsi_driver(brick_driver);
-MODULE_DESCRIPTION("Unverified stock-derived TrimUI panel experiment; no board binding");
+MODULE_DESCRIPTION("TrimUI Brick JD9168 panel");
 MODULE_LICENSE("GPL");
