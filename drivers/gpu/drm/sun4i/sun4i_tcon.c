@@ -274,6 +274,9 @@ static void sun4i_tcon_set_mux(struct sun4i_tcon *tcon, int channel,
 	if (tcon->quirks->set_mux)
 		ret = tcon->quirks->set_mux(tcon, encoder);
 
+	if (ret && tcon->quirks->a133_dsi_timing)
+		tcon->a133_mode_valid = false;
+
 	DRM_DEBUG_DRIVER("Muxing encoder %s to CRTC %s: %d\n",
 			 encoder->name, encoder->crtc->name, ret);
 }
@@ -1654,6 +1657,7 @@ static const struct sun4i_tcon_quirks sun20i_d1_lcd_quirks = {
 
 /* sun4i_drv uses this list to check if a device node is a TCON */
 static const struct sun4i_tcon_quirks sun50i_a133_lcd_quirks = {
+	.set_mux = sun8i_r40_tcon_tv_set_mux,
 	.has_channel_0 = true,
 	.a133_dsi_timing = true,
 };

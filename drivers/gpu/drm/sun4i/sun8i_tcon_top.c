@@ -110,11 +110,19 @@ int sun8i_tcon_top_de_config(struct device *dev, int mixer, int tcon)
 	u32 mixer_msk, other_msk;
 	unsigned long flags;
 	u32 reg;
+	bool a133 = of_device_is_compatible(dev->of_node,
+					 "allwinner,sun50i-a133-tcon-top");
 
 	if (!sun8i_tcon_top_node_is_tcon_top(dev->of_node)) {
 		dev_err(dev, "Device is not TCON TOP!\n");
 		return -EINVAL;
 	}
+
+	/* Only DE0/TCON0 is source-correlated for this experiment. Preserve
+	 * the other routing field: no second-mixer topology is qualified.
+	 */
+	if (a133 && (mixer != 0 || tcon != 0))
+		return -EINVAL;
 
 	if (mixer > 1) {
 		dev_err(dev, "Mixer index is too high!\n");
@@ -136,7 +144,7 @@ int sun8i_tcon_top_de_config(struct device *dev, int mixer, int tcon)
 	reg &= ~mixer_msk;
 	reg |= field_prep(mixer_msk, tcon);
 
-	if (field_get(other_msk, reg) == tcon) {
+	if (!a133 && field_get(other_msk, reg) == (u32)tcon) {
 		reg &= ~other_msk;
 		reg |= field_prep(other_msk,
 				  sun8i_tcon_top_park_index(tcon_top, tcon));

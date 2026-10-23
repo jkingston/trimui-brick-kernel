@@ -200,12 +200,26 @@ struct sun6i_dphy {
 static int sun6i_dphy_init(struct phy *phy)
 {
 	struct sun6i_dphy *dphy = phy_get_drvdata(phy);
+	int ret, cleanup;
 
-	reset_control_deassert(dphy->reset);
-	clk_prepare_enable(dphy->mod_clk);
-	clk_set_rate_exclusive(dphy->mod_clk, 150000000);
-
+	ret = reset_control_deassert(dphy->reset);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(dphy->mod_clk);
+	if (ret)
+		goto assert_reset;
+	ret = clk_set_rate_exclusive(dphy->mod_clk, 150000000);
+	if (ret)
+		goto disable_clock;
 	return 0;
+
+disable_clock:
+	clk_disable_unprepare(dphy->mod_clk);
+assert_reset:
+	cleanup = reset_control_assert(dphy->reset);
+	if (cleanup)
+		dev_err(&phy->dev, "DPHY init reset cleanup failed: %d\n", cleanup);
+	return ret;
 }
 
 static int sun6i_dphy_configure(struct phy *phy, union phy_configure_opts *opts)
