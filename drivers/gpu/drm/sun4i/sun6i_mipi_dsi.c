@@ -723,6 +723,13 @@ static void sun6i_dsi_encoder_enable(struct drm_encoder *encoder)
 	u16 delay;
 	int err;
 
+	dsi->mode_rejected = !sun4i_tcon_mode_ready(
+		drm_crtc_to_sun4i_crtc(encoder->crtc)->tcon);
+	if (dsi->mode_rejected) {
+		dev_err(dsi->dev, "TCON rejected mode; leaving DSI and panel untouched\n");
+		return;
+	}
+
 	DRM_DEBUG_DRIVER("Enabling DSI output\n");
 
 	err = regulator_enable(dsi->regulator);
@@ -797,6 +804,11 @@ static void sun6i_dsi_encoder_enable(struct drm_encoder *encoder)
 static void sun6i_dsi_encoder_disable(struct drm_encoder *encoder)
 {
 	struct sun6i_dsi *dsi = encoder_to_sun6i_dsi(encoder);
+
+	if (dsi->mode_rejected) {
+		dsi->mode_rejected = false;
+		return;
+	}
 
 	DRM_DEBUG_DRIVER("Disabling DSI output\n");
 

@@ -136,6 +136,9 @@ static void sun4i_crtc_atomic_enable(struct drm_crtc *crtc,
 
 	DRM_DEBUG_DRIVER("Enabling the CRTC\n");
 
+	if (!sun4i_tcon_mode_ready(scrtc->tcon))
+		return;
+
 	sun4i_tcon_set_status(scrtc->tcon, encoder, true);
 
 	drm_crtc_vblank_on(crtc);
@@ -165,6 +168,9 @@ static int sun4i_crtc_enable_vblank(struct drm_crtc *crtc)
 	struct sun4i_crtc *scrtc = drm_crtc_to_sun4i_crtc(crtc);
 
 	DRM_DEBUG_DRIVER("Enabling VBLANK on crtc %p\n", crtc);
+
+	if (!sun4i_tcon_mode_ready(scrtc->tcon))
+		return -EINVAL;
 
 	sun4i_tcon_enable_vblank(scrtc->tcon, true);
 

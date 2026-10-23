@@ -290,6 +290,14 @@ struct sun4i_tcon {
 	struct list_head		list;
 };
 
+/* A rejected experimental mode must not power a panel or advertise vblank.
+ * This is a late hardware gate, not a replacement for atomic validation.
+ */
+static inline bool sun4i_tcon_mode_ready(const struct sun4i_tcon *tcon)
+{
+	return !tcon->quirks->a133_dsi_timing || tcon->a133_mode_valid;
+}
+
 struct drm_bridge *sun4i_tcon_find_bridge(struct device_node *node);
 struct drm_panel *sun4i_tcon_find_panel(struct device_node *node);
 

@@ -37,6 +37,8 @@ struct sun6i_dsi {
 	struct drm_device	*drm;
 	struct drm_panel	*panel;
 
+	/* Paired disable must not release resources when enable was skipped. */
+	bool			mode_rejected;
 	const struct sun6i_dsi_variant *variant;
 };
 
