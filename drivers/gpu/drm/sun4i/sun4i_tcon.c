@@ -447,7 +447,18 @@ static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
 	tcon->dclk_max_div = SUN6I_DSI_TCON_DIV;
 	requested_dclk = (unsigned long)mode->crtc_clock * 1000 *
 			 (bpp / lanes) / SUN6I_DSI_TCON_DIV;
+	/* The Brick runs TCON at 300MHz / 4 while DSI
+	 * retains the 51MHz-mode PHY configuration.
+	 */
+	if (tcon->quirks->a133_dsi_timing && mode->crtc_clock == 51000 &&
+	    mode->crtc_hdisplay == 1024 && mode->crtc_vdisplay == 768 &&
+	    bpp == 24 && lanes == 4)
+		requested_dclk = 75000000;
 	ret = clk_set_rate(tcon->dclk, requested_dclk);
+	if (tcon->quirks->a133_dsi_timing)
+		dev_info(tcon->dev, "Brick TCON: requested=%lu actual=%lu source=%lu ret=%d\n",
+			 requested_dclk, clk_get_rate(tcon->dclk),
+			 clk_get_rate(tcon->sclk0), ret);
 	if (ret && tcon->quirks->a133_dsi_timing)
 		return;
 	if (tcon->quirks->a133_dsi_timing) {
