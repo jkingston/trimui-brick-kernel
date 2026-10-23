@@ -2,6 +2,7 @@
 /dts-v1/;
 #include "sun50i-a133.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 
 / {
 	model = "TrimUI Brick";
@@ -14,6 +15,134 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
+	};
+
+	gamepad {
+		compatible = "gpio-keys";
+		label = "TrimUI Brick Gamepad";
+		pinctrl-names = "default";
+		pinctrl-0 = <&gamepad_pins>;
+
+		button-b {
+			label = "B";
+			linux,code = <BTN_SOUTH>;
+			gpios = <&pio 3 13 GPIO_ACTIVE_LOW>;
+		};
+
+		button-y {
+			label = "Y";
+			linux,code = <BTN_WEST>;
+			gpios = <&pio 3 19 GPIO_ACTIVE_LOW>;
+		};
+
+		button-select {
+			label = "SELECT";
+			linux,code = <BTN_SELECT>;
+			gpios = <&pio 7 15 GPIO_ACTIVE_LOW>;
+		};
+
+		button-start {
+			label = "START";
+			linux,code = <BTN_START>;
+			gpios = <&pio 7 16 GPIO_ACTIVE_LOW>;
+		};
+
+		button-up {
+			label = "UP";
+			linux,code = <BTN_DPAD_UP>;
+			gpios = <&pio 3 17 GPIO_ACTIVE_LOW>;
+		};
+
+		button-down {
+			label = "DOWN";
+			linux,code = <BTN_DPAD_DOWN>;
+			gpios = <&pio 3 14 GPIO_ACTIVE_LOW>;
+		};
+
+		button-left {
+			label = "LEFT";
+			linux,code = <BTN_DPAD_LEFT>;
+			gpios = <&pio 3 15 GPIO_ACTIVE_LOW>;
+		};
+
+		button-right {
+			label = "RIGHT";
+			linux,code = <BTN_DPAD_RIGHT>;
+			gpios = <&pio 3 16 GPIO_ACTIVE_LOW>;
+		};
+
+		button-a {
+			label = "A";
+			linux,code = <BTN_EAST>;
+			gpios = <&pio 3 12 GPIO_ACTIVE_LOW>;
+		};
+
+		button-x {
+			label = "X";
+			linux,code = <BTN_NORTH>;
+			gpios = <&pio 3 18 GPIO_ACTIVE_LOW>;
+		};
+
+		button-l {
+			label = "L";
+			linux,code = <BTN_TL>;
+			gpios = <&pio 1 4 GPIO_ACTIVE_LOW>;
+		};
+
+		button-r {
+			label = "R";
+			linux,code = <BTN_TR>;
+			gpios = <&pio 7 17 GPIO_ACTIVE_LOW>;
+		};
+
+		button-l2 {
+			label = "L2";
+			linux,code = <BTN_TL2>;
+			gpios = <&pio 1 2 GPIO_ACTIVE_LOW>;
+		};
+
+		button-r2 {
+			label = "R2";
+			linux,code = <BTN_TR2>;
+			gpios = <&pio 1 5 GPIO_ACTIVE_LOW>;
+		};
+
+		button-menu {
+			label = "MENU";
+			linux,code = <BTN_MODE>;
+			gpios = <&pio 7 14 GPIO_ACTIVE_LOW>;
+		};
+
+		button-f1 {
+			label = "F1";
+			linux,code = <BTN_TRIGGER_HAPPY1>;
+			gpios = <&pio 7 12 GPIO_ACTIVE_LOW>;
+		};
+
+		button-f2 {
+			label = "F2";
+			linux,code = <BTN_TRIGGER_HAPPY2>;
+			gpios = <&pio 7 13 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	volume-keys {
+		compatible = "gpio-keys";
+		label = "TrimUI Brick Volume";
+		pinctrl-names = "default";
+		pinctrl-0 = <&volume_keys_pins>;
+
+		button-volup {
+			label = "VOLUP";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&pio 3 21 GPIO_ACTIVE_LOW>;
+		};
+
+		button-voldown {
+			label = "VOLDOWN";
+			linux,code = <KEY_VOLUMEDOWN>;
+			gpios = <&pio 3 20 GPIO_ACTIVE_LOW>;
+		};
 	};
 
 	backlight: backlight {
@@ -113,6 +242,20 @@
 };
 
 &pio {
+	gamepad_pins: gamepad-pins {
+		pins = "PD13", "PD19", "PH15", "PH16", "PD17", "PD14",
+		       "PD15", "PD16", "PD12", "PD18", "PB4", "PH17",
+		       "PB2", "PB5", "PH14", "PH12", "PH13";
+		function = "gpio_in";
+		bias-pull-up;
+	};
+
+	volume_keys_pins: volume-keys-pins {
+		pins = "PD21", "PD20";
+		function = "gpio_in";
+		bias-pull-up;
+	};
+
 	dsi_active_pins: dsi-active-pins {
 		pins = "PD0", "PD1", "PD2", "PD3", "PD4",
 		       "PD5", "PD6", "PD7", "PD8", "PD9";

@@ -32,3 +32,11 @@ are unsupported; a failed power-on requires reboot.
 
 The optional display-metadata adapter supports stock NULL_WSEGL pbuffer
 rendering. It does not provide scanout or zero-copy KMS presentation.
+
+Controls
+--------
+
+GPIO keys are active-low. A/B/X/Y use PD12/PD13/PD18/PD19; the D-pad uses
+PD14..PD17 (down/left/right/up). L/R use PB4/PH17, L2/R2 use PB2/PB5,
+select/start use PH15/PH16, and menu/F1/F2 use PH14/PH12/PH13.
+Volume down/up use PD20/PD21. The PMIC power key is not yet supported.
