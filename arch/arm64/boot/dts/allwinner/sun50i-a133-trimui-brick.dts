@@ -128,6 +128,7 @@
 
 	volume-keys {
 		compatible = "gpio-keys";
+		autorepeat;
 		label = "TrimUI Brick Volume";
 		pinctrl-names = "default";
 		pinctrl-0 = <&volume_keys_pins>;
