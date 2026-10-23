@@ -36,17 +36,15 @@ struct pwm_bl_data {
 	void			(*exit)(struct device *);
 };
 
-static void pwm_backlight_power_on(struct pwm_bl_data *pb)
+static int pwm_backlight_power_on(struct pwm_bl_data *pb)
 {
 	int err;
 
-	if (pb->enabled)
-		return;
-
-	if (pb->power_supply) {
+	/* A failed disable can retain the supply reference with GPIO low. */
+	if (!pb->enabled && pb->power_supply) {
 		err = regulator_enable(pb->power_supply);
 		if (err < 0)
-			dev_err(pb->dev, "failed to enable power supply\n");
+			return err;
 	}
 
 	if (pb->post_pwm_on_delay)
@@ -55,21 +53,28 @@ static void pwm_backlight_power_on(struct pwm_bl_data *pb)
 	gpiod_set_value_cansleep(pb->enable_gpio, 1);
 
 	pb->enabled = true;
+	return 0;
 }
 
-static void pwm_backlight_power_off(struct pwm_bl_data *pb)
+static int pwm_backlight_power_off(struct pwm_bl_data *pb)
 {
 	if (!pb->enabled)
-		return;
+		return 0;
 
 	gpiod_set_value_cansleep(pb->enable_gpio, 0);
 
 	if (pb->pwm_off_delay)
 		msleep(pb->pwm_off_delay);
 
-	if (pb->power_supply)
-		regulator_disable(pb->power_supply);
+	if (pb->power_supply) {
+		int ret = regulator_disable(pb->power_supply);
+
+		/* Keep the reference recorded so a later shutdown can retry. */
+		if (ret)
+			return ret;
+	}
 	pb->enabled = false;
+	return 0;
 }
 
 static int compute_duty_cycle(struct pwm_bl_data *pb, int brightness, struct pwm_state *state)
@@ -92,6 +97,7 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 {
 	struct pwm_bl_data *pb = bl_get_data(bl);
 	int brightness = backlight_get_brightness(bl);
+	int ret, power_ret = 0;
 	struct pwm_state state;
 
 	if (pb->notify)
@@ -101,11 +107,20 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 		pwm_get_state(pb->pwm, &state);
 		state.duty_cycle = compute_duty_cycle(pb, brightness, &state);
 		state.enabled = true;
-		pwm_apply_might_sleep(pb->pwm, &state);
+		ret = pwm_apply_might_sleep(pb->pwm, &state);
+		if (ret)
+			return ret;
 
-		pwm_backlight_power_on(pb);
+		ret = pwm_backlight_power_on(pb);
+		if (ret) {
+			/* No enable GPIO was asserted; best-effort PWM rollback. */
+			state.enabled = false;
+			state.duty_cycle = 0;
+			pwm_apply_might_sleep(pb->pwm, &state);
+			return ret;
+		}
 	} else {
-		pwm_backlight_power_off(pb);
+		power_ret = pwm_backlight_power_off(pb);
 
 		pwm_get_state(pb->pwm, &state);
 		state.duty_cycle = 0;
@@ -118,7 +133,9 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 		 * inactive output.
 		 */
 		state.enabled = !pb->power_supply && !pb->enable_gpio;
-		pwm_apply_might_sleep(pb->pwm, &state);
+		ret = pwm_apply_might_sleep(pb->pwm, &state);
+		if (power_ret || ret)
+			return power_ret ? power_ret : ret;
 	}
 
 	if (pb->notify_after)
@@ -601,7 +618,17 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 
 	bl->props.brightness = data->dft_brightness;
 	bl->props.power = pwm_backlight_initial_power_state(pb);
-	backlight_update_status(bl);
+	ret = backlight_update_status(bl);
+	if (ret) {
+		backlight_device_unregister(bl);
+		gpiod_set_value_cansleep(pb->enable_gpio, 0);
+		pwm_backlight_power_off(pb);
+		pwm_get_state(pb->pwm, &state);
+		state.duty_cycle = 0;
+		state.enabled = false;
+		pwm_apply_might_sleep(pb->pwm, &state);
+		goto err_alloc;
+	}
 
 	platform_set_drvdata(pdev, bl);
 	return 0;
