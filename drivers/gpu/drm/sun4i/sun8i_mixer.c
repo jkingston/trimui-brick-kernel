@@ -879,7 +879,7 @@ static const struct sun8i_mixer_cfg sun50i_a133_mixer0_cfg = {
 		.de2_fcc_alpha	= 1,
 	},
 	.de_type	= SUN8I_MIXER_DE2,
-	.mod_rate	= 297000000,
+	.mod_rate	= 300000000,
 	.ui_num		= 2,
 	.vi_num		= 2,
 };
@@ -894,7 +894,7 @@ static const struct sun8i_mixer_cfg sun50i_a133_mixer1_cfg = {
 		.de2_fcc_alpha	= 1,
 	},
 	.de_type	= SUN8I_MIXER_DE2,
-	.mod_rate	= 297000000,
+	.mod_rate	= 300000000,
 	.ui_num		= 2,
 	.vi_num		= 1,
 };
