@@ -228,6 +228,8 @@ void sun4i_tcon_set_status(struct sun4i_tcon *tcon,
 	sun4i_tcon_channel_set_status(tcon, channel, enabled);
 }
 
+EXPORT_SYMBOL_GPL(sun4i_tcon_set_status);
+
 void sun4i_tcon_enable_vblank(struct sun4i_tcon *tcon, bool enable)
 {
 	u32 mask, val = 0;

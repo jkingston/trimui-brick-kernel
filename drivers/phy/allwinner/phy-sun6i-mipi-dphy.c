@@ -9,6 +9,7 @@
 #include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/module.h>
+#include <linux/io.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -85,6 +86,10 @@
 #define SUN6I_DPHY_ANA0_REG_SELSCK		BIT(0)
 
 #define SUN6I_DPHY_ANA1_REG		0x50
+/* Stock Brick BSP revision workaround; electrical meaning is unverified. */
+#define BRICK_DPHY_ANA1_REVISION_BIT		BIT(5)
+#define BRICK_SOC_REVISION_MASK		GENMASK(2, 0)
+
 #define SUN6I_DPHY_ANA1_REG_VTTMODE		BIT(31)
 #define SUN6I_DPHY_ANA1_REG_CSMPS(n)		(((n) & 3) << 28)
 #define SUN6I_DPHY_ANA1_REG_SVTT(n)		(((n) & 0xf) << 24)
@@ -182,6 +187,7 @@ struct sun6i_dphy;
 struct sun6i_dphy_variant {
 	void	(*tx_power_on)(struct sun6i_dphy *dphy);
 	bool	rx_supported;
+	bool	brick_revision_workaround;
 };
 
 struct sun6i_dphy {
@@ -195,6 +201,7 @@ struct sun6i_dphy {
 
 	const struct sun6i_dphy_variant		*variant;
 	enum sun6i_dphy_direction		direction;
+	u32					brick_soc_revision;
 };
 
 static int sun6i_dphy_init(struct phy *phy)
@@ -393,6 +400,13 @@ static int sun6i_dphy_tx_power_on(struct sun6i_dphy *dphy)
 			   SUN6I_DPHY_ANA1_REG_VTTMODE,
 			   SUN6I_DPHY_ANA1_REG_VTTMODE);
 
+	/* Match stock dsi_dphy_open before serializers and GCTL.EN. */
+	if (dphy->variant->brick_revision_workaround)
+		regmap_update_bits(dphy->regs, SUN6I_DPHY_ANA1_REG,
+				   BRICK_DPHY_ANA1_REVISION_BIT,
+				   (dphy->brick_soc_revision & BRICK_SOC_REVISION_MASK) ?
+				   BRICK_DPHY_ANA1_REVISION_BIT : 0);
+
 	regmap_update_bits(dphy->regs, SUN6I_DPHY_ANA2_REG,
 			   SUN6I_DPHY_ANA2_EN_P2S_CPU_MASK,
 			   SUN6I_DPHY_ANA2_EN_P2S_CPU(lanes_mask));
@@ -575,6 +589,29 @@ static int sun6i_dphy_probe(struct platform_device *pdev)
 	if (!dphy->variant)
 		return -EINVAL;
 
+	if (dphy->variant->brick_revision_workaround) {
+		struct resource *revision_res;
+		void __iomem *revision;
+
+		revision_res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+							  "soc-revision");
+		if (!revision_res || resource_size(revision_res) != sizeof(u32))
+			return dev_err_probe(&pdev->dev, -EINVAL,
+					     "Missing four-byte SoC revision resource\n");
+
+		/* Read-only alias into the shared system-control register block.
+		 * Its SRAM regmap does not expose this revision register.
+		 */
+		revision = devm_ioremap(&pdev->dev, revision_res->start,
+				       resource_size(revision_res));
+		if (!revision)
+			return -ENOMEM;
+		dphy->brick_soc_revision = readl(revision);
+		dev_info(&pdev->dev, "Brick PHY SoC revision %#x (field %u)\n",
+			 dphy->brick_soc_revision,
+			 (unsigned int)(dphy->brick_soc_revision & BRICK_SOC_REVISION_MASK));
+	}
+
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs)) {
 		dev_err(&pdev->dev, "Couldn't map the DPHY encoder registers\n");
@@ -635,7 +672,16 @@ static const struct sun6i_dphy_variant sun50i_a100_mipi_dphy_variant = {
 	.tx_power_on	= sun50i_a100_mipi_dphy_tx_power_on,
 };
 
+static const struct sun6i_dphy_variant brick_a133_mipi_dphy_variant = {
+	.tx_power_on	= sun50i_a100_mipi_dphy_tx_power_on,
+	.brick_revision_workaround = true,
+};
+
 static const struct of_device_id sun6i_dphy_of_table[] = {
+	{
+		.compatible = "trimui,brick-experimental-a133-dphy",
+		.data = &brick_a133_mipi_dphy_variant,
+	},
 	{
 		.compatible	= "allwinner,sun6i-a31-mipi-dphy",
 		.data		= &sun6i_a31_mipi_dphy_variant,

@@ -529,7 +529,7 @@ static void sun6i_dsi_setup_format(struct sun6i_dsi *dsi,
 		     SUN6I_DSI_PIXEL_CTL0_FORMAT(fmt));
 }
 
-static void sun6i_dsi_setup_timings(struct sun6i_dsi *dsi,
+static int sun6i_dsi_setup_timings(struct sun6i_dsi *dsi,
 				    struct drm_display_mode *mode)
 {
 	struct mipi_dsi_device *device = dsi->device;
@@ -596,13 +596,30 @@ static void sun6i_dsi_setup_timings(struct sun6i_dsi *dsi,
 		 * case) even with a 4 lanes screen seems to work...
 		 */
 		vblk = 0;
+		if (dsi->variant->brick_experimental) {
+			s64 hsa_payload = (s64)(mode->hsync_end -
+					      mode->hsync_start) * Bpp -
+					      HSA_PACKET_OVERHEAD;
+			s64 frame_bytes = (s64)mode->htotal * Bpp *
+					  mode->vtotal;
+			s64 frame_payload = frame_bytes - (4 + hblk + 2);
+
+			/* Validate before assigning signed lengths to u16. */
+			if (WARN_ON(hsa_payload < 0 || hsa_payload > 0xffff ||
+				    frame_payload < 0))
+				return -EINVAL;
+
+			hsa = hsa_payload;
+			if (device->lanes == 4)
+				vblk = device->lanes - frame_payload % device->lanes;
+		}
 	}
 
 	/* How many bytes do we need to send all payloads? */
 	bytes = max_t(size_t, max(max(hfp, hblk), max(hsa, hbp)), vblk);
 	buffer = kmalloc(bytes, GFP_KERNEL);
 	if (WARN_ON(!buffer))
-		return;
+		return -ENOMEM;
 
 	regmap_write(dsi->regs, SUN6I_DSI_BASIC_CTL_REG, basic_ctl);
 
@@ -667,6 +684,7 @@ static void sun6i_dsi_setup_timings(struct sun6i_dsi *dsi,
 		     sun6i_dsi_build_blk1_pkt(0, buffer, vblk));
 
 	kfree(buffer);
+	return 0;
 }
 
 static int sun6i_dsi_start(struct sun6i_dsi *dsi,
@@ -798,11 +816,20 @@ static int sun6i_dsi_brick_stop(struct sun6i_dsi *dsi)
 	int ret, panel_error = 0;
 
 	sun6i_dsi_brick_irq_stop(dsi);
+	/* A failed prepare must never trigger HSC during cleanup DCS. */
+	dsi->hsc_pending = false;
 
 	if (dsi->panel_enabled) {
 		drm_panel_disable(dsi->panel);
 		dsi->panel_enabled = dsi->panel->enabled;
 		if (dsi->panel_enabled) panel_error = -EIO;
+	}
+	if (dsi->tcon_on) {
+		struct sun4i_crtc *scrtc =
+			drm_crtc_to_sun4i_crtc(dsi->encoder.crtc);
+
+		sun4i_tcon_set_status(scrtc->tcon, &dsi->encoder, false);
+		dsi->tcon_on = false;
 	}
 	if (dsi->panel_prepared) {
 		/* DCS transfer aborts HS instructions before sending sleep commands. */
@@ -892,7 +919,8 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 	sun6i_dsi_setup_burst(dsi, mode);
 	sun6i_dsi_setup_inst_loop(dsi, mode);
 	sun6i_dsi_setup_format(dsi, mode);
-	sun6i_dsi_setup_timings(dsi, mode);
+	ret = sun6i_dsi_setup_timings(dsi, mode);
+	if (ret) goto failed;
 
 	ret = phy_init(dsi->dphy);
 	if (ret) goto failed;
@@ -907,6 +935,10 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 	ret = phy_power_on(dsi->dphy);
 	if (ret) goto failed;
 	dsi->phy_on = true;
+	/* The matched panel powers/resets before its first DCS transfer.
+	 * Start HSC at that boundary, not before reset or after its table.
+	 */
+	dsi->hsc_pending = true;
 	drm_panel_prepare(dsi->panel);
 	if (!dsi->panel->prepared) {
 		/* The matched panel quiesces reset/pins on failed prepare and
@@ -917,9 +949,11 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 		goto failed;
 	}
 	dsi->panel_prepared = true;
-	ret = sun6i_dsi_start(dsi, DSI_START_HSC);
-	if (ret) goto failed;
-	udelay(1000);
+	/* A successful prepare must have sent the verified command table. */
+	if (dsi->hsc_pending) { ret = -EIO; goto failed; }
+	sun4i_tcon_set_status(
+		drm_crtc_to_sun4i_crtc(encoder->crtc)->tcon, encoder, true);
+	dsi->tcon_on = true;
 	ret = sun6i_dsi_start(dsi, DSI_START_HSD);
 	if (ret) goto failed;
 	sun6i_dsi_brick_irq_start(dsi);
@@ -1261,6 +1295,24 @@ static ssize_t sun6i_dsi_transfer(struct mipi_dsi_host *host,
 	struct sun6i_dsi *dsi = host_to_sun6i_dsi(host);
 	int ret;
 
+	if (dsi->variant->brick_experimental) {
+		/* Reject shutdown/removal transfers before touching clocked MMIO. */
+		if (!dsi->phy_on || !dsi->clock_on || !dsi->irq_bus_on ||
+		    !dsi->reset_deasserted)
+			return -ESHUTDOWN;
+		if (dsi->hsc_pending) {
+			ret = sun6i_dsi_start(dsi, DSI_START_HSC);
+			if (ret)
+				return ret;
+			ret = sun6i_dsi_inst_wait_for_completion(dsi);
+			if (ret < 0) {
+				sun6i_dsi_inst_abort(dsi);
+				return ret;
+			}
+			dsi->hsc_pending = false;
+		}
+	}
+
 	ret = sun6i_dsi_inst_wait_for_completion(dsi);
 	if (ret < 0)
 		sun6i_dsi_inst_abort(dsi);
@@ -1350,6 +1402,7 @@ static int sun6i_dsi_bind(struct device *dev, struct device *master,
 			goto err_cleanup_connector;
 		}
 		scrtc = drm_crtc_to_sun4i_crtc(crtc);
+		scrtc->encoder_managed_tcon = true;
 		scrtc->external_vblank_data = dsi;
 		scrtc->external_vblank = sun6i_dsi_brick_set_vblank;
 	}

@@ -117,7 +117,8 @@ static void sun4i_crtc_atomic_disable(struct drm_crtc *crtc,
 
 	drm_crtc_vblank_off(crtc);
 
-	sun4i_tcon_set_status(scrtc->tcon, encoder, false);
+	if (!scrtc->encoder_managed_tcon)
+		sun4i_tcon_set_status(scrtc->tcon, encoder, false);
 
 	if (crtc->state->event && !crtc->state->active) {
 		spin_lock_irq(&crtc->dev->event_lock);
@@ -139,7 +140,8 @@ static void sun4i_crtc_atomic_enable(struct drm_crtc *crtc,
 	if (!sun4i_tcon_mode_ready(scrtc->tcon))
 		return;
 
-	sun4i_tcon_set_status(scrtc->tcon, encoder, true);
+	if (!scrtc->encoder_managed_tcon)
+		sun4i_tcon_set_status(scrtc->tcon, encoder, true);
 
 	drm_crtc_vblank_on(crtc);
 }

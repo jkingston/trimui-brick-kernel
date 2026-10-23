@@ -22,6 +22,8 @@ struct sun4i_crtc {
 	 */
 	int (*external_vblank)(void *data, bool enable);
 	void *external_vblank_data;
+	/* Brick encoder owns the single TCON clock reference and stage order. */
+	bool encoder_managed_tcon;
 };
 
 static inline struct sun4i_crtc *drm_crtc_to_sun4i_crtc(struct drm_crtc *crtc)
