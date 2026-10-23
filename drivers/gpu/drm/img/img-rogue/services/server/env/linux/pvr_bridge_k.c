@@ -304,7 +304,7 @@ PVRSRV_ERROR LinuxBridgeBlockClientsAccess(struct pvr_drm_private *psDevPriv,
 {
 	PVRSRV_ERROR eError;
 	IMG_HANDLE hEvent;
-	IMG_INT iSuspendCount;
+	IMG_INT iSuspendCount __maybe_unused;
 
 	eError = OSEventObjectOpen(g_hDriverThreadEventObject, &hEvent);
 	if (eError != PVRSRV_OK)
@@ -358,7 +358,7 @@ CloseEventObject:
 PVRSRV_ERROR LinuxBridgeUnblockClientsAccess(struct pvr_drm_private *psDevPriv)
 {
 	PVRSRV_ERROR eError;
-	IMG_INT iSuspendCount;
+	IMG_INT iSuspendCount __maybe_unused;
 
 	/* resume the driver and then signal so any waiting threads wake up */
 	if (OSAtomicCompareExchange(&psDevPriv->suspended, _SUSPENDED,

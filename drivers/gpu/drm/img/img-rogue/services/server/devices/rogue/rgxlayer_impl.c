@@ -88,7 +88,7 @@ void RGXCommentLog(const void *hPrivate,
 {
 #if defined(PDUMP)
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	va_list argList;
 	va_start(argList, pszString);
 
@@ -130,7 +130,7 @@ IMG_UINT32 RGXGetFWCorememSize(const void *hPrivate)
 {
 #if defined(RGX_FEATURE_META_COREMEM_SIZE_MAX_VALUE_IDX)
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	IMG_UINT32 ui32CorememSize = 0;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -154,7 +154,7 @@ IMG_UINT32 RGXGetFWCorememSize(const void *hPrivate)
 void RGXWriteReg32(const void *hPrivate, IMG_UINT32 ui32RegAddr, IMG_UINT32 ui32RegValue)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	void __iomem *pvRegsBase;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -176,7 +176,7 @@ void RGXWriteReg32(const void *hPrivate, IMG_UINT32 ui32RegAddr, IMG_UINT32 ui32
 void RGXWriteReg64(const void *hPrivate, IMG_UINT32 ui32RegAddr, IMG_UINT64 ui64RegValue)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	void __iomem *pvRegsBase;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -198,7 +198,7 @@ void RGXWriteReg64(const void *hPrivate, IMG_UINT32 ui32RegAddr, IMG_UINT64 ui64
 IMG_UINT32 RGXReadReg32(const void *hPrivate, IMG_UINT32 ui32RegAddr)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	void __iomem *pvRegsBase;
 	IMG_UINT32 ui32RegValue;
 
@@ -227,7 +227,7 @@ IMG_UINT32 RGXReadReg32(const void *hPrivate, IMG_UINT32 ui32RegAddr)
 IMG_UINT64 RGXReadReg64(const void *hPrivate, IMG_UINT32 ui32RegAddr)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	void __iomem *pvRegsBase;
 	IMG_UINT64 ui64RegValue;
 
@@ -259,7 +259,7 @@ IMG_UINT32 RGXReadModifyWriteReg64(const void *hPrivate,
 		IMG_UINT64 uiRegKeepMask)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	void __iomem *pvRegsBase;
 #if defined(PDUMP)
 	PDUMP_FLAGS_T ui32PDumpFlags = PDUMP_FLAGS_CONTINUOUS;
@@ -313,7 +313,7 @@ PVRSRV_ERROR RGXPollReg32(const void *hPrivate,
 		IMG_UINT32 ui32RegMask)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	void __iomem *pvRegsBase;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -353,7 +353,7 @@ PVRSRV_ERROR RGXPollReg64(const void *hPrivate,
 		IMG_UINT64 ui64RegMask)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	void __iomem *pvRegsBase;
 
 	/* Split lower and upper words */
@@ -414,7 +414,7 @@ PVRSRV_ERROR RGXPollReg64(const void *hPrivate,
 
 void RGXWaitCycles(const void *hPrivate, IMG_UINT32 ui32Cycles, IMG_UINT32 ui32TimeUs)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psDevInfo = ((RGX_LAYER_PARAMS*)hPrivate)->psDevInfo;
@@ -435,7 +435,7 @@ void RGXWriteKernelMMUPC64(const void *hPrivate,
 		IMG_UINT32 ui32PCRegShift,
 		IMG_UINT64 ui64PCVal)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psDevInfo = ((RGX_LAYER_PARAMS*)hPrivate)->psDevInfo;
@@ -459,7 +459,7 @@ void RGXWriteKernelMMUPC32(const void *hPrivate,
 		IMG_UINT32 ui32PCRegShift,
 		IMG_UINT32 ui32PCVal)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psDevInfo = ((RGX_LAYER_PARAMS*)hPrivate)->psDevInfo;
@@ -491,7 +491,7 @@ void RGXMIPSWrapperConfig(const void *hPrivate,
 		IMG_UINT32 ui32GPURegsAlign,
 		IMG_UINT32 ui32BootMode)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	PDUMP_FLAGS_T ui32PDumpFlags = PDUMP_FLAGS_CONTINUOUS;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -592,7 +592,7 @@ void RGXBootRemapConfig(const void *hPrivate,
 		IMG_UINT64 ui64Config2PhyMask,
 		IMG_UINT64 ui64Config2Settings)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	IMG_UINT32 ui32BootRemapMemOffset = RGXGetFWImageSectionOffset(NULL, MIPS_BOOT_CODE);
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -621,7 +621,7 @@ void RGXCodeRemapConfig(const void *hPrivate,
 		IMG_UINT64 ui64Config2PhyMask,
 		IMG_UINT64 ui64Config2Settings)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	IMG_UINT32 ui32CodeRemapMemOffset = RGXGetFWImageSectionOffset(NULL, MIPS_EXCEPTIONS_CODE);
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -650,7 +650,7 @@ void RGXDataRemapConfig(const void *hPrivate,
 		IMG_UINT64 ui64Config2PhyMask,
 		IMG_UINT64 ui64Config2Settings)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	IMG_UINT32 ui32DataRemapMemOffset = RGXGetFWImageSectionOffset(NULL, MIPS_BOOT_DATA);
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -679,7 +679,7 @@ void RGXTrampolineRemapConfig(const void *hPrivate,
 		IMG_UINT64 ui64Config2PhyMask,
 		IMG_UINT64 ui64Config2Settings)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	PDUMP_FLAGS_T ui32PDumpFlags = PDUMP_FLAGS_CONTINUOUS;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -726,7 +726,7 @@ void RGXTrampolineRemapConfig(const void *hPrivate,
 #define MAX_NUM_COHERENCY_TESTS  (10)
 IMG_BOOL RGXDoFWSlaveBoot(const void *hPrivate)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	PVRSRV_DEVICE_CONFIG *psDevConfig;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -777,7 +777,7 @@ extern void do_invalid_range(unsigned long start, unsigned long len);
 PVRSRV_ERROR RGXFabricCoherencyTest(const void *hPrivate)
 {
 #if defined(RGX_FEATURE_META_MAX_VALUE_IDX)
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	IMG_UINT32 *pui32FabricCohTestBufferCpuVA;
 	DEVMEM_MEMDESC *psFabricCohTestBufferMemDesc;
 	RGXFWIF_DEV_VIRTADDR sFabricCohTestBufferDevVA;
@@ -1198,7 +1198,7 @@ IMG_INT32 RGXDeviceGetFeatureValue(const void *hPrivate, IMG_UINT64 ui64Feature)
 {
 	IMG_INT32 i32Ret = -1;
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 	PVRSRV_DEVICE_NODE *psDeviceNode;
 
 	PVR_ASSERT(hPrivate != NULL);
@@ -1218,7 +1218,7 @@ IMG_INT32 RGXDeviceGetFeatureValue(const void *hPrivate, IMG_UINT64 ui64Feature)
 IMG_BOOL RGXDeviceHasFeature(const void *hPrivate, IMG_UINT64 ui64Feature)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 
@@ -1231,7 +1231,7 @@ IMG_BOOL RGXDeviceHasFeature(const void *hPrivate, IMG_UINT64 ui64Feature)
 IMG_BOOL RGXDeviceHasErnBrn(const void *hPrivate, IMG_UINT64 ui64ErnsBrns)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psParams = (RGX_LAYER_PARAMS*)hPrivate;
@@ -1243,7 +1243,7 @@ IMG_BOOL RGXDeviceHasErnBrn(const void *hPrivate, IMG_UINT64 ui64ErnsBrns)
 IMG_UINT32 RGXGetDeviceSLCBanks(const void *hPrivate)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psParams = (RGX_LAYER_PARAMS*)hPrivate;
@@ -1259,7 +1259,7 @@ IMG_UINT32 RGXGetDeviceSLCBanks(const void *hPrivate)
 IMG_UINT32 RGXGetDeviceCacheLineSize(const void *hPrivate)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psParams = (RGX_LAYER_PARAMS*)hPrivate;
@@ -1275,7 +1275,7 @@ IMG_UINT32 RGXGetDeviceCacheLineSize(const void *hPrivate)
 IMG_UINT32 RGXGetDevicePhysBusWidth(const void *hPrivate)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psParams = (RGX_LAYER_PARAMS*)hPrivate;
@@ -1291,7 +1291,7 @@ IMG_UINT32 RGXGetDevicePhysBusWidth(const void *hPrivate)
 IMG_BOOL RGXDevicePA0IsValid(const void *hPrivate)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psParams = (RGX_LAYER_PARAMS*)hPrivate;
@@ -1302,7 +1302,7 @@ IMG_BOOL RGXDevicePA0IsValid(const void *hPrivate)
 
 void RGXAcquireBootCodeAddr(const void *hPrivate, IMG_DEV_VIRTADDR *psBootCodeAddr)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psDevInfo = ((RGX_LAYER_PARAMS*)hPrivate)->psDevInfo;
@@ -1312,7 +1312,7 @@ void RGXAcquireBootCodeAddr(const void *hPrivate, IMG_DEV_VIRTADDR *psBootCodeAd
 
 void RGXAcquireBootDataAddr(const void *hPrivate, IMG_DEV_VIRTADDR *psBootDataAddr)
 {
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psDevInfo = ((RGX_LAYER_PARAMS*)hPrivate)->psDevInfo;
@@ -1323,7 +1323,7 @@ void RGXAcquireBootDataAddr(const void *hPrivate, IMG_DEV_VIRTADDR *psBootDataAd
 IMG_BOOL RGXDeviceAckIrq(const void *hPrivate)
 {
 	RGX_LAYER_PARAMS *psParams;
-	PVRSRV_RGXDEV_INFO *psDevInfo;
+	PVRSRV_RGXDEV_INFO *psDevInfo __maybe_unused;
 
 	PVR_ASSERT(hPrivate != NULL);
 	psParams = (RGX_LAYER_PARAMS*)hPrivate;

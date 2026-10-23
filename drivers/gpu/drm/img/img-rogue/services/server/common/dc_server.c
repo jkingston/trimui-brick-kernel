@@ -2521,7 +2521,7 @@ IMG_HANDLE DCDeviceGetDeviceAtIndex(IMG_UINT32 ui32DeviceIndex)
 /*****************************************************************************
  *                Public interface functions for services                    *
  *****************************************************************************/
-PVRSRV_ERROR DCInit()
+PVRSRV_ERROR DCInit(void)
 {
 	PVRSRV_ERROR eError;
 
@@ -2557,7 +2557,7 @@ PVRSRV_ERROR DCInit()
 	return eError;
 }
 
-PVRSRV_ERROR DCDeInit()
+PVRSRV_ERROR DCDeInit(void)
 {
 	PVRSRV_DATA *psPVRSRVData = PVRSRVGetPVRSRVData();
 

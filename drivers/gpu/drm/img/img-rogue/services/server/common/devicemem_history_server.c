@@ -619,7 +619,7 @@ static void InsertUnmapRangeCommand(PVRSRV_DEVICE_NODE *psDeviceNode,
  */
 static void InsertAllocationToList(IMG_UINT32 *pui32ListHead, IMG_UINT32 ui32Alloc)
 {
-	RECORD_ALLOCATION *psAlloc;
+	RECORD_ALLOCATION *psAlloc __maybe_unused;
 	DEVICEMEM_HISTORY_DATA *psDevHData;
 
 	psDevHData = IMG_CONTAINER_OF(pui32ListHead, DEVICEMEM_HISTORY_DATA,
@@ -670,7 +670,7 @@ static void InsertAllocationToBusyList(DEVICEMEM_HISTORY_DATA *psDevHData,
  */
 static void RemoveAllocationFromList(IMG_UINT32 *pui32ListHead, IMG_UINT32 ui32Alloc)
 {
-	RECORD_ALLOCATION *psAlloc;
+	RECORD_ALLOCATION *psAlloc __maybe_unused;
 
 	DEVICEMEM_HISTORY_DATA *psDevHData;
 
@@ -723,7 +723,7 @@ static void TouchBusyAllocation(DEVICEMEM_HISTORY_DATA *psDevHData, IMG_UINT32 u
 static IMG_UINT32 GetOldestBusyAllocation(DEVICEMEM_HISTORY_DATA *psDevHData)
 {
 	IMG_UINT32 ui32Alloc;
-	RECORD_ALLOCATION *psAlloc;
+	RECORD_ALLOCATION *psAlloc __maybe_unused;
 
 	if (psDevHData != NULL)
 	{
@@ -789,7 +789,7 @@ static PVRSRV_ERROR CreateAllocation(PVRSRV_DEVICE_NODE *psDeviceNode,
 							IMG_UINT32 *puiAllocationIndex)
 {
 	IMG_UINT32 ui32Alloc;
-	RECORD_ALLOCATION *psAlloc;
+	RECORD_ALLOCATION *psAlloc __maybe_unused;
 
 	DEVICEMEM_HISTORY_DATA *psDevHData;
 
@@ -837,7 +837,7 @@ static IMG_BOOL MatchAllocation(DEVICEMEM_HISTORY_DATA *psDevHData,
 						IMG_UINT32 ui32Log2PageSize,
 						IMG_PID uiPID)
 {
-	RECORD_ALLOCATION *psAlloc;
+	RECORD_ALLOCATION *psAlloc __maybe_unused;
 
 	if (psDevHData == NULL)
 	{
@@ -1682,7 +1682,7 @@ static void MapUnmapCommandGetInfo(DEVICEMEM_HISTORY_DATA *psHData,
 	if ((eType == COMMAND_TYPE_MAP_ALL) || ((eType == COMMAND_TYPE_UNMAP_ALL)))
 	{
 		COMMAND_MAP_ALL *psMapAll = &psCommand->u.sMapAll;
-		RECORD_ALLOCATION *psAlloc;
+		RECORD_ALLOCATION *psAlloc __maybe_unused;
 
 		*pbMap = (eType == COMMAND_TYPE_MAP_ALL);
 		*pui32AllocIndex = psMapAll->uiAllocIndex;
@@ -1695,7 +1695,7 @@ static void MapUnmapCommandGetInfo(DEVICEMEM_HISTORY_DATA *psHData,
 	else if ((eType == COMMAND_TYPE_MAP_RANGE) || ((eType == COMMAND_TYPE_UNMAP_RANGE)))
 	{
 		COMMAND_MAP_RANGE *psMapRange = &psCommand->u.sMapRange;
-		RECORD_ALLOCATION *psAlloc;
+		RECORD_ALLOCATION *psAlloc __maybe_unused;
 		IMG_UINT32 ui32StartPage, ui32Count;
 
 		*pbMap = (eType == COMMAND_TYPE_MAP_RANGE);
@@ -1792,7 +1792,7 @@ IMG_BOOL DevicememHistoryQuery(DEVICEMEM_HISTORY_QUERY_IN *psQueryIn,
 
 		while (ui32Alloc != END_OF_LIST)
 		{
-			RECORD_ALLOCATION *psAlloc;
+			RECORD_ALLOCATION *psAlloc __maybe_unused;
 
 			psAlloc = ALLOC_INDEX_TO_PTR(psDevHData, ui32Alloc);
 
@@ -1833,7 +1833,7 @@ found_pid:
 			(eType == COMMAND_TYPE_MAP_RANGE) ||
 			(eType == COMMAND_TYPE_UNMAP_RANGE))
 		{
-			RECORD_ALLOCATION *psAlloc;
+			RECORD_ALLOCATION *psAlloc __maybe_unused;
 			IMG_DEV_VIRTADDR sAllocStartAddrOrig, sAllocEndAddrOrig;
 			IMG_DEV_VIRTADDR sAllocStartAddr, sAllocEndAddr;
 			IMG_BOOL bMap;
@@ -2029,7 +2029,7 @@ static void DevicememHistoryPrintAll(OSDI_IMPL_ENTRY *psEntry)
 			(eType == COMMAND_TYPE_MAP_RANGE) ||
 			(eType == COMMAND_TYPE_UNMAP_RANGE))
 		{
-			RECORD_ALLOCATION *psAlloc;
+			RECORD_ALLOCATION *psAlloc __maybe_unused;
 			IMG_DEV_VIRTADDR sDevVAddrStart, sDevVAddrEnd;
 			IMG_BOOL bMap;
 			IMG_UINT32 ui32AllocIndex;

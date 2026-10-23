@@ -178,7 +178,7 @@ PVRSRV_ERROR SysDmaAllocMem(DMA_ALLOC *psDmaAlloc)
 	PVRSRV_ERROR eError = PVRSRV_OK;
 	struct device *psDev;
 	struct page *psPage;
-	size_t uiSize;
+	size_t uiSize __maybe_unused;
 
 	if (psDmaAlloc == NULL ||
 		psDmaAlloc->hHandle ||
@@ -259,7 +259,7 @@ e0:
  ******************************************************************************/
 void SysDmaFreeMem(DMA_ALLOC *psDmaAlloc)
 {
-	size_t uiSize;
+	size_t uiSize __maybe_unused;
 	struct device *psDev;
 
 	if (psDmaAlloc == NULL ||
@@ -303,7 +303,7 @@ void SysDmaFreeMem(DMA_ALLOC *psDmaAlloc)
  ******************************************************************************/
 PVRSRV_ERROR SysDmaRegisterForIoRemapping(DMA_ALLOC *psDmaAlloc)
 {
-	size_t uiSize;
+	size_t uiSize __maybe_unused;
 	IMG_UINT32 ui32Idx;
 	IMG_BOOL bTabEntryFound = IMG_TRUE;
 	PVRSRV_ERROR eError = PVRSRV_ERROR_TOO_FEW_BUFFERS;
@@ -388,7 +388,7 @@ PVRSRV_ERROR SysDmaRegisterForIoRemapping(DMA_ALLOC *psDmaAlloc)
  ******************************************************************************/
 void SysDmaDeregisterForIoRemapping(DMA_ALLOC *psDmaAlloc)
 {
-	size_t uiSize;
+	size_t uiSize __maybe_unused;
 	IMG_UINT32 ui32Idx;
 
 	if (psDmaAlloc == NULL ||

@@ -3428,7 +3428,7 @@ MMU_UnmapPages(MMU_CONTEXT *psMMUContext,
 	IMG_DEV_VIRTADDR sDevVAddr = sDevVAddrBase;
 	IMG_DEV_PHYADDR sBackingPgDevPhysAddr;
 	IMG_BOOL bUnmap = IMG_TRUE, bDummyBacking = IMG_FALSE, bZeroBacking = IMG_FALSE;
-	IMG_CHAR *pcBackingPageName = NULL;
+	IMG_CHAR *pcBackingPageName __maybe_unused = NULL;
 	PVRSRV_DEVICE_NODE *psDevNode = psMMUContext->psPhysMemCtx->psDevNode;
 
 #if defined(PDUMP)

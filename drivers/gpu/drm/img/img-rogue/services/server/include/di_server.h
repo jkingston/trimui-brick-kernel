@@ -194,6 +194,7 @@ void DIPrintf(const OSDI_IMPL_ENTRY *psEntry, const IMG_CHAR *pszFmt, ...)
  * @Input pszFmt NUL-terminated format string
  * @Input pArgs vs_list object
  */
+__printf(2, 0)
 void DIVPrintf(const OSDI_IMPL_ENTRY *psEntry, const IMG_CHAR *pszFmt,
                va_list pArgs);
 

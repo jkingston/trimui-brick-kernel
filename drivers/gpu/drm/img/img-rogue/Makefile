@@ -100,7 +100,6 @@ bridge_base := $(BRIDGE_SOURCE_ROOT)
 ccflags-y += -D__linux__ -include $(TOP)/config_kernel.h \
  -include $(TOP)/../pvr_string_compat.h \
  -include $(TOP)/../kernel_config_compatibility.h \
- -I$(OUT)/include \
  -I$(TOP)/.. \
  -I$(TOP)/hwdefs/rogue \
  -I$(TOP)/hwdefs/rogue/km
