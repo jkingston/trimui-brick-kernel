@@ -18,6 +18,7 @@
 struct sun6i_dsi_variant {
 	bool			has_mod_clk;
 	bool			set_mod_clk;
+	bool			brick_experimental;
 };
 
 struct sun6i_dsi {
@@ -39,6 +40,8 @@ struct sun6i_dsi {
 
 	/* Paired disable must not release resources when enable was skipped. */
 	bool			mode_rejected;
+	bool supply_on, reset_deasserted, clock_on, phy_initialized, phy_on;
+	bool panel_prepared, panel_enabled, panel_fault;
 	const struct sun6i_dsi_variant *variant;
 };
 

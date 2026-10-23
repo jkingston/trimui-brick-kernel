@@ -713,6 +713,138 @@ static int sun6i_dsi_start(struct sun6i_dsi *dsi,
 	return 0;
 }
 
+/* Opt-in Brick experiment only. Failed cleanup retains ownership for retry. */
+static int sun6i_dsi_brick_stop(struct sun6i_dsi *dsi)
+{
+	int ret;
+
+	if (dsi->panel_fault) return -EIO;
+
+	if (dsi->panel_enabled) {
+		drm_panel_disable(dsi->panel);
+		if (dsi->panel->enabled) return -EIO;
+		dsi->panel_enabled = false;
+	}
+	if (dsi->panel_prepared) {
+		/* DCS transfer aborts HS instructions before sending sleep commands. */
+		drm_panel_unprepare(dsi->panel);
+		if (dsi->panel->prepared) return -EIO;
+		dsi->panel_prepared = false;
+	}
+	if (dsi->phy_on) {
+		ret = phy_power_off(dsi->dphy);
+		if (ret) return ret;
+		dsi->phy_on = false;
+	}
+	if (dsi->phy_initialized) {
+		ret = phy_exit(dsi->dphy);
+		if (ret) return ret;
+		dsi->phy_initialized = false;
+	}
+	if (dsi->reset_deasserted) {
+		ret = reset_control_assert(dsi->reset);
+		if (ret) return ret;
+		dsi->reset_deasserted = false;
+	}
+	if (dsi->clock_on) {
+		clk_disable_unprepare(dsi->mod_clk);
+		dsi->clock_on = false;
+	}
+	if (dsi->supply_on) {
+		ret = regulator_disable(dsi->regulator);
+		if (ret) return ret;
+		dsi->supply_on = false;
+	}
+	return 0;
+}
+
+static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
+{
+	struct sun6i_dsi *dsi = encoder_to_sun6i_dsi(encoder);
+	struct drm_display_mode *mode = &encoder->crtc->state->adjusted_mode;
+	struct mipi_dsi_device *device = dsi->device;
+	union phy_configure_opts opts = { };
+	struct phy_configure_opts_mipi_dphy *cfg = &opts.mipi_dphy;
+	u16 delay;
+	int ret, cleanup;
+
+	ret = sun6i_dsi_brick_stop(dsi);
+	if (ret) goto failed;
+	ret = regulator_enable(dsi->regulator);
+	if (ret) goto failed;
+	dsi->supply_on = true;
+	ret = reset_control_deassert(dsi->reset);
+	if (ret) goto failed;
+	dsi->reset_deasserted = true;
+	ret = clk_prepare_enable(dsi->mod_clk);
+	if (ret) goto failed;
+	dsi->clock_on = true;
+	/*
+	 * Enable the DSI block.
+	 */
+	regmap_write(dsi->regs, SUN6I_DSI_CTL_REG, SUN6I_DSI_CTL_EN);
+
+	regmap_write(dsi->regs, SUN6I_DSI_BASIC_CTL0_REG,
+		     SUN6I_DSI_BASIC_CTL0_ECC_EN | SUN6I_DSI_BASIC_CTL0_CRC_EN);
+
+	regmap_write(dsi->regs, SUN6I_DSI_TRANS_START_REG, 10);
+	regmap_write(dsi->regs, SUN6I_DSI_TRANS_ZERO_REG, 0);
+
+	sun6i_dsi_inst_init(dsi, dsi->device);
+
+	regmap_write(dsi->regs, SUN6I_DSI_DEBUG_DATA_REG, 0xff);
+
+	delay = sun6i_dsi_get_video_start_delay(dsi, mode);
+	regmap_write(dsi->regs, SUN6I_DSI_BASIC_CTL1_REG,
+		     SUN6I_DSI_BASIC_CTL1_VIDEO_ST_DELAY(delay) |
+		     SUN6I_DSI_BASIC_CTL1_VIDEO_FILL |
+		     SUN6I_DSI_BASIC_CTL1_VIDEO_PRECISION |
+		     SUN6I_DSI_BASIC_CTL1_VIDEO_MODE);
+
+	sun6i_dsi_setup_burst(dsi, mode);
+	sun6i_dsi_setup_inst_loop(dsi, mode);
+	sun6i_dsi_setup_format(dsi, mode);
+	sun6i_dsi_setup_timings(dsi, mode);
+
+	ret = phy_init(dsi->dphy);
+	if (ret) goto failed;
+	dsi->phy_initialized = true;
+	ret = phy_mipi_dphy_get_default_config(mode->clock * 1000,
+		mipi_dsi_pixel_format_to_bpp(device->format), device->lanes, cfg);
+	if (ret) goto failed;
+	ret = phy_set_mode(dsi->dphy, PHY_MODE_MIPI_DPHY);
+	if (ret) goto failed;
+	ret = phy_configure(dsi->dphy, &opts);
+	if (ret) goto failed;
+	ret = phy_power_on(dsi->dphy);
+	if (ret) goto failed;
+	dsi->phy_on = true;
+	drm_panel_prepare(dsi->panel);
+	if (!dsi->panel->prepared) {
+		/* Core cannot expose failed-prepare cleanup status. Keep transport
+		 * resources held rather than assume the panel rails are off.
+		 */
+		dsi->panel_fault = true;
+		dev_err(dsi->dev, "panel prepare failed; resources retained, reboot required\n");
+		return;
+	}
+	dsi->panel_prepared = true;
+	ret = sun6i_dsi_start(dsi, DSI_START_HSC);
+	if (ret) goto failed;
+	udelay(1000);
+	ret = sun6i_dsi_start(dsi, DSI_START_HSD);
+	if (ret) goto failed;
+	/* Only the explicitly matched panel's delay-only enable is permitted. */
+	drm_panel_enable(dsi->panel);
+	if (!dsi->panel->enabled) { ret = -EIO; goto failed; }
+	dsi->panel_enabled = true;
+	return;
+failed:
+	cleanup = sun6i_dsi_brick_stop(dsi);
+	dev_err(dsi->dev, "experimental enable failed: %d, cleanup: %d\n",
+		ret, cleanup);
+}
+
 static void sun6i_dsi_encoder_enable(struct drm_encoder *encoder)
 {
 	struct drm_display_mode *mode = &encoder->crtc->state->adjusted_mode;
@@ -727,6 +859,11 @@ static void sun6i_dsi_encoder_enable(struct drm_encoder *encoder)
 		drm_crtc_to_sun4i_crtc(encoder->crtc)->tcon);
 	if (dsi->mode_rejected) {
 		dev_err(dsi->dev, "TCON rejected mode; leaving DSI and panel untouched\n");
+		return;
+	}
+
+	if (dsi->variant->brick_experimental) {
+		sun6i_dsi_brick_enable(encoder);
 		return;
 	}
 
@@ -807,6 +944,13 @@ static void sun6i_dsi_encoder_disable(struct drm_encoder *encoder)
 
 	if (dsi->mode_rejected) {
 		dsi->mode_rejected = false;
+		return;
+	}
+
+	if (dsi->variant->brick_experimental) {
+		int ret = sun6i_dsi_brick_stop(dsi);
+
+		if (ret) dev_err(dsi->dev, "experimental stop failed: %d\n", ret);
 		return;
 	}
 
@@ -983,6 +1127,14 @@ static int sun6i_dsi_attach(struct mipi_dsi_host *host,
 
 	if (IS_ERR(panel))
 		return PTR_ERR(panel);
+	if (dsi->variant->brick_experimental &&
+	    (!of_device_is_compatible(device->dev.of_node,
+		"trimui,brick-experimental-jd9168") ||
+	     !(device->mode_flags & MIPI_DSI_MODE_VIDEO) ||
+	     device->format != MIPI_DSI_FMT_RGB888 || device->lanes != 4)) {
+		drm_panel_put(panel);
+		return -EOPNOTSUPP;
+	}
 	if (!dsi->drm || !dsi->drm->registered) {
 		drm_panel_put(panel);
 		return -EPROBE_DEFER;
@@ -1245,7 +1397,16 @@ static const struct sun6i_dsi_variant sun50i_a100_mipi_dsi_variant = {
 	.has_mod_clk	= true,
 };
 
+static const struct sun6i_dsi_variant brick_experimental_variant = {
+	.has_mod_clk = true,
+	.brick_experimental = true,
+};
+
 static const struct of_device_id sun6i_dsi_of_table[] = {
+	{
+		.compatible = "trimui,brick-experimental-a133-dsi",
+		.data = &brick_experimental_variant,
+	},
 	{
 		.compatible	= "allwinner,sun6i-a31-mipi-dsi",
 		.data		= &sun6i_a31_mipi_dsi_variant,
@@ -1262,12 +1423,25 @@ static const struct of_device_id sun6i_dsi_of_table[] = {
 };
 MODULE_DEVICE_TABLE(of, sun6i_dsi_of_table);
 
+/* Experimental reset/resume ordering is not qualified. Reject system sleep. */
+static int sun6i_dsi_pm_prepare(struct device *dev)
+{
+	struct sun6i_dsi *dsi = dev_get_drvdata(dev);
+
+	return dsi->variant->brick_experimental ? -EBUSY : 0;
+}
+
+static const struct dev_pm_ops sun6i_dsi_pm_ops = {
+	.prepare = sun6i_dsi_pm_prepare,
+};
+
 static struct platform_driver sun6i_dsi_platform_driver = {
 	.probe		= sun6i_dsi_probe,
 	.remove		= sun6i_dsi_remove,
 	.driver		= {
 		.name		= "sun6i-mipi-dsi",
 		.of_match_table	= sun6i_dsi_of_table,
+		.pm = &sun6i_dsi_pm_ops,
 	},
 };
 module_platform_driver(sun6i_dsi_platform_driver);
