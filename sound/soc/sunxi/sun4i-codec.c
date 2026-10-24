@@ -266,6 +266,15 @@
 #define SUN50I_H616_RAMP_STEP			(4)
 #define SUN50I_H616_RDEN			(0)
 
+/* A133 direct-MMIO codec registers. */
+#define SUN50I_A133_DAC_DPC		0x000
+#define SUN50I_A133_DAC_VOL		0x004
+#define SUN50I_A133_DAC_FIFOS		0x014
+#define SUN50I_A133_DAC_CNT		0x024
+#define SUN50I_A133_DAC_DEBUG		0x028
+#define SUN50I_A133_DAC_ANALOG		0x310
+#define SUN50I_A133_HEADPHONE		0x324
+
 /* TODO H3 DAP (Digital Audio Processing) bits */
 
 #define SUN4I_DMA_MAX_BURST			(8)
@@ -456,10 +465,23 @@ static int sun4i_codec_prepare_playback(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(rtd->card);
 	u32 val;
+	int ret;
 
 	/* Flush the TX FIFO */
-	regmap_field_set_bits(scodec->reg_dac_fifoc,
-			      BIT(SUN4I_CODEC_DAC_FIFOC_FIFO_FLUSH));
+	ret = regmap_field_set_bits(scodec->reg_dac_fifoc,
+				   BIT(SUN4I_CODEC_DAC_FIFOC_FIFO_FLUSH));
+	if (scodec->a133_playback) {
+		if (ret)
+			return ret;
+		/* W1C: TX empty, underrun and overrun status, not FIFO count. */
+		ret = regmap_write(scodec->regmap, SUN50I_A133_DAC_FIFOS,
+				   BIT(3) | BIT(2) | BIT(1));
+		if (ret)
+			return ret;
+		ret = regmap_write(scodec->regmap, SUN50I_A133_DAC_CNT, 0);
+		if (ret)
+			return ret;
+	}
 
 	/* Set TX FIFO Empty Trigger Level */
 	regmap_field_update_bits(scodec->reg_dac_fifoc,
@@ -2155,12 +2177,6 @@ static const struct regmap_config suniv_codec_regmap_config = {
 	.max_register	= SUNIV_CODEC_ADC_DBG,
 };
 
-#define SUN50I_A133_DAC_DPC 0x000
-#define SUN50I_A133_DAC_VOL 0x004
-#define SUN50I_A133_DAC_DEBUG 0x028
-#define SUN50I_A133_DAC_ANALOG 0x310
-#define SUN50I_A133_HEADPHONE 0x324
-
 static int a133_dac_event(struct snd_soc_dapm_widget *w,
 			 struct snd_kcontrol *k, int event)
 {
@@ -2193,8 +2209,14 @@ static int a133_headphone_event(struct snd_soc_dapm_widget *w,
 static int a133_component_probe(struct snd_soc_component *c)
 {
 	static const struct { unsigned int reg, mask, value; } init[] = {
-		{ SUN50I_A133_DAC_DPC, GENMASK(17, 12), 48 << 12 },
-		{ SUN50I_A133_DAC_VOL, BIT(16), 0 }, /* Common DAC attenuation. */
+		/* Match DAPM's initial off state, including inherited analog state. */
+		{ SUN50I_A133_HEADPHONE, BIT(15), 0 },
+		{ SUN50I_A133_HEADPHONE, BIT(10), 0 },
+		{ SUN50I_A133_HEADPHONE, BIT(11), 0 },
+		{ SUN50I_A133_DAC_DPC, BIT(31) | GENMASK(17, 12), 48 << 12 },
+		{ SUN50I_A133_DAC_ANALOG, GENMASK(15, 12), 0 },
+		/* Vendor channel gains; common DAC attenuation remains low. */
+		{ SUN50I_A133_DAC_VOL, GENMASK(16, 0), 0x1a0a0 },
 		{ SUN50I_A133_DAC_ANALOG, GENMASK(30, 28), 0 },
 		{ SUN50I_A133_DAC_ANALOG, GENMASK(4, 0) | BIT(13) | BIT(12), 0 },
 		{ SUN50I_A133_DAC_DEBUG, BIT(6), BIT(6) }, /* Vendor L/R swap. Verify physically. */
