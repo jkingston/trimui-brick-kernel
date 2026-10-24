@@ -1684,7 +1684,7 @@ config RTC_DRV_TRIMUI_BRICK
 	depends on COMMON_CLK && RESET_CONTROLLER
 	help
 	  Access the A133 RTC using the stock Brick firmware day encoding.
-	  Preserves inherited clock outputs. Alarms are not yet supported.
+	  Preserves inherited clock outputs and supports awake alarm IRQs.
 
 config RTC_DRV_SUN6I
 	bool "Allwinner A31 RTC"

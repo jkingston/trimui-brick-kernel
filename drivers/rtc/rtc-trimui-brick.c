@@ -3,6 +3,7 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
@@ -10,10 +11,16 @@
 #include <linux/reset.h>
 #include <linux/rtc.h>
 #include <linux/timekeeping.h>
+#include <linux/spinlock.h>
 
 #define BRICK_RTC_CTRL	0x00
 #define BRICK_RTC_DAY_BUSY	BIT(7)
 #define BRICK_RTC_HMS_BUSY	BIT(8)
+#define BRICK_RTC_ALARM_BUSY	BIT(9)
+#define BRICK_RTC_ALARM_DAY	0x20
+#define BRICK_RTC_ALARM_HMS	0x24
+#define BRICK_RTC_ALARM_PENDING	0x30
+#define BRICK_RTC_ALARM_MAX_GAP	(255LL * 86400)
 #define BRICK_RTC_ALARM_ENABLE	0x28
 #define BRICK_RTC_ALARM_IRQ_ENABLE	0x2c
 #define BRICK_RTC_MAX_SECONDS	5662223999LL
@@ -24,6 +31,13 @@
 struct brick_rtc {
 	void __iomem *base;
 	struct mutex lock;
+	spinlock_t alarm_lock;
+	struct rtc_device *rtc;
+	int irq;
+	bool irq_masked;
+	bool stopping;
+	bool alarm_fault;
+	bool alarm_owned;
 	bool time_uncertain;
 };
 
@@ -64,7 +78,8 @@ static int brick_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	int ret;
 
 	mutex_lock(&chip->lock);
-	ret = chip->time_uncertain ? -EIO : brick_rtc_snapshot(chip, &seconds);
+	ret = chip->stopping ? -ENODEV : chip->time_uncertain ? -EIO :
+		brick_rtc_snapshot(chip, &seconds);
 	mutex_unlock(&chip->lock);
 	if (!ret)
 		rtc_time64_to_tm(seconds, tm);
@@ -106,9 +121,19 @@ static int brick_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	if (ret)
 		return ret;
 	mutex_lock(&chip->lock);
-	/* An inherited alarm is not owned by this driver yet. */
+	if (chip->stopping) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	/* RTC core holds ops_lock: include timers awaiting deferred IRQ work. */
+	if (timerqueue_getnext(&chip->rtc->timerqueue)) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	/* Userspace must explicitly disable/service an alarm before time jumps. */
 	if ((readl(chip->base + BRICK_RTC_ALARM_ENABLE) |
-	     readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE)) & BIT(0)) {
+	     readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE) |
+	     readl(chip->base + BRICK_RTC_ALARM_PENDING)) & BIT(0)) {
 		ret = -EBUSY;
 		goto unlock;
 	}
@@ -143,9 +168,333 @@ unlock:
 	return ret;
 }
 
+/* Gate and pending accesses are serialized against the IRQ handler. */
+static void brick_rtc_mask_irq(struct brick_rtc *chip)
+{
+	if (!chip->irq_masked) {
+		chip->irq_masked = true;
+		disable_irq_nosync(chip->irq);
+	}
+}
+
+static int brick_rtc_disarm(struct brick_rtc *chip)
+{
+	u32 value;
+
+	value = readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE);
+	writel(value & ~BIT(0), chip->base + BRICK_RTC_ALARM_IRQ_ENABLE);
+	value = readl(chip->base + BRICK_RTC_ALARM_ENABLE);
+	writel(value & ~BIT(0), chip->base + BRICK_RTC_ALARM_ENABLE);
+	if ((readl(chip->base + BRICK_RTC_ALARM_ENABLE) |
+	     readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE)) & BIT(0)) {
+		chip->alarm_fault = true;
+		brick_rtc_mask_irq(chip);
+		return -EIO;
+	}
+	return 0;
+}
+
+/* Only after disarming: no new match can race the W1C readback. */
+static int brick_rtc_ack_alarm(struct brick_rtc *chip)
+{
+	writel(BIT(0), chip->base + BRICK_RTC_ALARM_PENDING);
+	if (readl(chip->base + BRICK_RTC_ALARM_PENDING) & BIT(0)) {
+		chip->alarm_fault = true;
+		brick_rtc_mask_irq(chip);
+		return -EIO;
+	}
+	return 0;
+}
+
+static int brick_rtc_alarm_snapshot(struct brick_rtc *chip, time64_t *seconds)
+{
+	u32 day, hms;
+	int attempt;
+
+	for (attempt = 0; attempt < 10; attempt++) {
+		day = readl(chip->base + BRICK_RTC_ALARM_DAY);
+		hms = readl(chip->base + BRICK_RTC_ALARM_HMS);
+		if (day == readl(chip->base + BRICK_RTC_ALARM_DAY) &&
+		    hms == readl(chip->base + BRICK_RTC_ALARM_HMS))
+			return brick_rtc_decode(day, hms, seconds);
+	}
+	return -EIO;
+}
+
+static int brick_rtc_alarm_future(struct brick_rtc *chip, time64_t target)
+{
+	time64_t now;
+	int ret = brick_rtc_snapshot(chip, &now);
+
+	if (ret)
+		return ret;
+	if (target <= now)
+		return -ETIME;
+	/* Stock's qualified scheduling horizon, not a register-width limit. */
+	if (target - now > BRICK_RTC_ALARM_MAX_GAP)
+		return -ERANGE;
+	return 0;
+}
+
+static int brick_rtc_arm(struct brick_rtc *chip, time64_t target)
+{
+	time64_t now;
+	u32 value;
+	int ret;
+
+	ret = brick_rtc_alarm_future(chip, target);
+	if (ret)
+		return ret;
+	ret = brick_rtc_ack_alarm(chip);
+	if (ret)
+		return ret;
+	value = readl(chip->base + BRICK_RTC_ALARM_ENABLE);
+	writel(value | BIT(0), chip->base + BRICK_RTC_ALARM_ENABLE);
+	value = readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE);
+	writel(value | BIT(0), chip->base + BRICK_RTC_ALARM_IRQ_ENABLE);
+	if (!(readl(chip->base + BRICK_RTC_ALARM_ENABLE) & BIT(0)) ||
+	    !(readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE) & BIT(0)))
+		return -EIO;
+	/* A second can tick between the future check and enabling the match. */
+	ret = brick_rtc_snapshot(chip, &now);
+	if (ret)
+		return ret;
+	if (now >= target &&
+	    !(readl(chip->base + BRICK_RTC_ALARM_PENDING) & BIT(0)))
+		return -ETIME;
+	return 0;
+}
+
+static int brick_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alarm)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+	unsigned long flags;
+	time64_t seconds;
+	int ret;
+
+	mutex_lock(&chip->lock);
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	ret = chip->stopping ? -ENODEV : brick_rtc_alarm_snapshot(chip, &seconds);
+	alarm->enabled = !!(readl(chip->base + BRICK_RTC_ALARM_ENABLE) & BIT(0)) &&
+		!!(readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE) & BIT(0));
+	alarm->pending = !!(readl(chip->base + BRICK_RTC_ALARM_PENDING) & BIT(0));
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	mutex_unlock(&chip->lock);
+	if (!ret)
+		rtc_time64_to_tm(seconds, &alarm->time);
+	return ret;
+}
+
+static int brick_rtc_alarm_wait(struct brick_rtc *chip)
+{
+	int ret = brick_rtc_wait(chip, BRICK_RTC_ALARM_BUSY);
+
+	if (ret)
+		return ret;
+	usleep_range(2000, 3000);
+	return brick_rtc_wait(chip, BRICK_RTC_ALARM_BUSY);
+}
+
+static int brick_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alarm)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+	time64_t target, actual;
+	unsigned long flags;
+	u32 day, hms;
+	int ret, cleanup;
+
+	ret = brick_rtc_encode(&alarm->time, &target, &day, &hms);
+	if (ret)
+		return ret;
+	mutex_lock(&chip->lock);
+	if (chip->stopping || chip->time_uncertain) {
+		ret = chip->stopping ? -ENODEV : -EIO;
+		goto unlock;
+	}
+	if (alarm->enabled) {
+		ret = brick_rtc_alarm_future(chip, target);
+		if (ret)
+			goto unlock;
+	}
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	if (chip->alarm_fault) {
+		ret = -EIO;
+		goto unlock_gate;
+	}
+	chip->alarm_owned = true;
+	ret = brick_rtc_disarm(chip);
+	if (ret)
+		goto unlock_gate;
+	ret = brick_rtc_ack_alarm(chip);
+	if (ret)
+		goto unlock_gate;
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+
+	ret = brick_rtc_alarm_wait(chip);
+	if (ret)
+		goto fail;
+	writel(0, chip->base + BRICK_RTC_ALARM_DAY);
+	ret = brick_rtc_alarm_wait(chip);
+	if (ret)
+		goto fail;
+	writel(0, chip->base + BRICK_RTC_ALARM_HMS);
+	ret = brick_rtc_alarm_wait(chip);
+	if (ret)
+		goto fail;
+	writel(day, chip->base + BRICK_RTC_ALARM_DAY);
+	ret = brick_rtc_alarm_wait(chip);
+	if (ret)
+		goto fail;
+	writel(hms, chip->base + BRICK_RTC_ALARM_HMS);
+	ret = brick_rtc_alarm_wait(chip);
+	if (ret)
+		goto fail;
+
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	ret = brick_rtc_alarm_snapshot(chip, &actual);
+	if (ret || actual != target || chip->alarm_fault) {
+		ret = -EIO;
+		goto fail_gate;
+	}
+	if (alarm->enabled) {
+		ret = brick_rtc_arm(chip, target);
+		if (ret)
+			goto fail_gate;
+	}
+	goto unlock_gate;
+fail:
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+fail_gate:
+	if (ret != -ETIME && ret != -ERANGE) {
+		chip->alarm_fault = true;
+		brick_rtc_mask_irq(chip);
+	}
+	cleanup = brick_rtc_disarm(chip);
+	if (cleanup)
+		ret = cleanup;
+unlock_gate:
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+unlock:
+	mutex_unlock(&chip->lock);
+	return ret;
+}
+
+static int brick_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+	unsigned long flags;
+	time64_t target;
+	int ret, cleanup;
+
+	mutex_lock(&chip->lock);
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	if (chip->stopping) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	if (!enabled) {
+		chip->alarm_owned = true;
+		ret = brick_rtc_disarm(chip);
+		if (!ret)
+			ret = brick_rtc_ack_alarm(chip);
+		goto unlock;
+	}
+	if (chip->alarm_fault || chip->time_uncertain) {
+		ret = -EIO;
+		goto unlock;
+	}
+	ret = brick_rtc_alarm_snapshot(chip, &target);
+	if (ret)
+		goto unlock;
+	ret = brick_rtc_alarm_future(chip, target);
+	if (ret)
+		goto unlock;
+	chip->alarm_owned = true;
+	ret = brick_rtc_disarm(chip);
+	if (!ret)
+		ret = brick_rtc_arm(chip, target);
+	if (ret) {
+		if (ret != -ETIME && ret != -ERANGE) {
+			chip->alarm_fault = true;
+			brick_rtc_mask_irq(chip);
+		}
+		cleanup = brick_rtc_disarm(chip);
+		if (cleanup)
+			ret = cleanup;
+	}
+unlock:
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	mutex_unlock(&chip->lock);
+	return ret;
+}
+
+static irqreturn_t brick_rtc_irq(int irq, void *data)
+{
+	struct brick_rtc *chip = data;
+	unsigned long flags;
+	bool pending;
+
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	pending = readl(chip->base + BRICK_RTC_ALARM_PENDING) & BIT(0);
+	if (pending) {
+		if (!brick_rtc_disarm(chip))
+			brick_rtc_ack_alarm(chip);
+		else
+			writel(BIT(0), chip->base + BRICK_RTC_ALARM_PENDING);
+	}
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	if (!pending)
+		return IRQ_NONE;
+	rtc_update_irq(chip->rtc, 1, RTC_IRQF | RTC_AF);
+	return IRQ_HANDLED;
+}
+
+static void brick_rtc_quiesce(void *data)
+{
+	struct brick_rtc *chip = data;
+	unsigned long flags;
+
+	mutex_lock(&chip->lock);
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	chip->stopping = true;
+	brick_rtc_mask_irq(chip);
+	/* Preserve an inherited alarm that userspace never took over. */
+	if (chip->alarm_owned && !brick_rtc_disarm(chip))
+		brick_rtc_ack_alarm(chip);
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	mutex_unlock(&chip->lock);
+	synchronize_irq(chip->irq);
+}
+
+/* Inspect inherited state without taking ownership or clearing pending. */
+static int brick_rtc_check_alarm(struct brick_rtc *chip)
+{
+	bool enabled, irq_enabled, pending;
+	time64_t target, now;
+	int ret;
+
+	enabled = readl(chip->base + BRICK_RTC_ALARM_ENABLE) & BIT(0);
+	irq_enabled = readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE) & BIT(0);
+	pending = readl(chip->base + BRICK_RTC_ALARM_PENDING) & BIT(0);
+	if (enabled != irq_enabled || (pending && !enabled))
+		return -EBUSY;
+	if (!enabled && !pending)
+		return 0;
+	ret = brick_rtc_alarm_snapshot(chip, &target);
+	if (ret)
+		return ret;
+	ret = brick_rtc_snapshot(chip, &now);
+	if (ret)
+		return ret;
+	return enabled && target <= now && !pending ? -ETIME : 0;
+}
+
 static const struct rtc_class_ops brick_rtc_ops = {
 	.read_time = brick_rtc_read_time,
 	.set_time = brick_rtc_set_time,
+	.read_alarm = brick_rtc_read_alarm,
+	.set_alarm = brick_rtc_set_alarm,
+	.alarm_irq_enable = brick_rtc_alarm_irq_enable,
 };
 
 static int brick_rtc_probe(struct platform_device *pdev)
@@ -158,12 +507,16 @@ static int brick_rtc_probe(struct platform_device *pdev)
 	time64_t first, last;
 	u64 first_before, first_after, last_before, last_after;
 	u64 minimum, maximum;
+	unsigned long flags;
+	bool enable;
 	int ret;
 
 	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
 		return -ENOMEM;
 	mutex_init(&chip->lock);
+	spin_lock_init(&chip->alarm_lock);
+	chip->irq_masked = true;
 	platform_set_drvdata(pdev, chip);
 	reset = devm_reset_control_get_exclusive(dev, "bus");
 	if (IS_ERR(reset))
@@ -198,15 +551,43 @@ static int brick_rtc_probe(struct platform_device *pdev)
 	if (last <= first || last - first < minimum || last - first > maximum)
 		return dev_err_probe(dev, -EIO, "RTC counter did not progress correctly\n");
 
+	ret = brick_rtc_check_alarm(chip);
+	if (ret)
+		return dev_err_probe(dev, ret, "unsupported inherited alarm state\n");
+	chip->irq = platform_get_irq(pdev, 0);
+	if (chip->irq < 0)
+		return chip->irq;
 	rtc = devm_rtc_allocate_device(dev);
 	if (IS_ERR(rtc))
 		return PTR_ERR(rtc);
+	chip->rtc = rtc;
+	ret = devm_request_irq(dev, chip->irq, brick_rtc_irq, IRQF_NO_AUTOEN,
+			       dev_name(dev), chip);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot request alarm IRQ\n");
 	rtc->ops = &brick_rtc_ops;
+	rtc->alarm_offset_max = BRICK_RTC_ALARM_MAX_GAP;
 	rtc->range_min = 0;
 	rtc->range_max = BRICK_RTC_MAX_SECONDS; /* Day 65535: 2149-06-05 23:59:59. */
-	clear_bit(RTC_FEATURE_ALARM, rtc->features);
+
 	clear_bit(RTC_FEATURE_UPDATE_INTERRUPT, rtc->features);
-	return devm_rtc_register_device(rtc);
+	ret = devm_rtc_register_device(rtc);
+	if (ret) {
+		brick_rtc_quiesce(chip);
+		return ret;
+	}
+	ret = devm_add_action_or_reset(dev, brick_rtc_quiesce, chip);
+	if (ret)
+		return ret;
+	/* The cdev is already visible; a failed user operation may have faulted. */
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	enable = !chip->alarm_fault;
+	if (enable)
+		chip->irq_masked = false;
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	if (enable)
+		enable_irq(chip->irq);
+	return 0;
 }
 
 static int brick_rtc_suspend(struct device *dev)

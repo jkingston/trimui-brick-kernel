@@ -80,8 +80,10 @@ RTC time uses stock firmware's one-based days from 1970. The bus clock stays
 enabled after a startup counter check. Time writes use bounded busy checks
 and readback; a partial failure blocks reads until a successful explicit set
 within the current driver instance. Rebinding or rebooting clears that state.
-An inherited armed alarm blocks time writes. Clock outputs remain
-boot-established; alarms and automatic system-clock initialization are unsupported. Wireless operation, USB host mode
+Armed or queued alarms block time writes. Awake one-shot alarms use absolute
+day/time, with a 255-day scheduling horizon matching stock policy. Clock
+outputs remain boot-established. The system clock is initialized from the RTC;
+automatic RTC writeback and suspend/power-off wake are unsupported. Wireless operation, USB host mode
 and GPU power management remain unsupported. All CPU operating points,
 clock-failure recovery, automatic scaling and passive thermal throttling have
 been exercised. Audio DMA and amplifier sequencing have been exercised;
