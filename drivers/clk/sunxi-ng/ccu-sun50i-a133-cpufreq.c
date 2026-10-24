@@ -41,7 +41,7 @@ static struct a133_cpu_guard *a133_guard;
 
 static bool a133_rate_valid(unsigned long rate)
 {
-	return rate >= 408000000 && rate <= 1800000000 && !(rate % 24000000);
+	return rate >= 408000000 && rate <= 1992000000 && !(rate % 24000000);
 }
 
 static bool a133_pll_valid(struct a133_cpu_guard *g, unsigned long rate)
