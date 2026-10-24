@@ -301,6 +301,16 @@
 &r_i2c0 {
 	status = "okay";
 
+	vdd_cpu: regulator@41 {
+		compatible = "tcs,tcs4838";
+		reg = <0x41>;
+		regulator-name = "vdd-cpu";
+		regulator-min-microvolt = <900000>;
+		regulator-max-microvolt = <1257500>;
+		regulator-always-on;
+		tcs,runtime-voltage-selector = <0>;
+	};
+
 	pmic@34 {
 		compatible = "trimui,brick-pmic";
 		interrupt-parent = <&r_intc>;

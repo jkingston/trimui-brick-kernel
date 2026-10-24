@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/regulator/tcs,tcs4838.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: TCS4838 single-output buck regulator
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description: |
+  The TCS4838 has one output and two voltage register banks. The SEL pin
+  selects the bank; the banks are not independent supplies. This binding
+  describes boards holding SEL low during normal operation, with the output
+  enabled by the boot firmware. Suspend bank switching is not described.
+
+allOf:
+  - $ref: regulator.yaml#
+
+properties:
+  compatible:
+    const: tcs,tcs4838
+
+  reg:
+    maxItems: 1
+
+  tcs,runtime-voltage-selector:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    const: 0
+    description: Runtime voltage bank selected by the board's SEL wiring.
+
+  regulator-always-on: true
+
+  regulator-min-microvolt:
+    minimum: 712500
+    maximum: 1500000
+
+  regulator-max-microvolt:
+    minimum: 712500
+    maximum: 1500000
+
+  regulator-initial-mode: false
+  regulator-ramp-delay: false
+  regulator-state-mem: false
+  regulator-state-disk: false
+  regulator-state-standby: false
+
+required:
+  - compatible
+  - reg
+  - tcs,runtime-voltage-selector
+  - regulator-always-on
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        regulator@41 {
+            compatible = "tcs,tcs4838";
+            reg = <0x41>;
+            regulator-name = "vdd-cpu";
+            regulator-min-microvolt = <712500>;
+            regulator-max-microvolt = <1500000>;
+            regulator-always-on;
+            tcs,runtime-voltage-selector = <0>;
+        };
+    };
