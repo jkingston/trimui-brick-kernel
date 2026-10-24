@@ -8,6 +8,7 @@
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/regulator/driver.h>
+#include <linux/regulator/of_regulator.h>
 
 #define TCS4838_VSEL0		0x00
 #define TCS4838_CTRL		0x02
@@ -172,6 +173,10 @@ static int tcs4838_probe(struct i2c_client *client)
 		return ret;
 	if (!(value & BIT(7)))
 		return dev_err_probe(dev, -EINVAL, "boot supply is not power-good\n");
+	config.init_data = of_get_regulator_init_data(dev, dev->of_node,
+						   &tcs4838_desc);
+	if (!config.init_data)
+		return -ENOMEM;
 	config.regmap = tcs->regmap;
 	config.driver_data = tcs;
 	rdev = devm_regulator_register(dev, &tcs4838_desc, &config);
