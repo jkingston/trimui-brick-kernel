@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Isolated integration candidate; not built or installed.
- * Caller has quiesced callbacks/work and joined the old BH thread. SDIO IRQ
- * must already be released. The registered mac80211 object is retained.
+/* Used before initial firmware loading and after transport quiescence.
+ * No callback, work item, BH thread or SDIO IRQ may access the device.
  */
 #include <linux/errno.h>
 #include <linux/mmc/card.h>
@@ -44,14 +43,19 @@ int xrs_sdio_power_reset(struct sdio_func *func, bool *enabled)
 		goto out;
 
 	ret = sdio_enable_func(func);
-	if (ret)
-		goto out;
+	/* IOEx may already be set even when the ready wait failed. */
 	*enabled = true;
-	ret = sdio_set_block_size(func, 512);
 	if (ret)
-		/* Best effort only: preserve the original setup error. */
-		if (!sdio_disable_func(func))
-			*enabled = false;
+		goto disable;
+	ret = sdio_set_block_size(func, 512);
+	if (!ret)
+		goto out;
+disable:
+	/* Enable may set IOEx before its ready wait fails. Clear it on either
+	 * setup failure, preserving the original error if cleanup also fails.
+	 */
+	if (!sdio_disable_func(func))
+		*enabled = false;
 out:
 	sdio_release_host(func);
 	return ret;

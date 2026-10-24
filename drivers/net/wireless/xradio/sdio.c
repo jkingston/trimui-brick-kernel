@@ -24,6 +24,7 @@
 #include "sdio.h"
 #include "main.h"
 #include "recovery.h"
+#include "sdio-reset.h"
 
 /* sdio vendor id and device id*/
 static const struct sdio_device_id xradio_sdio_ids[] = {
@@ -172,23 +173,23 @@ static int xr829_preflight(struct device *dev)
 
 static int sdio_probe(struct sdio_func *func, const struct sdio_device_id *id)
 {
+ bool enabled = false;
  int ret;
+
  if (func->num != 1) return -ENODEV;
  ret = xr829_preflight(&func->dev);
  if (ret) return ret;
  func->card->quirks |= MMC_QUIRK_BROKEN_BYTE_MODE_512;
- sdio_claim_host(func);
- ret = sdio_enable_func(func);
- if (ret) goto unlock;
- ret = sdio_set_block_size(func, 512);
- if (ret) goto disable;
- sdio_release_host(func);
+ /* An unbound SDIO function can still contain running WLAN firmware.
+  * Establish a fresh hardware state before starting IRQs or downloading it.
+  */
+ ret = xrs_sdio_power_reset(func, &enabled);
+ if (ret)
+  return dev_err_probe(&func->dev, ret, "WLAN reset before firmware load\n");
  ret = xradio_core_init(func);
  if (!ret) return 0;
  sdio_claim_host(func);
- disable:
  sdio_disable_func(func);
- unlock:
  sdio_release_host(func);
  return ret;
 }
