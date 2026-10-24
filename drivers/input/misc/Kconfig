@@ -1023,4 +1023,13 @@ config INPUT_STPMIC1_ONKEY
 	  To compile this driver as a module, choose M here: the
 	  module will be called stpmic1_onkey.
 
+config INPUT_AXP2202_PEK
+	tristate "AXP2202 power key"
+	depends on MFD_TRIMUI_BRICK
+	help
+	  Report AXP2202 power-key press and release interrupts as KEY_POWER.
+	  Retains boot-established long-press and emergency power-off timing.
+	  This does not enable system suspend or change charging policy.
+	  The module is called axp2202-pek.
+
 endif

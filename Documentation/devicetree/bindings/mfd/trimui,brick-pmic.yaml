@@ -14,11 +14,15 @@ description: |
   boot-enabled 1.8 V rail; CLDO4 supplies the panel at 3.3 V.
   The interface preserves inherited voltage selectors and shared CLDO1.
   Read-only battery voltage, initialized gauge capacity and USB input
-  presence are provided by a child device. Charging remains boot-established.
+  presence are provided by a child device. The interrupt controller routes
+  power-key press and release events without changing key timing. Charging
+  remains boot-established.
 
 properties:
   compatible:
     const: trimui,brick-pmic
+  interrupts:
+    maxItems: 1
   reg:
     maxItems: 1
   regulators:
@@ -42,6 +46,7 @@ properties:
 required:
   - compatible
   - reg
+  - interrupts
   - regulators
 
 additionalProperties: false

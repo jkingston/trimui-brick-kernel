@@ -286,6 +286,8 @@
 
 	pmic@34 {
 		compatible = "trimui,brick-pmic";
+		interrupt-parent = <&r_intc>;
+		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
 		reg = <0x34>;
 
 		regulators {

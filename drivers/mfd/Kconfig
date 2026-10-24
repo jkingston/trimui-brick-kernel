@@ -2583,9 +2583,10 @@ config MFD_TRIMUI_BRICK
 	depends on I2C && OF
 	select MFD_CORE
 	select REGMAP_I2C
+	select REGMAP_IRQ
 	help
 	  Boot-established AXP2202 supplies and read-only battery telemetry.
-	  Does not program charging parameters, voltage selectors or interrupts.
+	  Does not program charging parameters or voltage selectors.
 	  The boot firmware must establish the board supplies and fuel gauge.
 	  Select the regulator and battery child drivers separately.
 

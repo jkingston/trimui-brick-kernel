@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Boot-established AXP2202 interface for TrimUI Brick. */
 #include <linux/i2c.h>
+#include <linux/interrupt.h>
 #include <linux/mfd/core.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -8,6 +9,10 @@
 
 #define AXP2202_STATUS		0x00
 #define AXP2202_MODULE_EN	0x19
+#define AXP2202_IRQ_ENABLE	0x40
+#define AXP2202_IRQ_STATUS	0x48
+#define AXP2202_KEY_PRESS	13
+#define AXP2202_KEY_RELEASE	14
 #define AXP2202_LDO_EN1		0x91
 #define AXP2202_CLDO1_VSEL	0x9b
 #define AXP2202_CLDO4_VSEL	0x9e
@@ -18,6 +23,9 @@
 
 static bool brick_readable(struct device *dev, unsigned int reg)
 {
+	if ((reg >= AXP2202_IRQ_ENABLE && reg < AXP2202_IRQ_ENABLE + 5) ||
+	    (reg >= AXP2202_IRQ_STATUS && reg < AXP2202_IRQ_STATUS + 5))
+		return true;
 	switch (reg) {
 	case AXP2202_STATUS:
 	case AXP2202_MODULE_EN:
@@ -36,7 +44,9 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 
 static bool brick_writeable(struct device *dev, unsigned int reg)
 {
-	return reg == AXP2202_LDO_EN1;
+	return reg == AXP2202_LDO_EN1 ||
+	       (reg >= AXP2202_IRQ_ENABLE && reg < AXP2202_IRQ_ENABLE + 5) ||
+	       (reg >= AXP2202_IRQ_STATUS && reg < AXP2202_IRQ_STATUS + 5);
 }
 
 static const struct regmap_config brick_regmap = {
@@ -48,13 +58,77 @@ static const struct regmap_config brick_regmap = {
 	.cache_type = REGCACHE_NONE,
 };
 
+/* All documented sources are masked until a child requests its IRQ. */
+static const struct regmap_irq brick_irqs[] = {
+	{ .reg_offset = 0, .mask = BIT(7) },
+	{ .reg_offset = 0, .mask = BIT(6) },
+	{ .reg_offset = 0, .mask = BIT(5) },
+	{ .reg_offset = 0, .mask = BIT(4) },
+	{ .reg_offset = 0, .mask = BIT(2) },
+	{ .reg_offset = 0, .mask = BIT(1) },
+	{ .reg_offset = 0, .mask = BIT(0) },
+	{ .reg_offset = 1, .mask = BIT(7) },
+	{ .reg_offset = 1, .mask = BIT(6) },
+	{ .reg_offset = 1, .mask = BIT(5) },
+	{ .reg_offset = 1, .mask = BIT(4) },
+	{ .reg_offset = 1, .mask = BIT(3) },
+	{ .reg_offset = 1, .mask = BIT(2) },
+	{ .reg_offset = 1, .mask = BIT(1) },
+	{ .reg_offset = 1, .mask = BIT(0) },
+	{ .reg_offset = 2, .mask = BIT(7) },
+	{ .reg_offset = 2, .mask = BIT(6) },
+	{ .reg_offset = 2, .mask = BIT(5) },
+	{ .reg_offset = 2, .mask = BIT(4) },
+	{ .reg_offset = 2, .mask = BIT(3) },
+	{ .reg_offset = 2, .mask = BIT(2) },
+	{ .reg_offset = 2, .mask = BIT(1) },
+	{ .reg_offset = 2, .mask = BIT(0) },
+	{ .reg_offset = 3, .mask = BIT(7) },
+	{ .reg_offset = 3, .mask = BIT(6) },
+	{ .reg_offset = 3, .mask = BIT(5) },
+	{ .reg_offset = 3, .mask = BIT(4) },
+	{ .reg_offset = 3, .mask = BIT(3) },
+	{ .reg_offset = 3, .mask = BIT(2) },
+	{ .reg_offset = 3, .mask = BIT(1) },
+	{ .reg_offset = 3, .mask = BIT(0) },
+	{ .reg_offset = 4, .mask = BIT(6) },
+	{ .reg_offset = 4, .mask = BIT(5) },
+	{ .reg_offset = 4, .mask = BIT(4) },
+	{ .reg_offset = 4, .mask = BIT(3) },
+	{ .reg_offset = 4, .mask = BIT(2) },
+	{ .reg_offset = 4, .mask = BIT(1) },
+	{ .reg_offset = 4, .mask = BIT(0) },
+};
+
+static const struct regmap_irq_chip brick_irq_chip = {
+	.name = "axp2202",
+	.status_base = AXP2202_IRQ_STATUS,
+	.ack_base = AXP2202_IRQ_STATUS,
+	.unmask_base = AXP2202_IRQ_ENABLE,
+	.init_ack_masked = true,
+	.irqs = brick_irqs,
+	.num_irqs = ARRAY_SIZE(brick_irqs),
+	.num_regs = 5,
+};
+
+static const struct resource brick_key_resources[] = {
+	DEFINE_RES_IRQ_NAMED(AXP2202_KEY_PRESS, "press"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_KEY_RELEASE, "release"),
+};
+
 static const struct mfd_cell brick_cells[] = {
 	{ .name = "trimui-brick-panel" },
 	{ .name = "axp2202-telemetry" },
+	{
+		.name = "axp2202-pek",
+		.resources = brick_key_resources,
+		.num_resources = ARRAY_SIZE(brick_key_resources),
+	},
 };
 
 static int brick_pmic_probe(struct i2c_client *client)
 {
+	struct regmap_irq_chip_data *irq_data;
 	struct regmap *map;
 	struct device_node *regs, *child;
 	unsigned int value;
@@ -98,9 +172,16 @@ static int brick_pmic_probe(struct i2c_client *client)
 	if (!(value & BIT(0)))
 		return -ENODEV;
 
+	if (client->irq <= 0)
+		return -EINVAL;
+	ret = devm_regmap_add_irq_chip(&client->dev, map, client->irq,
+				       IRQF_ONESHOT, 0, &brick_irq_chip, &irq_data);
+	if (ret)
+		return dev_err_probe(&client->dev, ret, "Cannot register PMIC IRQs\n");
+
 	return devm_mfd_add_devices(&client->dev, PLATFORM_DEVID_AUTO,
 				   brick_cells, ARRAY_SIZE(brick_cells),
-				   NULL, 0, NULL);
+				   NULL, 0, regmap_irq_get_domain(irq_data));
 }
 
 static const struct of_device_id brick_pmic_match[] = {
