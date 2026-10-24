@@ -291,6 +291,21 @@
 		reg = <0x34>;
 
 		regulators {
+			aldo3: aldo3 {
+				regulator-name = "brick-aldo3";
+				regulator-always-on;
+			};
+
+			aldo4: aldo4 {
+				regulator-name = "brick-aldo4";
+				regulator-always-on;
+			};
+
+			bldo1: bldo1 {
+				regulator-name = "brick-bldo1";
+				regulator-always-on;
+			};
+
 			cldo1: cldo1 {
 				regulator-name = "brick-panel-cldo1";
 				regulator-always-on;

@@ -29,6 +29,10 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 	switch (reg) {
 	case AXP2202_STATUS:
 	case AXP2202_MODULE_EN:
+	case 0x90:
+	case 0x95:
+	case 0x96:
+	case 0x97:
 	case AXP2202_LDO_EN1:
 	case AXP2202_CLDO1_VSEL:
 	case AXP2202_CLDO4_VSEL:
@@ -117,13 +121,23 @@ static const struct resource brick_key_resources[] = {
 };
 
 static const struct mfd_cell brick_cells[] = {
-	{ .name = "trimui-brick-panel" },
+	{ .name = "trimui-brick-regulator" },
 	{ .name = "axp2202-telemetry" },
 	{
 		.name = "axp2202-pek",
 		.resources = brick_key_resources,
 		.num_resources = ARRAY_SIZE(brick_key_resources),
 	},
+};
+
+static const struct {
+	const char *name;
+	unsigned int vsel, selector, enable, mask;
+} brick_shared_rails[] = {
+	{ "cldo1", AXP2202_CLDO1_VSEL, 13, AXP2202_LDO_EN1, BIT(0) },
+	{ "aldo3", 0x95, 28, 0x90, BIT(2) },
+	{ "aldo4", 0x96, 13, 0x90, BIT(3) },
+	{ "bldo1", 0x97, 28, 0x90, BIT(4) },
 };
 
 static int brick_pmic_probe(struct i2c_client *client)
@@ -139,10 +153,14 @@ static int brick_pmic_probe(struct i2c_client *client)
 	regs = of_get_child_by_name(client->dev.of_node, "regulators");
 	if (!regs)
 		return -EINVAL;
-	child = of_get_child_by_name(regs, "cldo1");
-	ret = child && of_device_is_available(child) &&
-	      of_property_read_bool(child, "regulator-always-on") ? 0 : -EINVAL;
-	of_node_put(child);
+	ret = 0;
+	for (int i = 0; i < ARRAY_SIZE(brick_shared_rails); i++) {
+		child = of_get_child_by_name(regs, brick_shared_rails[i].name);
+		if (!child || !of_device_is_available(child) ||
+		    !of_property_read_bool(child, "regulator-always-on"))
+			ret = -EINVAL;
+		of_node_put(child);
+	}
 	child = of_get_child_by_name(regs, "cldo4");
 	if (!child || !of_device_is_available(child))
 		ret = -EINVAL;
@@ -155,22 +173,24 @@ static int brick_pmic_probe(struct i2c_client *client)
 	if (IS_ERR(map))
 		return PTR_ERR(map);
 
-	/* Preserve the proven display prerequisites before exposing consumers. */
-	ret = regmap_read(map, AXP2202_CLDO1_VSEL, &value);
-	if (ret)
-		return ret;
-	if ((value & 0x1f) != 13)
-		return -ERANGE;
+	/* Validate shared rail voltage and enable state before any child probes. */
+	for (int i = 0; i < ARRAY_SIZE(brick_shared_rails); i++) {
+		ret = regmap_read(map, brick_shared_rails[i].vsel, &value);
+		if (ret)
+			return ret;
+		if ((value & 0x1f) != brick_shared_rails[i].selector)
+			return -ERANGE;
+		ret = regmap_read(map, brick_shared_rails[i].enable, &value);
+		if (ret)
+			return ret;
+		if (!(value & brick_shared_rails[i].mask))
+			return -ENODEV;
+	}
 	ret = regmap_read(map, AXP2202_CLDO4_VSEL, &value);
 	if (ret)
 		return ret;
 	if ((value & 0x1f) != 28)
 		return -ERANGE;
-	ret = regmap_read(map, AXP2202_LDO_EN1, &value);
-	if (ret)
-		return ret;
-	if (!(value & BIT(0)))
-		return -ENODEV;
 
 	if (client->irq <= 0)
 		return -EINVAL;

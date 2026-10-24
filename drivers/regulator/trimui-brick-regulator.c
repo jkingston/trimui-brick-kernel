@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Stock-verified panel supplies; voltage selectors remain boot-established. */
+/* Boot-established TrimUI Brick rails; no voltage selector writes. */
 #include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -31,9 +31,7 @@ static int cldo4_enable(struct regulator_dev *rdev)
 static int retain_shared(struct device_node *node,
 	const struct regulator_desc *desc, struct regulator_config *config)
 {
-	/* SD/codec ownership is not represented by this panel supply driver.
-	 * Preserve the boot-enabled shared rail, regardless of panel refcount.
-	 */
+	/* Preserve shared boot-enabled rails regardless of consumer refcounts. */
 	return of_property_read_bool(node, "regulator-always-on") ? 0 : -EINVAL;
 }
 static const struct regulator_ops shared_ops = {
@@ -54,6 +52,27 @@ static const struct regulator_desc supplies[] = {
 		.id = 1, .type = REGULATOR_VOLTAGE, .owner = THIS_MODULE,
 		.ops = &panel_ops,
 		.enable_reg = ENABLE, .enable_mask = BIT(3), .vsel_reg = CLDO4_VSEL,
+	},
+	{
+		.name = "brick-aldo3", .of_match = "aldo3",
+		.regulators_node = "regulators",
+		.id = 2, .type = REGULATOR_VOLTAGE, .owner = THIS_MODULE,
+		.ops = &shared_ops, .of_parse_cb = retain_shared,
+		.enable_reg = 0x90, .enable_mask = BIT(2), .vsel_reg = 0x95,
+	},
+	{
+		.name = "brick-aldo4", .of_match = "aldo4",
+		.regulators_node = "regulators",
+		.id = 3, .type = REGULATOR_VOLTAGE, .owner = THIS_MODULE,
+		.ops = &shared_ops, .of_parse_cb = retain_shared,
+		.enable_reg = 0x90, .enable_mask = BIT(3), .vsel_reg = 0x96,
+	},
+	{
+		.name = "brick-bldo1", .of_match = "bldo1",
+		.regulators_node = "regulators",
+		.id = 4, .type = REGULATOR_VOLTAGE, .owner = THIS_MODULE,
+		.ops = &shared_ops, .of_parse_cb = retain_shared,
+		.enable_reg = 0x90, .enable_mask = BIT(4), .vsel_reg = 0x97,
 	},
 };
 static int brick_probe(struct platform_device *pdev)
@@ -78,9 +97,9 @@ static int brick_probe(struct platform_device *pdev)
 
 static struct platform_driver brick_driver = {
 	.probe = brick_probe,
-	.driver.name = "trimui-brick-panel",
+	.driver.name = "trimui-brick-regulator",
 };
 module_platform_driver(brick_driver);
-MODULE_ALIAS("platform:trimui-brick-panel");
+MODULE_ALIAS("platform:trimui-brick-regulator");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("TrimUI Brick display supplies");
+MODULE_DESCRIPTION("TrimUI Brick boot-established regulators");

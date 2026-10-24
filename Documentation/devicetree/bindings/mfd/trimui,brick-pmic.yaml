@@ -11,7 +11,8 @@ maintainers:
 
 description: |
   Panel supply interface at I2C address 0x34. CLDO1 is a shared,
-  boot-enabled 1.8 V rail; CLDO4 supplies the panel at 3.3 V.
+  boot-enabled 1.8 V rail; CLDO4 supplies the panel at 3.3 V. ALDO4 is
+  boot-enabled at 1.8 V for audio; ALDO3 and BLDO1 are 3.3 V radio rails.
   The interface preserves inherited voltage selectors and shared CLDO1.
   Read-only battery voltage, initialized gauge capacity and USB input
   presence are provided by a child device. The interrupt controller routes
@@ -29,6 +30,24 @@ properties:
     type: object
     additionalProperties: false
     properties:
+      aldo3:
+        type: object
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+        required:
+          - regulator-always-on
+      aldo4:
+        type: object
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+        required:
+          - regulator-always-on
+      bldo1:
+        type: object
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+        required:
+          - regulator-always-on
       cldo1:
         type: object
         $ref: /schemas/regulator/regulator.yaml#
@@ -40,6 +59,9 @@ properties:
         $ref: /schemas/regulator/regulator.yaml#
         unevaluatedProperties: false
     required:
+      - aldo3
+      - aldo4
+      - bldo1
       - cldo1
       - cldo4
 

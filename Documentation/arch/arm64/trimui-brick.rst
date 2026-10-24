@@ -55,6 +55,8 @@ AXP2202 telemetry reads battery voltage, initialized gauge capacity and USB
 input presence. Invalid or uninitialized readings return no data. Charging,
 battery-presence/full flags and shutdown are not implemented.
 The PMIC core preserves boot-established voltages and charging settings.
+ALDO3 and BLDO1 are boot-enabled at 3.3 V for the radio; ALDO4 is 1.8 V
+for audio. Shared rails cannot be disabled or have their voltage changed.
 
 These additional peripherals require validation on the device. Audio,
 wireless, USB host mode and CPU/GPU power management remain unsupported.
