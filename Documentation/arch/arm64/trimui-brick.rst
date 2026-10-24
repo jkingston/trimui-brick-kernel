@@ -67,14 +67,14 @@ uses PLL_COM/5 at 90.3168 MHz and a 22.5792 MHz DAC module clock.
 
 TCS4838 at I2C address 0x41 preserves the boot-enabled CPU supply in bank 0.
 CPU frequency control requires speed fuse 0x8000 and checks PLL/mux completion
-before allowing voltage reduction. The table enables 408–1008 MHz at 900 mV and 1200 MHz at 937.5 mV; the
-userspace governor preserves the boot frequency until requested.
-A failed clock transition latches a 600 MHz bypass until reboot. Higher stock
-operating points are disabled pending hardware validation.
+before allowing voltage reduction. The table spans 408–1800 MHz, from 900 to 1187.5 mV. The userspace governor
+preserves the boot frequency until requested.
+A failed clock transition latches a 600 MHz bypass until reboot. The stock 2000 MHz entry remains disabled because the integer PLL cannot
+represent it exactly.
 
 MMC1 enumerates SDIO at 25 MHz and 3.3 V, with PL5 enable and a 100 ms delay.
 The populated XR829 enumerates as 0a9e:2282; its driver is not integrated yet.
 RTC clock outputs remain boot-established. Wireless operation, USB host mode
-and GPU power management remain unsupported. Transitions from 408 to 1008 MHz and clock-failure recovery have been
-exercised; higher operating points require staged validation. Audio DMA and amplifier
+and GPU power management remain unsupported. Transitions through 1200 MHz and clock-failure recovery have been exercised;
+higher operating points require staged validation. Audio DMA and amplifier
 sequencing have been exercised; audible output remains unverified.

@@ -47,8 +47,6 @@
 			opp-microvolt-speed0 = <1020000 1020000 1025000>;
 			opp-supported-hw = <1>;
 			clock-latency-ns = <244144>;
-			/* Enable individually after clock/rail validation. */
-			status = "disabled";
 		};
 
 		opp-1608000000 {
@@ -56,8 +54,6 @@
 			opp-microvolt-speed0 = <1100000>;
 			opp-supported-hw = <1>;
 			clock-latency-ns = <244144>;
-			/* Enable individually after clock/rail validation. */
-			status = "disabled";
 		};
 
 		opp-1800000000 {
@@ -65,8 +61,6 @@
 			opp-microvolt-speed0 = <1180000 1180000 1187500>;
 			opp-supported-hw = <1>;
 			clock-latency-ns = <244144>;
-			/* Enable individually after clock/rail validation. */
-			status = "disabled";
 		};
 
 		opp-2000000000 {
