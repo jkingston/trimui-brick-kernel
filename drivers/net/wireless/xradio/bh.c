@@ -53,10 +53,14 @@ int xradio_register_bh(struct xradio_common *hw_priv)
 	init_waitqueue_head(&hw_priv->bh_wq);
 	init_waitqueue_head(&hw_priv->bh_evt_wq);
 
-	hw_priv->bh_thread = kthread_run(&xradio_bh, hw_priv, XRADIO_BH_THREAD);
+	hw_priv->bh_thread = kthread_create(&xradio_bh, hw_priv, XRADIO_BH_THREAD);
 	if (IS_ERR(hw_priv->bh_thread)) {
 		ret = PTR_ERR(hw_priv->bh_thread);
 		hw_priv->bh_thread = NULL;
+	} else {
+		/* Error exits can precede teardown. Own the task before it runs. */
+		get_task_struct(hw_priv->bh_thread);
+		wake_up_process(hw_priv->bh_thread);
 	}
 
 	return ret;
@@ -70,10 +74,7 @@ void xradio_unregister_bh(struct xradio_common *hw_priv)
 		return;
 
 	hw_priv->bh_thread = NULL;
-	kthread_stop(thread);
-#ifdef HAS_PUT_TASK_STRUCT
-	put_task_struct(thread);
-#endif
+	kthread_stop_put(thread);
 	dev_dbg(hw_priv->pdev, "Unregister success.\n");
 }
 
