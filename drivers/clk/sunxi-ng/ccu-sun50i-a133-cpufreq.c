@@ -31,6 +31,8 @@ struct a133_cpu_guard {
 	struct clk *cpu_clk, *bypass_clk;
 	struct notifier_block nb;
 	unsigned long target;
+	unsigned long requested;
+	const char *stage;
 	u32 saved;
 	bool active, faulted;
 };
@@ -68,6 +70,12 @@ static int a133_mux_set(struct a133_cpu_guard *g, u8 parent)
 
 static void a133_fault(struct a133_cpu_guard *g)
 {
+	if (!g->faulted)
+		dev_err(g->dev,
+			"CPU clock fault at %s: requested=%lu target=%lu pll=%#x saved=%#x mux=%#x active=%u\n",
+			g->stage, g->requested, g->target,
+			readl(g->pll->base + g->pll->reg), g->saved,
+			readl(g->cpu->base + g->cpu->reg), g->active);
 	g->faulted = true;
 	g->active = false;
 	if (a133_mux_set(g, A133_BYPASS))
@@ -106,14 +114,17 @@ static int a133_cpu_notify(struct notifier_block *nb, unsigned long event,
 
 	switch (event) {
 	case PRE_RATE_CHANGE:
+		g->stage = "pre-state";
 		if (g->faulted || g->active || !a133_rate_valid(change->new_rate))
 			return NOTIFY_BAD;
+		g->stage = "pre-pll";
 		if (ccu_mux_helper_get_parent(g->cpu, g->mux) != A133_PLL_PARENT ||
 		    !a133_pll_valid(g, change->old_rate))
 			return NOTIFY_BAD;
 		g->saved = readl(g->pll->base + g->pll->reg);
 		g->target = change->new_rate;
 		g->active = true;
+		g->stage = "pre-bypass";
 		if (a133_mux_set(g, A133_BYPASS)) {
 			a133_fault(g);
 			return NOTIFY_BAD;
@@ -122,12 +133,18 @@ static int a133_cpu_notify(struct notifier_block *nb, unsigned long event,
 	case POST_RATE_CHANGE:
 		if (!g->active || g->faulted)
 			return NOTIFY_DONE;
+		g->stage = "post-lock";
 		ccu_gate_helper_disable(g->pll, A133_GATE);
 		ret = ccu_gate_helper_enable(g->pll, A133_GATE);
 		if (!ret)
 			ret = readl_poll_timeout(g->pll->base + g->pll->reg, value,
 						value & A133_LOCK, 100, 70000);
-		if (ret || !a133_pll_valid(g, g->target) ||
+		if (ret) {
+			a133_fault(g);
+			return NOTIFY_BAD;
+		}
+		g->stage = "post-verify";
+		if (!a133_pll_valid(g, g->target) ||
 		    a133_mux_set(g, A133_PLL_PARENT)) {
 			a133_fault(g);
 			return NOTIFY_BAD;
@@ -137,6 +154,7 @@ static int a133_cpu_notify(struct notifier_block *nb, unsigned long event,
 	case ABORT_RATE_CHANGE:
 		if (!g->active)
 			return NOTIFY_DONE;
+		g->stage = "abort-verify";
 		value = readl(g->pll->base + g->pll->reg);
 		if (g->faulted ||
 		    (value & ~A133_LOCK) != (g->saved & ~A133_LOCK) ||
@@ -187,6 +205,8 @@ int sun50i_a133_cpux_set_rate_checked(struct clk *clk, unsigned long rate)
 		goto out;
 	}
 	/* Only this clock handle owns the exclusive rate-control reference. */
+	g->requested = rate;
+	g->stage = "set-rate";
 	ret = clk_set_rate(g->cpu_clk, rate);
 	if (ret || g->faulted || g->active || !a133_pll_valid(g, rate) ||
 	    ccu_mux_helper_get_parent(g->cpu, g->mux) != A133_PLL_PARENT) {
