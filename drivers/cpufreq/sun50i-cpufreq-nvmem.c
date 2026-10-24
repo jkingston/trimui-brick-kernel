@@ -21,6 +21,8 @@
 #include <linux/pm_opp.h>
 #include <linux/slab.h>
 
+#include "cpufreq-dt.h"
+
 #define NVMEM_MASK	0x7
 #define NVMEM_SHIFT	5
 
@@ -292,6 +294,7 @@ static int sun50i_cpufreq_nvmem_probe(struct platform_device *pdev)
 	char name[] = "speedXXXXXXXXXXX"; /* Integers can take 11 chars max */
 	unsigned int cpu, supported_hw;
 	struct dev_pm_opp_config config = {};
+	struct cpufreq_dt_platform_data cpufreq_data = {};
 	bool checked_clock = false;
 	int speed;
 	int ret;
@@ -350,8 +353,10 @@ static int sun50i_cpufreq_nvmem_probe(struct platform_device *pdev)
 		opp_tokens[cpu] = ret;
 	}
 
-	cpufreq_dt_pdev = platform_device_register_simple("cpufreq-dt", -1,
-							  NULL, 0);
+	cpufreq_data.use_exact_opp = checked_clock;
+	cpufreq_dt_pdev = platform_device_register_data(NULL, "cpufreq-dt", -1,
+						      &cpufreq_data,
+						      sizeof(cpufreq_data));
 	if (!IS_ERR(cpufreq_dt_pdev)) {
 		platform_set_drvdata(pdev, opp_tokens);
 		return 0;

@@ -31,6 +31,7 @@ struct private_data {
 	struct device *cpu_dev;
 	struct cpufreq_frequency_table *freq_table;
 	bool have_static_opps;
+	bool use_exact_opp;
 	int opp_token;
 };
 
@@ -52,6 +53,24 @@ static int set_target(struct cpufreq_policy *policy, unsigned int index)
 {
 	struct private_data *priv = policy->driver_data;
 	unsigned long freq = policy->freq_table[index].frequency;
+
+	if (priv->use_exact_opp) {
+		struct dev_pm_opp *opp;
+		int ret;
+
+		/*
+		 * An exclusive provider handle may make clk_round_rate() on
+		 * the OPP consumer return the current rate instead of the target.
+		 */
+		opp = dev_pm_opp_find_freq_exact(priv->cpu_dev, freq * 1000, true);
+		if (IS_ERR(opp))
+			return PTR_ERR(opp);
+		ret = dev_pm_opp_set_opp(priv->cpu_dev, opp);
+		dev_pm_opp_put(opp);
+		if (!ret && clk_get_rate(policy->clk) != freq * 1000)
+			ret = -EIO;
+		return ret;
+	}
 
 	return dev_pm_opp_set_rate(priv->cpu_dev, freq * 1000);
 }
@@ -155,6 +174,7 @@ static struct cpufreq_driver dt_cpufreq_driver = {
 
 static int dt_cpufreq_early_init(struct device *dev, int cpu)
 {
+	struct cpufreq_dt_platform_data *data = dev_get_platdata(dev);
 	struct private_data *priv;
 	struct device *cpu_dev;
 	bool fallback = false;
@@ -177,6 +197,7 @@ static int dt_cpufreq_early_init(struct device *dev, int cpu)
 		return -ENOMEM;
 
 	cpumask_set_cpu(cpu, priv->cpus);
+	priv->use_exact_opp = data && data->use_exact_opp;
 	priv->cpu_dev = cpu_dev;
 
 	/*

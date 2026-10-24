@@ -13,6 +13,8 @@ struct cpufreq_policy;
 
 struct cpufreq_dt_platform_data {
 	bool have_governor_per_policy;
+	/* The OPP clock callback owns rate selection and exclusive control. */
+	bool use_exact_opp;
 
 	unsigned int	(*get_intermediate)(struct cpufreq_policy *policy,
 					    unsigned int index);
