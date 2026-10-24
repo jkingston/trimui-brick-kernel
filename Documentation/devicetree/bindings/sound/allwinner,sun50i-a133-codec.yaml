@@ -32,11 +32,13 @@ properties:
       - description: APB bus clock
       - description: DAC module clock
       - description: Audio PLL
+      - description: COM PLL divided by five
   clock-names:
     items:
       - const: apb
       - const: codec
       - const: pll-audio
+      - const: pll-com-audio
   resets:
     maxItems: 1
   dmas:

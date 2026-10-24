@@ -31,8 +31,7 @@
 #define CLK_PLL_VIDEO3_4X	19
 #define CLK_PLL_VE		20
 #define CLK_PLL_COM		21
-#define CLK_PLL_COM_AUDIO	22
-/* PLL_AUDIO exported for codec clock-family selection. */
+/* PLL_COM_AUDIO and PLL_AUDIO exported for codec clock-family selection. */
 
 /* CPUX clock exported for DVFS */
 

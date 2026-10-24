@@ -341,6 +341,11 @@ struct sun4i_codec {
 	struct clk	*clk_apb;
 	struct clk	*clk_module;
 	bool a133_playback;
+	struct clk *a133_pll_audio;
+	struct clk *a133_pll_com_audio;
+	struct clk *a133_rate_parent;
+	bool a133_module_rate_claimed;
+	bool a133_module_enabled;
 	struct reset_control *rst;
 	struct gpio_desc *gpio_pa;
 	struct gpio_desc *gpio_hp;
@@ -354,6 +359,77 @@ struct sun4i_codec {
 	struct snd_dmaengine_dai_dma_data	capture_dma_data;
 	struct snd_dmaengine_dai_dma_data	playback_dma_data;
 };
+
+/* A133 has one playback stream; ALSA serializes its clock transactions. */
+static void sun50i_a133_release_stream_clocks(void *data)
+{
+	struct sun4i_codec *scodec = data;
+
+	if (scodec->a133_module_enabled) {
+		clk_disable_unprepare(scodec->clk_module);
+		scodec->a133_module_enabled = false;
+	}
+	if (scodec->a133_module_rate_claimed) {
+		clk_rate_exclusive_put(scodec->clk_module);
+		scodec->a133_module_rate_claimed = false;
+	}
+	if (scodec->a133_rate_parent) {
+		clk_rate_exclusive_put(scodec->a133_rate_parent);
+		scodec->a133_rate_parent = NULL;
+	}
+}
+
+static int sun50i_a133_set_stream_clocks(struct sun4i_codec *scodec,
+				       unsigned int rate)
+{
+	struct clk *parent;
+	unsigned long parent_rate, module_rate;
+	int ret;
+
+	if (rate == 44100) {
+		parent = scodec->a133_pll_com_audio;
+		parent_rate = 90316800;
+		module_rate = 22579200;
+	} else if (rate == 48000) {
+		parent = scodec->a133_pll_audio;
+		parent_rate = 98304000;
+		module_rate = 24576000;
+	} else {
+		return -EINVAL;
+	}
+
+	/* Repeated hw_params must not reparent an enabled DAC module. */
+	sun50i_a133_release_stream_clocks(scodec);
+	ret = clk_set_rate_exclusive(parent, parent_rate);
+	if (ret)
+		return ret;
+	scodec->a133_rate_parent = parent;
+	if (clk_get_rate(parent) != parent_rate) {
+		ret = -EINVAL;
+		goto err_release;
+	}
+	ret = clk_set_parent(scodec->clk_module, parent);
+	if (ret)
+		goto err_release;
+	ret = clk_set_rate_exclusive(scodec->clk_module, module_rate);
+	if (ret)
+		goto err_release;
+	scodec->a133_module_rate_claimed = true;
+	if (clk_get_rate(scodec->clk_module) != module_rate ||
+	    !clk_is_match(clk_get_parent(scodec->clk_module), parent)) {
+		ret = -EINVAL;
+		goto err_release;
+	}
+	ret = clk_prepare_enable(scodec->clk_module);
+	if (ret)
+		goto err_release;
+	scodec->a133_module_enabled = true;
+	return 0;
+
+err_release:
+	sun50i_a133_release_stream_clocks(scodec);
+	return ret;
+}
 
 static void sun4i_codec_start_playback(struct sun4i_codec *scodec)
 {
@@ -689,10 +765,20 @@ static int sun4i_codec_hw_params(struct snd_pcm_substream *substream,
 	unsigned long clk_freq;
 	int ret, hwrate;
 
-	if (scodec->a133_playback &&
-	    (params_rate(params) != 48000 || params_channels(params) != 2 ||
-	     params_format(params) != SNDRV_PCM_FORMAT_S16_LE))
-		return -EINVAL;
+	if (scodec->a133_playback) {
+		if ((params_rate(params) != 44100 && params_rate(params) != 48000) ||
+		    params_channels(params) != 2 ||
+		    params_format(params) != SNDRV_PCM_FORMAT_S16_LE)
+			return -EINVAL;
+		ret = sun50i_a133_set_stream_clocks(scodec, params_rate(params));
+		if (ret)
+			return ret;
+		/* Both supported clock families use FS = 0. */
+		ret = sun4i_codec_hw_params_playback(scodec, params, 0);
+		if (ret)
+			sun50i_a133_release_stream_clocks(scodec);
+		return ret;
+	}
 
 	clk_freq = sun4i_codec_get_mod_freq(params);
 	if (!clk_freq)
@@ -701,9 +787,6 @@ static int sun4i_codec_hw_params(struct snd_pcm_substream *substream,
 	ret = clk_set_rate(scodec->clk_module, clk_freq);
 	if (ret)
 		return ret;
-
-	if (scodec->a133_playback && clk_get_rate(scodec->clk_module) != clk_freq)
-		return -EINVAL;
 
 	hwrate = sun4i_codec_get_hw_rate(params);
 	if (hwrate < 0)
@@ -730,6 +813,9 @@ static int sun4i_codec_startup(struct snd_pcm_substream *substream,
 	regmap_field_set_bits(scodec->reg_dac_fifoc,
 			      3 << SUN4I_CODEC_DAC_FIFOC_DRQ_CLR_CNT);
 
+	/* A133 hw_params selects its family before enabling the module. */
+	if (scodec->a133_playback)
+		return 0;
 	return clk_prepare_enable(scodec->clk_module);
 }
 
@@ -739,7 +825,10 @@ static void sun4i_codec_shutdown(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(rtd->card);
 
-	clk_disable_unprepare(scodec->clk_module);
+	if (scodec->a133_playback)
+		sun50i_a133_release_stream_clocks(scodec);
+	else
+		clk_disable_unprepare(scodec->clk_module);
 }
 
 static const struct snd_soc_dai_ops sun4i_codec_dai_ops = {
@@ -2352,8 +2441,8 @@ static struct snd_soc_dai_driver sun50i_a133_codec_dai = {
 		.stream_name = "Codec Playback",
 		.channels_min = 2,
 		.channels_max = 2,
-		.rates = SNDRV_PCM_RATE_48000,
-		.rate_min = 48000,
+		.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
+		.rate_min = 44100,
 		.rate_max = 48000,
 		.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		.sig_bits = 16,
@@ -2367,15 +2456,9 @@ static const struct regmap_config sun50i_a133_regmap_config = {
 	.max_register = 0x32c,
 };
 
-static void sun50i_a133_release_clock_rate(void *data)
-{
-	clk_rate_exclusive_put(data);
-}
-
 static int sun50i_a133_codec_resources(struct sun4i_codec *scodec)
 {
 	struct device *dev = scodec->dev;
-	struct clk *pll;
 	int ret;
 
 	/* Do not accept dummy supplies or change a shared regulator voltage. */
@@ -2393,27 +2476,16 @@ static int sun50i_a133_codec_resources(struct sun4i_codec *scodec)
 	if (ret != 1800000)
 		return -EINVAL;
 
-	/* A100 DAC clock does not propagate rate requests to its parent. */
-	pll = devm_clk_get(dev, "pll-audio");
-	if (IS_ERR(pll))
-		return PTR_ERR(pll);
-	ret = clk_set_rate_exclusive(pll, 98304000);
-	if (ret)
-		return ret;
-	ret = devm_add_action_or_reset(dev, sun50i_a133_release_clock_rate, pll);
-	if (ret)
-		return ret;
-	if (clk_get_rate(pll) != 98304000)
-		return -EINVAL;
-	ret = clk_set_parent(scodec->clk_module, pll);
-	if (ret)
-		return ret;
-	ret = clk_set_rate(scodec->clk_module, 24576000);
-	if (ret)
-		return ret;
-	if (clk_get_rate(scodec->clk_module) != 24576000)
-		return -EINVAL;
-	return 0;
+	scodec->a133_pll_audio = devm_clk_get(dev, "pll-audio");
+	if (IS_ERR(scodec->a133_pll_audio))
+		return PTR_ERR(scodec->a133_pll_audio);
+	scodec->a133_pll_com_audio = devm_clk_get(dev, "pll-com-audio");
+	if (IS_ERR(scodec->a133_pll_com_audio))
+		return PTR_ERR(scodec->a133_pll_com_audio);
+
+	/* No PLL retuning until the PCM stream chooses its rate family. */
+	return devm_add_action_or_reset(dev, sun50i_a133_release_stream_clocks,
+				       scodec);
 }
 
 struct sun4i_codec_quirks {

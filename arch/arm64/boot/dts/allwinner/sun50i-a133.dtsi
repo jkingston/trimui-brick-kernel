@@ -19,8 +19,8 @@
 		interrupts = <GIC_SPI 25 IRQ_TYPE_LEVEL_HIGH>;
 		#sound-dai-cells = <0>;
 		clocks = <&ccu CLK_BUS_AUDIO_CODEC>, <&ccu CLK_AUDIO_DAC>,
-			 <&ccu CLK_PLL_AUDIO>;
-		clock-names = "apb", "codec", "pll-audio";
+			 <&ccu CLK_PLL_AUDIO>, <&ccu CLK_PLL_COM_AUDIO>;
+		clock-names = "apb", "codec", "pll-audio", "pll-com-audio";
 		resets = <&ccu RST_BUS_AUDIO_CODEC>;
 		dmas = <&dma 7>;
 		dma-names = "tx";
