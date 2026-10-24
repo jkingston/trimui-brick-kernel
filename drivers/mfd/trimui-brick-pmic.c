@@ -8,6 +8,7 @@
 #include <linux/regmap.h>
 
 #define AXP2202_STATUS		0x00
+#define AXP2202_CHARGE_STATUS	0x01
 #define AXP2202_MODULE_EN	0x19
 #define AXP2202_IRQ_ENABLE	0x40
 #define AXP2202_IRQ_STATUS	0x48
@@ -28,6 +29,7 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 		return true;
 	switch (reg) {
 	case AXP2202_STATUS:
+	case AXP2202_CHARGE_STATUS:
 	case AXP2202_MODULE_EN:
 	case 0x90:
 	case 0x95:

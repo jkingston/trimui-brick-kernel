@@ -6,6 +6,7 @@
 #include <linux/regmap.h>
 
 #define AXP2202_STATUS		0x00
+#define AXP2202_CHARGE_STATUS	0x01
 #define AXP2202_MODULE_EN	0x19
 #define AXP2202_GAUGE_CONFIG	0xa2
 #define AXP2202_GAUGE_SOC		0xa4
@@ -35,6 +36,33 @@ static int axp2202_voltage(struct regmap *map, int *voltage)
 	return 0;
 }
 
+static int axp2202_battery_status(struct regmap *map, int *status)
+{
+	unsigned int value;
+	int voltage, ret;
+
+	ret = axp2202_voltage(map, &voltage);
+	if (ret)
+		return ret;
+	ret = regmap_read(map, AXP2202_CHARGE_STATUS, &value);
+	if (ret)
+		return ret;
+
+	/* Vendor charger-state encoding; unknown is preferable to false full. */
+	switch (value & GENMASK(2, 0)) {
+	case 1:
+	case 2:
+	case 3:
+		*status = POWER_SUPPLY_STATUS_CHARGING;
+		break;
+	default:
+		/* Idle/current direction and spurious charge-done are ambiguous. */
+		*status = POWER_SUPPLY_STATUS_UNKNOWN;
+		break;
+	}
+	return 0;
+}
+
 static int axp2202_battery_get(struct power_supply *psy,
 			       enum power_supply_property property,
 			       union power_supply_propval *val)
@@ -44,6 +72,8 @@ static int axp2202_battery_get(struct power_supply *psy,
 	int voltage, ret;
 
 	switch (property) {
+	case POWER_SUPPLY_PROP_STATUS:
+		return axp2202_battery_status(map, &val->intval);
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		return axp2202_voltage(map, &val->intval);
 	case POWER_SUPPLY_PROP_CAPACITY:
@@ -91,6 +121,7 @@ static int axp2202_usb_get(struct power_supply *psy,
 }
 
 static const enum power_supply_property battery_properties[] = {
+	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CAPACITY,
 };

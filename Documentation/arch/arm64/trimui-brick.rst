@@ -52,8 +52,10 @@ SD card detect is PF6, active-low with a pull-up. LEDC drives the stock
 has not been verified.
 
 AXP2202 telemetry reads battery voltage, initialized gauge capacity and USB
-input presence. Invalid or uninitialized readings return no data. Charging,
-battery-presence/full flags and shutdown are not implemented.
+input presence. Invalid or uninitialized readings return no data. Confirmed
+charger states report charging; ambiguous idle/full states report unknown.
+Charging configuration, battery-presence/full flags and shutdown are not
+implemented.
 The PMIC core preserves boot-established voltages and charging settings.
 ALDO3 and BLDO1 are boot-enabled at 3.3 V for the radio; ALDO4 is 1.8 V
 for audio. Shared rails cannot be disabled or have their voltage changed.
@@ -67,13 +69,15 @@ uses PLL_COM/5 at 90.3168 MHz and a 22.5792 MHz DAC module clock.
 
 TCS4838 at I2C address 0x41 preserves the boot-enabled CPU supply in bank 0.
 CPU frequency control requires speed fuse 0x8000 and checks PLL/mux completion
-before allowing voltage reduction. The table spans 408–1992 MHz, from 900 to 1250 mV. The userspace governor
-preserves the boot frequency until requested.
-A failed clock transition latches a 600 MHz bypass until reboot. The stock 2000 MHz request rounds to 1992 MHz on the 24 MHz integer PLL.
+before allowing voltage reduction. The table spans 408–1992 MHz, from 900 to
+1250 mV. The default userspace governor preserves the boot frequency until
+requested. A failed clock transition latches a 600 MHz bypass until reboot.
+The stock 2000 MHz request rounds to 1992 MHz on the 24 MHz integer PLL.
 
 MMC1 enumerates SDIO at 25 MHz and 3.3 V, with PL5 enable and a 100 ms delay.
 The populated XR829 enumerates as 0a9e:2282; its driver is not integrated yet.
 RTC clock outputs remain boot-established. Wireless operation, USB host mode
-and GPU power management remain unsupported. Transitions through 1800 MHz and clock-failure recovery have been exercised;
-the final operating point requires staged validation. Audio DMA and amplifier
-sequencing have been exercised; audible output remains unverified.
+and GPU power management remain unsupported. All CPU operating points,
+clock-failure recovery, automatic scaling and passive thermal throttling have
+been exercised. Audio DMA and amplifier sequencing have been exercised;
+audible output remains unverified.
