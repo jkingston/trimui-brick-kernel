@@ -91,3 +91,9 @@ config MMC_CRYPTO
 	  Enabling this makes it possible for the kernel to use the crypto
 	  capabilities of the MMC device (if present) to perform crypto
 	  operations on data being transferred to/from the device.
+
+config PWRSEQ_BRICK_RADIO
+	bool "TrimUI Brick shared-radio WLAN power sequence"
+	depends on OF && COMMON_CLK && GPIOLIB
+	help
+	  Acquire both shared radio output clocks before WLAN reset release.

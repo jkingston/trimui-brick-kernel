@@ -27,7 +27,7 @@ struct xr {
 	struct hci_uart hu;
 	struct gpio_desc *reset, *wake;
 	struct regulator_bulk_data supplies[2];
-	struct clk *lpo;
+	struct clk_bulk_data clocks[2];
 	bool powered, registered;
 	bool raw_pending;
 	struct sk_buff_head txq;
@@ -68,7 +68,7 @@ static int xr_power_off(struct xr *xr)
 		err = regulator_bulk_disable(ARRAY_SIZE(xr->supplies),
 					     xr->supplies);
 		if (!err) {
-			clk_disable_unprepare(xr->lpo);
+			clk_bulk_disable_unprepare(ARRAY_SIZE(xr->clocks), xr->clocks);
 			xr->powered = false;
 		}
 	}
@@ -100,12 +100,12 @@ static int xr_power_on(struct xr *xr)
 		return err;
 	/* Configure the UART before releasing the controller from reset. */
 	msleep(500);
-	err = clk_prepare_enable(xr->lpo);
+	err = clk_bulk_prepare_enable(ARRAY_SIZE(xr->clocks), xr->clocks);
 	if (err)
 		return err;
 	err = regulator_bulk_enable(ARRAY_SIZE(xr->supplies), xr->supplies);
 	if (err) {
-		clk_disable_unprepare(xr->lpo);
+		clk_bulk_disable_unprepare(ARRAY_SIZE(xr->clocks), xr->clocks);
 		return err;
 	}
 	xr->powered = true;
@@ -503,10 +503,11 @@ static int xr_probe(struct serdev_device *serdev)
 				      xr->supplies);
 	if (err)
 		return dev_err_probe(&serdev->dev, err, "radio supplies\n");
-	xr->lpo = devm_clk_get_optional(&serdev->dev, "lpo");
-	if (IS_ERR(xr->lpo))
-		return dev_err_probe(&serdev->dev, PTR_ERR(xr->lpo),
-				     "lpo clock\n");
+	xr->clocks[0].id = "lpo";
+	xr->clocks[1].id = "ref";
+	err = devm_clk_bulk_get(&serdev->dev, ARRAY_SIZE(xr->clocks), xr->clocks);
+	if (err)
+		return dev_err_probe(&serdev->dev, err, "radio clocks\n");
 	xr->reset = devm_gpiod_get(&serdev->dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(xr->reset))
 		return dev_err_probe(&serdev->dev, PTR_ERR(xr->reset),

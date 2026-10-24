@@ -149,9 +149,10 @@
 	};
 
 	wifi_pwrseq: wifi-pwrseq {
-		compatible = "mmc-pwrseq-simple";
+		compatible = "trimui,brick-radio-pwrseq";
+		clocks = <&rtc 0>, <&rtc 1>;
+		clock-names = "lpo", "ref";
 		reset-gpios = <&r_pio 0 5 GPIO_ACTIVE_LOW>;
-		post-power-on-delay-ms = <100>;
 	};
 
 	vibrator {
@@ -383,6 +384,8 @@
 
 	bluetooth {
 		compatible = "xradio,xr829-bt";
+		clocks = <&rtc 0>, <&rtc 1>;
+		clock-names = "lpo", "ref";
 		vbat-supply = <&bldo1>;
 		vddio-supply = <&aldo3>;
 		reset-gpios = <&r_pio 0 2 GPIO_ACTIVE_LOW>;
@@ -632,6 +635,7 @@
 &{/soc} {
 	rtc: rtc@7000000 {
 		compatible = "trimui,brick-rtc", "allwinner,sun50i-a133-rtc";
+		#clock-cells = <1>;
 		reg = <0x07000000 0x200>;
 		interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&r_ccu CLK_R_AHB_BUS_RTC>;

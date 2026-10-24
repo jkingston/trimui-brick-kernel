@@ -1679,12 +1679,13 @@ config RTC_DRV_SUN4V
 	  based RTC on SUN4V systems.
 
 config RTC_DRV_TRIMUI_BRICK
-	tristate "TrimUI Brick RTC"
+	bool "TrimUI Brick RTC and radio clocks"
 	depends on ARCH_SUNXI || COMPILE_TEST
 	depends on COMMON_CLK && RESET_CONTROLLER
 	help
 	  Access the A133 RTC using the stock Brick firmware day encoding.
-	  Preserves inherited clock outputs and supports awake alarm IRQs.
+	  Preserves inherited clock sources and owns shared radio output gates.
+	  Supports awake alarm IRQs; built-in to retain provider MMIO lifetime.
 
 config RTC_DRV_SUN6I
 	bool "Allwinner A31 RTC"

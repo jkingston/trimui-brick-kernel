@@ -36,12 +36,14 @@ properties:
     description: Active-high host signal requesting the controller remain awake.
 
   clocks:
-    maxItems: 1
-    description: Optional low-power reference clock.
+    items:
+      - description: Shared low-power reference clock
+      - description: Shared high-frequency reference clock
 
   clock-names:
     items:
       - const: lpo
+      - const: ref
 
 required:
   - compatible
@@ -49,6 +51,8 @@ required:
   - vddio-supply
   - reset-gpios
   - device-wake-gpios
+  - clocks
+  - clock-names
 
 dependencies:
   clocks: [clock-names]
@@ -63,6 +67,8 @@ examples:
     serial {
         bluetooth {
             compatible = "xradio,xr829-bt";
+            clocks = <&rtc 0>, <&rtc 1>;
+            clock-names = "lpo", "ref";
             vbat-supply = <&vbat>;
             vddio-supply = <&vddio>;
             reset-gpios = <&gpio 2 GPIO_ACTIVE_LOW>;

@@ -13,6 +13,8 @@
 #include <linux/timekeeping.h>
 #include <linux/spinlock.h>
 
+#include "brick_radio_clocks.h"
+
 #define BRICK_RTC_CTRL	0x00
 #define BRICK_RTC_DAY_BUSY	BIT(7)
 #define BRICK_RTC_HMS_BUSY	BIT(8)
@@ -29,6 +31,7 @@
 #define BRICK_RTC_HMS	0x14
 
 struct brick_rtc {
+	struct brick_radio_clocks *radio_clocks;
 	void __iomem *base;
 	struct mutex lock;
 	spinlock_t alarm_lock;
@@ -497,13 +500,11 @@ static const struct rtc_class_ops brick_rtc_ops = {
 	.alarm_irq_enable = brick_rtc_alarm_irq_enable,
 };
 
-static int brick_rtc_probe(struct platform_device *pdev)
+static int brick_rtc_register_time(struct platform_device *pdev, struct brick_rtc *chip,
+				   bool *invalid_state)
 {
 	struct device *dev = &pdev->dev;
-	struct reset_control *reset;
 	struct rtc_device *rtc;
-	struct brick_rtc *chip;
-	struct clk *bus;
 	time64_t first, last;
 	u64 first_before, first_after, last_before, last_after;
 	u64 minimum, maximum;
@@ -511,27 +512,7 @@ static int brick_rtc_probe(struct platform_device *pdev)
 	bool enable;
 	int ret;
 
-	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
-	if (!chip)
-		return -ENOMEM;
-	mutex_init(&chip->lock);
-	spin_lock_init(&chip->alarm_lock);
-	chip->irq_masked = true;
-	platform_set_drvdata(pdev, chip);
-	reset = devm_reset_control_get_exclusive(dev, "bus");
-	if (IS_ERR(reset))
-		return dev_err_probe(dev, PTR_ERR(reset), "cannot acquire reset\n");
-	ret = reset_control_status(reset);
-	if (ret)
-		return dev_err_probe(dev, ret < 0 ? ret : -EBUSY,
-				     "RTC must be out of reset\n");
-	bus = devm_clk_get_enabled(dev, "bus");
-	if (IS_ERR(bus))
-		return dev_err_probe(dev, PTR_ERR(bus), "cannot enable bus clock\n");
-	chip->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(chip->base))
-		return PTR_ERR(chip->base);
-
+	*invalid_state = true;
 	/* Bus enable can expose stale APB shadows. Settle and verify progress. */
 	msleep(500);
 	first_before = ktime_get_ns();
@@ -554,6 +535,7 @@ static int brick_rtc_probe(struct platform_device *pdev)
 	ret = brick_rtc_check_alarm(chip);
 	if (ret)
 		return dev_err_probe(dev, ret, "unsupported inherited alarm state\n");
+	*invalid_state = false;
 	chip->irq = platform_get_irq(pdev, 0);
 	if (chip->irq < 0)
 		return chip->irq;
@@ -590,6 +572,61 @@ static int brick_rtc_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static int brick_rtc_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct reset_control *reset;
+	struct brick_rtc *chip;
+	struct clk *bus;
+	void *time_group;
+	bool invalid_state = false;
+	int ret;
+
+	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
+	if (!chip)
+		return -ENOMEM;
+	mutex_init(&chip->lock);
+	spin_lock_init(&chip->alarm_lock);
+	chip->irq_masked = true;
+	platform_set_drvdata(pdev, chip);
+	reset = devm_reset_control_get_exclusive(dev, "bus");
+	if (IS_ERR(reset))
+		return dev_err_probe(dev, PTR_ERR(reset), "cannot acquire reset\n");
+	ret = reset_control_status(reset);
+	if (ret)
+		return dev_err_probe(dev, ret < 0 ? ret : -EBUSY,
+				     "RTC must be out of reset\n");
+	bus = devm_clk_get_enabled(dev, "bus");
+	if (IS_ERR(bus))
+		return dev_err_probe(dev, PTR_ERR(bus), "cannot enable bus clock\n");
+	chip->base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(chip->base))
+		return PTR_ERR(chip->base);
+
+	/* Publish no provider until transient RTC dependency failures are resolved. */
+	time_group = devres_open_group(dev, NULL, GFP_KERNEL);
+	if (!time_group)
+		return -ENOMEM;
+	ret = brick_rtc_register_time(pdev, chip, &invalid_state);
+	if (ret) {
+		devres_release_group(dev, time_group);
+		chip->rtc = NULL;
+		if (!invalid_state)
+			return ret; /* Includes EPROBE_DEFER and IRQ/allocation failures. */
+		dev_warn(dev, "retained RTC state invalid (%d); enabling radio clocks only\n", ret);
+	} else {
+		devres_remove_group(dev, time_group);
+	}
+	return brick_radio_clocks_register(dev, chip->base, &chip->radio_clocks);
+}
+
+static void brick_rtc_sync_state(struct device *dev)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+
+	brick_radio_clocks_sync(chip->radio_clocks);
+}
+
 static int brick_rtc_suspend(struct device *dev)
 {
 	/* Bus-off shadow synchronization and wakeup are not implemented. */
@@ -608,6 +645,8 @@ static struct platform_driver brick_rtc_driver = {
 	.probe = brick_rtc_probe,
 	.driver = {
 		.name = "trimui-brick-rtc",
+		.suppress_bind_attrs = true,
+		.sync_state = brick_rtc_sync_state,
 		.of_match_table = brick_rtc_match,
 		.pm = pm_sleep_ptr(&brick_rtc_pm_ops),
 	},

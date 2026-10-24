@@ -17,8 +17,10 @@ description: |
 
   The RTC bus clock permits register access independently of the oscillator
   and clock outputs. The inherited RTC reset, oscillator selection and radio
-  clock outputs must be preserved. This binding does not describe an RTC
-  clock provider or transfer ownership of the radio clock outputs.
+  source configuration must be preserved. The RTC owns shared radio output
+  gates: index 0 is LPO fanout, index 1 is DCXO peripheral reference.
+  This board path requires valid inherited clock sources; it does not change
+  mux, divider, oscillator trim or calibration.
 
 allOf:
   - $ref: rtc.yaml#
@@ -50,6 +52,9 @@ properties:
   reset-names:
     const: bus
 
+  "#clock-cells":
+    const: 1
+
   start-year: false
 
 required:
@@ -60,6 +65,7 @@ required:
   - clock-names
   - resets
   - reset-names
+  - "#clock-cells"
 
 unevaluatedProperties: false
 
@@ -72,6 +78,7 @@ examples:
     rtc@7000000 {
         compatible = "trimui,brick-rtc", "allwinner,sun50i-a133-rtc";
         reg = <0x07000000 0x200>;
+        #clock-cells = <1>;
         interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>;
         clocks = <&r_ccu CLK_R_AHB_BUS_RTC>;
         clock-names = "bus";
