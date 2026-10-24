@@ -20,6 +20,7 @@
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/random.h>
+#include <linux/overflow.h>
 
 #include "xradio.h"
 #include "wsm.h"
@@ -59,23 +60,28 @@
 #define WSM_GET16(buf) __WSM_GET(buf, u16, __le16_to_cpu)
 #define WSM_GET32(buf) __WSM_GET(buf, u32, __le32_to_cpu)
 
-#define WSM_PUT(buf, ptr, size)						\
-	do {								\
-		if (unlikely((buf)->data + size > (buf)->end))		\
-			if (unlikely(wsm_buf_reserve((buf), size)))	\
-				goto nomem;				\
-		memcpy((buf)->data, ptr, size);				\
-		(buf)->data += size;					\
-	} while (0)
+/* Command storage is independent of the SDIO transfer block size. */
+#define WSM_CMD_BUFFER_INITIAL 1024
+#define WSM_CMD_BUFFER_MAX 4096
 
-#define __WSM_PUT(buf, val, type, cvt)					\
-	do {								\
-		if (unlikely((buf)->data + sizeof(type) > (buf)->end))	\
-			if (unlikely(wsm_buf_reserve((buf), sizeof(type)))) \
-				goto nomem;				\
-		*(type *)(buf)->data = cvt(val);			\
-		(buf)->data += sizeof(type);				\
-	} while (0)
+#define WSM_PUT(buf, ptr, size)                                     \
+ do {                                                              \
+  size_t put_size = (size);                                         \
+  ret = wsm_buf_reserve((buf), put_size);                            \
+  if (unlikely(ret))                                               \
+   goto nomem;                                                     \
+  memcpy((buf)->data, (ptr), put_size);                              \
+  (buf)->data += put_size;                                          \
+ } while (0)
+
+#define __WSM_PUT(buf, val, type, cvt)                               \
+ do {                                                              \
+  ret = wsm_buf_reserve((buf), sizeof(type));                        \
+  if (unlikely(ret))                                               \
+   goto nomem;                                                     \
+  *(type *)(buf)->data = cvt(val);                                   \
+  (buf)->data += sizeof(type);                                      \
+ } while (0)
 
 #define WSM_PUT8(buf, val)  __WSM_PUT(buf, val, u8, (u8))
 #define WSM_PUT16(buf, val) __WSM_PUT(buf, val, u16, __cpu_to_le16)
@@ -151,8 +157,9 @@ int wsm_configuration(struct xradio_common *hw_priv,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 static int wsm_configuration_confirm(struct xradio_common *hw_priv,
@@ -200,8 +207,9 @@ int wsm_reset(struct xradio_common *hw_priv, const struct wsm_reset *arg,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 /* ******************************************************************** */
@@ -237,8 +245,9 @@ int wsm_write_mib(struct xradio_common *hw_priv, u16 mibId, void *_buf,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 static int wsm_write_mib_confirm(struct xradio_common *hw_priv,
@@ -346,8 +355,9 @@ int wsm_scan(struct xradio_common *hw_priv, const struct wsm_scan *arg,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 /* ******************************************************************** */
@@ -412,9 +422,10 @@ int wsm_join(struct xradio_common *hw_priv, struct wsm_join *arg,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
 	wsm_oper_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 /* ******************************************************************** */
@@ -440,8 +451,9 @@ int wsm_set_bss_params(struct xradio_common *hw_priv,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 /* ******************************************************************** */
@@ -470,8 +482,9 @@ int wsm_set_tx_queue_params(struct xradio_common *hw_priv,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 /* ******************************************************************** */
@@ -517,8 +530,9 @@ int wsm_set_edca_params(struct xradio_common *hw_priv,
 	return ret;
 
 nomem:
+	wsm_buf_reset(buf);
 	wsm_cmd_unlock(hw_priv);
-	return -ENOMEM;
+	return ret;
 }
 
 /* ******************************************************************** */
@@ -916,7 +930,7 @@ void wsm_txed(struct xradio_common *hw, u8 *data)
 
 void wsm_buf_init(struct wsm_buf *buf)
 {
-	int size = (SDIO_BLOCK_SIZE<<1); //for sdd file big than SDIO_BLOCK_SIZE
+	size_t size = WSM_CMD_BUFFER_INITIAL;
 	BUG_ON(buf->begin);
 	buf->begin = kmalloc(size, GFP_KERNEL);
 	buf->end = buf->begin ? &buf->begin[size] : buf->begin;
@@ -941,23 +955,25 @@ static void wsm_buf_reset(struct wsm_buf *buf)
 
 static int wsm_buf_reserve(struct wsm_buf *buf, size_t extra_size)
 {
-	size_t pos = buf->data - buf->begin;
-	size_t size = pos + extra_size;
+ size_t pos, size;
+ u8 *begin;
 
-	if (size & (SDIO_BLOCK_SIZE - 1)) {
-		size &= SDIO_BLOCK_SIZE;
-		size += SDIO_BLOCK_SIZE;
-	}
-
-	buf->begin = krealloc(buf->begin, size, GFP_KERNEL);
-	if (buf->begin) {
-		buf->data = &buf->begin[pos];
-		buf->end = &buf->begin[size];
-		return 0;
-	} else {
-		buf->end = buf->data = buf->begin;
-		return -ENOMEM;
-	}
+ if (!buf->begin)
+  return -ENOMEM;
+ pos = buf->data - buf->begin;
+ if (check_add_overflow(pos, extra_size, &size))
+  return -EOVERFLOW;
+ if (size > WSM_CMD_BUFFER_MAX)
+  return -EMSGSIZE;
+ if (size <= (size_t)(buf->end - buf->begin))
+  return 0;
+ begin = krealloc(buf->begin, size, GFP_KERNEL);
+ if (!begin)
+  return -ENOMEM;
+ buf->begin = begin;
+ buf->data = begin + pos;
+ buf->end = begin + size;
+ return 0;
 }
 
 /* Synchronous key transport. The BH owns its own copy before SDIO submission. */
@@ -970,9 +986,11 @@ int wsm_station_key_command(struct xradio_common *hw,u16 command,
  wsm_cmd_lock(hw);
  WSM_PUT(buf,payload,size);
  ret=wsm_cmd_send(hw,buf,NULL,command,WSM_CMD_TIMEOUT,0);
- memzero_explicit(buf->begin,buf->end-buf->begin);
+ if (buf->begin)
+  memzero_explicit(buf->begin,buf->end-buf->begin);
  wsm_buf_reset(buf);wsm_cmd_unlock(hw);return ret;
 nomem:
- memzero_explicit(buf->begin,buf->end-buf->begin);
- wsm_buf_reset(buf);wsm_cmd_unlock(hw);return -ENOMEM;
+ if (buf->begin)
+  memzero_explicit(buf->begin,buf->end-buf->begin);
+ wsm_buf_reset(buf);wsm_cmd_unlock(hw);return ret;
 }
