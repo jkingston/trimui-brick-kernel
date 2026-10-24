@@ -19,6 +19,7 @@
 #include <linux/clk.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
+#include <linux/regulator/consumer.h>
 #include <linux/gpio/consumer.h>
 
 #include <sound/core.h>
@@ -330,6 +331,7 @@ struct sun4i_codec {
 	struct regmap	*regmap;
 	struct clk	*clk_apb;
 	struct clk	*clk_module;
+	bool a133_playback;
 	struct reset_control *rst;
 	struct gpio_desc *gpio_pa;
 	struct gpio_desc *gpio_hp;
@@ -609,6 +611,13 @@ static int sun4i_codec_hw_params_playback(struct sun4i_codec *scodec,
 {
 	u32 val;
 
+	if (scodec->a133_playback) {
+		scodec->playback_dma_data.addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+		return regmap_field_update_bits(scodec->reg_dac_fifoc,
+			GENMASK(31, 29) | GENMASK(25, 24) | BIT(6) | BIT(5),
+			GENMASK(25, 24));
+	}
+
 	/* Set DAC sample rate */
 	regmap_field_update_bits(scodec->reg_dac_fifoc,
 				 7 << SUN4I_CODEC_DAC_FIFOC_DAC_FS,
@@ -657,6 +666,11 @@ static int sun4i_codec_hw_params(struct snd_pcm_substream *substream,
 	unsigned long clk_freq;
 	int ret, hwrate;
 
+	if (scodec->a133_playback &&
+	    (params_rate(params) != 48000 || params_channels(params) != 2 ||
+	     params_format(params) != SNDRV_PCM_FORMAT_S16_LE))
+		return -EINVAL;
+
 	clk_freq = sun4i_codec_get_mod_freq(params);
 	if (!clk_freq)
 		return -EINVAL;
@@ -664,6 +678,9 @@ static int sun4i_codec_hw_params(struct snd_pcm_substream *substream,
 	ret = clk_set_rate(scodec->clk_module, clk_freq);
 	if (ret)
 		return ret;
+
+	if (scodec->a133_playback && clk_get_rate(scodec->clk_module) != clk_freq)
+		return -EINVAL;
 
 	hwrate = sun4i_codec_get_hw_rate(params);
 	if (hwrate < 0)
@@ -2138,6 +2155,203 @@ static const struct regmap_config suniv_codec_regmap_config = {
 	.max_register	= SUNIV_CODEC_ADC_DBG,
 };
 
+#define SUN50I_A133_DAC_DPC 0x000
+#define SUN50I_A133_DAC_VOL 0x004
+#define SUN50I_A133_DAC_DEBUG 0x028
+#define SUN50I_A133_DAC_ANALOG 0x310
+#define SUN50I_A133_HEADPHONE 0x324
+
+static int a133_dac_event(struct snd_soc_dapm_widget *w,
+			 struct snd_kcontrol *k, int event)
+{
+	if (event == SND_SOC_DAPM_POST_PMU)
+		msleep(30);
+	return 0;
+}
+
+static int a133_headphone_event(struct snd_soc_dapm_widget *w,
+			       struct snd_kcontrol *k, int event)
+{
+	struct snd_soc_component *c = snd_soc_dapm_to_component(w->dapm);
+	const unsigned int up[] = { BIT(11), BIT(10), BIT(15) };
+	unsigned int i;
+	int ret;
+
+	/* Vendor orders input, output, PA on; reverse on power-down. */
+	for (i = 0; i < ARRAY_SIZE(up); i++) {
+		unsigned int bit = up[event == SND_SOC_DAPM_POST_PMU ? i : 2 - i];
+
+		ret = snd_soc_component_update_bits(c, SUN50I_A133_HEADPHONE, bit,
+			   event == SND_SOC_DAPM_POST_PMU ? bit : 0);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
+}
+
+/* Low initial digital level; userspace deliberately raises volume for test. */
+static int a133_component_probe(struct snd_soc_component *c)
+{
+	static const struct { unsigned int reg, mask, value; } init[] = {
+		{ SUN50I_A133_DAC_DPC, GENMASK(17, 12), 48 << 12 },
+		{ SUN50I_A133_DAC_VOL, BIT(16), 0 }, /* Common DAC attenuation. */
+		{ SUN50I_A133_DAC_ANALOG, GENMASK(30, 28), 0 },
+		{ SUN50I_A133_DAC_ANALOG, GENMASK(4, 0) | BIT(13) | BIT(12), 0 },
+		{ SUN50I_A133_DAC_DEBUG, BIT(6), BIT(6) }, /* Vendor L/R swap. Verify physically. */
+		{ SUN50I_A133_HEADPHONE, GENMASK(7, 6), 3 << 6 },
+		{ SUN50I_A133_HEADPHONE, BIT(3), BIT(3) },
+		{ SUN50I_A133_HEADPHONE, GENMASK(9, 8), 3 << 8 },
+		{ SUN50I_A133_DAC_ANALOG, GENMASK(25, 24), 1 << 24 },
+	};
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(init); i++) {
+		ret = snd_soc_component_update_bits(c, init[i].reg,
+						    init[i].mask, init[i].value);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
+}
+
+static const DECLARE_TLV_DB_SCALE(a133_digital_tlv, -7308, 116, 0);
+static const struct snd_kcontrol_new a133_controls[] = {
+	SOC_SINGLE_TLV("DAC Playback Volume", SUN50I_A133_DAC_DPC, 12, 63, 1, a133_digital_tlv),
+	/* Analog TLV deliberately omitted until vendor gain curves audited. */
+	SOC_SINGLE("Headphone Playback Volume", SUN50I_A133_DAC_ANALOG, 28, 7, 0),
+};
+static const struct snd_soc_dapm_widget a133_widgets[] = {
+	SND_SOC_DAPM_SUPPLY("DAC Enable", SUN50I_A133_DAC_DPC, 31, 0, a133_dac_event,
+			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_DAC("Left DAC", "Codec Playback", SUN50I_A133_DAC_ANALOG, 15, 0),
+	SND_SOC_DAPM_DAC("Right DAC", "Codec Playback", SUN50I_A133_DAC_ANALOG, 14, 0),
+	SND_SOC_DAPM_PGA_E("Headphone Driver", SND_SOC_NOPM, 0, 0, NULL, 0,
+			  a133_headphone_event,
+			  SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_OUTPUT("HPOUTL"),
+	SND_SOC_DAPM_OUTPUT("HPOUTR"),
+};
+static const struct snd_soc_dapm_route a133_routes[] = {
+	{ "Left DAC", NULL, "DAC Enable" },
+	{ "Right DAC", NULL, "DAC Enable" },
+	{ "Headphone Driver", NULL, "Left DAC" },
+	{ "Headphone Driver", NULL, "Right DAC" },
+	{ "HPOUTL", NULL, "Headphone Driver" },
+	{ "HPOUTR", NULL, "Headphone Driver" },
+};
+static const struct snd_soc_component_driver sun50i_a133_codec_component = {
+	.probe = a133_component_probe,
+	.controls = a133_controls,
+	.num_controls = ARRAY_SIZE(a133_controls),
+	.dapm_widgets = a133_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(a133_widgets),
+	.dapm_routes = a133_routes,
+	.num_dapm_routes = ARRAY_SIZE(a133_routes),
+	.use_pmdown_time = 1,
+	.endianness = 1,
+};
+
+static const struct snd_soc_dapm_widget sun50i_a133_card_widgets[] = {
+	SND_SOC_DAPM_HP("Headphone", NULL),
+};
+
+static struct snd_soc_card *sun50i_a133_codec_create_card(struct device *dev)
+{
+	struct snd_soc_card *card;
+	int ret;
+
+	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
+	if (!card)
+		return ERR_PTR(-ENOMEM);
+	card->dai_link = sun4i_codec_create_link(dev, &card->num_links);
+	if (!card->dai_link)
+		return ERR_PTR(-ENOMEM);
+	card->dai_link->playback_only = true;
+	card->dev = dev;
+	card->owner = THIS_MODULE;
+	card->name = "A133 Audio Codec";
+	card->driver_name = "sun4i-codec";
+	card->dapm_widgets = sun50i_a133_card_widgets;
+	card->num_dapm_widgets = ARRAY_SIZE(sun50i_a133_card_widgets);
+	card->fully_routed = true;
+	ret = snd_soc_of_parse_audio_routing(card, "allwinner,audio-routing");
+	if (ret)
+		return ERR_PTR(ret);
+	return card;
+}
+
+static struct snd_soc_dai_driver sun50i_a133_codec_dai = {
+	.name = "Codec",
+	.ops = &sun4i_codec_dai_ops,
+	.playback = {
+		.stream_name = "Codec Playback",
+		.channels_min = 2,
+		.channels_max = 2,
+		.rates = SNDRV_PCM_RATE_48000,
+		.rate_min = 48000,
+		.rate_max = 48000,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE,
+		.sig_bits = 16,
+	},
+};
+
+static const struct regmap_config sun50i_a133_regmap_config = {
+	.reg_bits = 32,
+	.reg_stride = 4,
+	.val_bits = 32,
+	.max_register = 0x32c,
+};
+
+static void sun50i_a133_release_clock_rate(void *data)
+{
+	clk_rate_exclusive_put(data);
+}
+
+static int sun50i_a133_codec_resources(struct sun4i_codec *scodec)
+{
+	struct device *dev = scodec->dev;
+	struct clk *pll;
+	int ret;
+
+	/* Do not accept dummy supplies or change a shared regulator voltage. */
+	if (!of_property_present(dev->of_node, "avcc-supply") ||
+	    !of_property_present(dev->of_node, "cpvin-supply"))
+		return -EINVAL;
+	ret = devm_regulator_get_enable_read_voltage(dev, "avcc");
+	if (ret < 0)
+		return ret;
+	if (ret != 1800000)
+		return -EINVAL;
+	ret = devm_regulator_get_enable_read_voltage(dev, "cpvin");
+	if (ret < 0)
+		return ret;
+	if (ret != 1800000)
+		return -EINVAL;
+
+	/* A100 DAC clock does not propagate rate requests to its parent. */
+	pll = devm_clk_get(dev, "pll-audio");
+	if (IS_ERR(pll))
+		return PTR_ERR(pll);
+	ret = clk_set_rate_exclusive(pll, 98304000);
+	if (ret)
+		return ret;
+	ret = devm_add_action_or_reset(dev, sun50i_a133_release_clock_rate, pll);
+	if (ret)
+		return ret;
+	if (clk_get_rate(pll) != 98304000)
+		return -EINVAL;
+	ret = clk_set_parent(scodec->clk_module, pll);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(scodec->clk_module, 24576000);
+	if (ret)
+		return ret;
+	if (clk_get_rate(scodec->clk_module) != 24576000)
+		return -EINVAL;
+	return 0;
+}
+
 struct sun4i_codec_quirks {
 	const struct regmap_config *regmap_config;
 	const struct snd_soc_component_driver *codec;
@@ -2230,6 +2444,17 @@ static const struct sun4i_codec_quirks sun8i_v3s_codec_quirks = {
 	.dma_max_burst	= SUN4I_DMA_MAX_BURST,
 };
 
+static const struct sun4i_codec_quirks sun50i_a133_codec_quirks = {
+	.regmap_config = &sun50i_a133_regmap_config,
+	.codec = &sun50i_a133_codec_component,
+	.create_card = sun50i_a133_codec_create_card,
+	.reg_dac_fifoc = REG_FIELD(0x10, 0, 31),
+	.reg_dac_txdata = 0x20,
+	.has_reset = true,
+	.playback_only = true,
+	.dma_max_burst = 4,
+};
+
 static const struct sun4i_codec_quirks sun50i_h616_codec_quirks = {
 	.regmap_config	= &sun50i_h616_codec_regmap_config,
 	.codec		= &sun50i_h616_codec_codec,
@@ -2254,6 +2479,10 @@ static const struct sun4i_codec_quirks suniv_f1c100s_codec_quirks = {
 };
 
 static const struct of_device_id sun4i_codec_of_match[] = {
+	{
+		.compatible = "allwinner,sun50i-a133-codec",
+		.data = &sun50i_a133_codec_quirks,
+	},
 	{
 		.compatible = "allwinner,sun4i-a10-codec",
 		.data = &sun4i_codec_quirks,
@@ -2332,6 +2561,13 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->clk_module),
 				     "Failed to get the module clock\n");
 
+	scodec->a133_playback = quirks == &sun50i_a133_codec_quirks;
+	if (scodec->a133_playback) {
+		ret = sun50i_a133_codec_resources(scodec);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret, "Audio resources unavailable\n");
+	}
+
 	if (quirks->has_reset) {
 		scodec->rst = devm_reset_control_get_exclusive_deasserted(&pdev->dev, NULL);
 		if (IS_ERR(scodec->rst))
@@ -2380,6 +2616,7 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_snd_soc_register_component(&pdev->dev, quirks->codec,
+				     scodec->a133_playback ? &sun50i_a133_codec_dai :
 				     &sun4i_codec_dai, 1);
 	if (ret)
 		return ret;

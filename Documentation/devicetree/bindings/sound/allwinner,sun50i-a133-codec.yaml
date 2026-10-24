@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/allwinner,sun50i-a133-codec.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Allwinner A133 Internal Audio Codec
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description: |
+  The A133 codec combines digital DMA FIFOs with direct MMIO analog controls.
+  Initial support covers stereo headphone playback. Its analog register layout
+  is not compatible with the H616 codec.
+
+allOf:
+  - $ref: dai-common.yaml#
+
+properties:
+  compatible:
+    const: allwinner,sun50i-a133-codec
+  '#sound-dai-cells':
+    const: 0
+  reg:
+    maxItems: 1
+  interrupts:
+    maxItems: 1
+  clocks:
+    items:
+      - description: APB bus clock
+      - description: DAC module clock
+      - description: Audio PLL
+  clock-names:
+    items:
+      - const: apb
+      - const: codec
+      - const: pll-audio
+  resets:
+    maxItems: 1
+  dmas:
+    items:
+      - description: TX DMA channel
+  dma-names:
+    items:
+      - const: tx
+  avcc-supply:
+    description: Analog 1.8 V supply
+  cpvin-supply:
+    description: Headphone charge pump 1.8 V input supply
+  allwinner,audio-routing:
+    $ref: /schemas/types.yaml#/definitions/non-unique-string-array
+    description: Connections between the headphone connector and codec outputs.
+    minItems: 4
+    maxItems: 4
+    items:
+      enum: [Headphone, HPOUTL, HPOUTR]
+
+required:
+  - compatible
+  - '#sound-dai-cells'
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - dmas
+  - dma-names
+  - avcc-supply
+  - cpvin-supply
+  - allwinner,audio-routing
+
+unevaluatedProperties: false

@@ -32,7 +32,7 @@
 #define CLK_PLL_VE		20
 #define CLK_PLL_COM		21
 #define CLK_PLL_COM_AUDIO	22
-#define CLK_PLL_AUDIO		23
+/* PLL_AUDIO exported for codec clock-family selection. */
 
 /* CPUX clock exported for DVFS */
 

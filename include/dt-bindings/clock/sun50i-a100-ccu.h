@@ -10,6 +10,8 @@
 #define CLK_PLL_PERIPH0_2X	4
 #define CLK_PLL_VIDEO0_4X	10
 
+#define CLK_PLL_AUDIO		23
+
 #define CLK_CPUX		24
 
 #define CLK_APB1		29

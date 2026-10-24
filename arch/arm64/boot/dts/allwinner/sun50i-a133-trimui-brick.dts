@@ -12,6 +12,7 @@
 	aliases {
 		serial0 = &uart0;
 		mmc0 = &mmc0;
+		mmc1 = &mmc1;
 	};
 
 	chosen {
@@ -143,6 +144,12 @@
 		};
 	};
 
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&r_pio 0 5 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <100>;
+	};
+
 	vibrator {
 		compatible = "gpio-vibrator";
 		enable-gpios = <&pio 7 3 GPIO_ACTIVE_HIGH>;
@@ -239,7 +246,17 @@
 };
 
 &mmc1 {
-	status = "disabled";
+	vmmc-supply = <&bldo1>;
+	vqmmc-supply = <&aldo3>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+	bus-width = <4>;
+	non-removable;
+	cap-sdio-irq;
+	no-mmc;
+	no-sd;
+	no-1-8-v;
+	max-frequency = <25000000>;
+	status = "okay";
 };
 
 /* Keep internal eMMC unavailable. */
@@ -525,4 +542,12 @@
 		function = LED_FUNCTION_INDICATOR;
 		function-enumerator = <22>;
 	};
+};
+
+&codec {
+	avcc-supply = <&aldo4>;
+	cpvin-supply = <&cldo1>;
+	allwinner,audio-routing = "Headphone", "HPOUTL",
+				  "Headphone", "HPOUTR";
+	status = "okay";
 };
