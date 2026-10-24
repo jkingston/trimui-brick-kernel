@@ -40,8 +40,6 @@
 			opp-microvolt-speed0 = <937500 937500 940000>;
 			opp-supported-hw = <1>;
 			clock-latency-ns = <244144>;
-			/* Enable individually after clock/rail validation. */
-			status = "disabled";
 		};
 
 		opp-1416000000 {
