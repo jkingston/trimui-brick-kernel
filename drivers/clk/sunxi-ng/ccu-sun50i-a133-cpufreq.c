@@ -57,6 +57,17 @@ static bool a133_pll_valid(struct a133_cpu_guard *g, unsigned long rate)
 	       (g->saved & ~(A133_N | A133_LOCK));
 }
 
+static bool a133_pll_lock_stable(struct a133_cpu_guard *g)
+{
+	void __iomem *reg = g->pll->base + g->pll->reg;
+
+	if (!(readl(reg) & A133_LOCK))
+		return false;
+	/* The lock indication can fall after the first post-update sample. */
+	udelay(20);
+	return readl(reg) & A133_LOCK;
+}
+
 static int a133_mux_set(struct a133_cpu_guard *g, u8 parent)
 {
 	int ret;
@@ -109,6 +120,7 @@ static int a133_cpu_notify(struct notifier_block *nb, unsigned long event,
 {
 	struct a133_cpu_guard *g = container_of(nb, struct a133_cpu_guard, nb);
 	struct clk_notifier_data *change = data;
+	bool locked;
 	u32 value;
 	int ret;
 
@@ -137,8 +149,8 @@ static int a133_cpu_notify(struct notifier_block *nb, unsigned long event,
 		ccu_gate_helper_disable(g->pll, A133_GATE);
 		ret = ccu_gate_helper_enable(g->pll, A133_GATE);
 		if (!ret)
-			ret = readl_poll_timeout(g->pll->base + g->pll->reg, value,
-						value & A133_LOCK, 100, 70000);
+			ret = read_poll_timeout(a133_pll_lock_stable, locked, locked,
+					       100, 70000, false, g);
 		if (ret) {
 			a133_fault(g);
 			return NOTIFY_BAD;
