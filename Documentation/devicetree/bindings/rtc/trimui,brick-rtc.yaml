@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/rtc/trimui,brick-rtc.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: TrimUI Brick retained Allwinner A133 RTC
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description: |
+  The TrimUI Brick retains an A133 RTC counter initialized by its boot
+  firmware. Official Brick firmware stores one-based days from 1970-01-01.
+  The board-specific compatible identifies this retained counter convention;
+  it is not an intrinsic epoch of the A133 hardware.
+
+  The RTC bus clock permits register access independently of the oscillator
+  and clock outputs. The inherited RTC reset, oscillator selection and radio
+  clock outputs must be preserved. This binding does not describe an RTC
+  clock provider or transfer ownership of the radio clock outputs.
+
+allOf:
+  - $ref: rtc.yaml#
+
+properties:
+  compatible:
+    items:
+      - const: trimui,brick-rtc
+      - const: allwinner,sun50i-a133-rtc
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+    description: RTC alarm interrupt
+
+  clocks:
+    maxItems: 1
+    description: Bus clock for register access
+
+  clock-names:
+    const: bus
+
+  resets:
+    maxItems: 1
+    description: RTC bus reset, which must already be deasserted by firmware
+
+  reset-names:
+    const: bus
+
+  start-year: false
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/sun50i-a100-r-ccu.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/reset/sun50i-a100-r-ccu.h>
+
+    rtc@7000000 {
+        compatible = "trimui,brick-rtc", "allwinner,sun50i-a133-rtc";
+        reg = <0x07000000 0x200>;
+        interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>;
+        clocks = <&r_ccu CLK_R_AHB_BUS_RTC>;
+        clock-names = "bus";
+        resets = <&r_ccu RST_R_AHB_BUS_RTC>;
+        reset-names = "bus";
+    };
