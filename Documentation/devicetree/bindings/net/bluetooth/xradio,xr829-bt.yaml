@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/bluetooth/xradio,xr829-bt.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Xradio XR829 Bluetooth controller
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description:
+  The XR829 Bluetooth function uses an H4 UART with hardware flow control.
+  Firmware is loaded into controller RAM after reset. Power supplies may be
+  shared with the Wi-Fi function and must have independent consumer references.
+
+allOf:
+  - $ref: /schemas/serial/serial-peripheral-props.yaml#
+
+properties:
+  compatible:
+    const: xradio,xr829-bt
+
+  vbat-supply:
+    description: Controller main power supply.
+
+  vddio-supply:
+    description: Controller I/O power supply.
+
+  reset-gpios:
+    maxItems: 1
+    description: Active-low controller reset.
+
+  device-wake-gpios:
+    maxItems: 1
+    description: Active-high host signal requesting the controller remain awake.
+
+  clocks:
+    maxItems: 1
+    description: Optional low-power reference clock.
+
+  clock-names:
+    items:
+      - const: lpo
+
+required:
+  - compatible
+  - vbat-supply
+  - vddio-supply
+  - reset-gpios
+  - device-wake-gpios
+
+dependencies:
+  clocks: [clock-names]
+  clock-names: [clocks]
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    serial {
+        bluetooth {
+            compatible = "xradio,xr829-bt";
+            vbat-supply = <&vbat>;
+            vddio-supply = <&vddio>;
+            reset-gpios = <&gpio 2 GPIO_ACTIVE_LOW>;
+            device-wake-gpios = <&gpio 4 GPIO_ACTIVE_HIGH>;
+        };
+    };

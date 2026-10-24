@@ -14,6 +14,7 @@
 	aliases {
 		ethernet0 = &wifi;
 		serial0 = &uart0;
+		serial1 = &uart1;
 		mmc0 = &mmc0;
 		mmc1 = &mmc1;
 	};
@@ -272,6 +273,12 @@
 };
 
 &pio {
+	vcc-pg-supply = <&aldo3>;
+
+	brick_bt_uart_pins: uart1-pg-pins {
+		pins = "PG6", "PG7", "PG8", "PG9";
+		function = "uart1";
+	};
 
 	ledc_pin: ledc-pin {
 		pins = "PE5";
@@ -366,6 +373,21 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart0_pb_pins>;
 	status = "okay";
+};
+
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&brick_bt_uart_pins>;
+	uart-has-rtscts;
+	status = "okay";
+
+	bluetooth {
+		compatible = "xradio,xr829-bt";
+		vbat-supply = <&bldo1>;
+		vddio-supply = <&aldo3>;
+		reset-gpios = <&r_pio 0 2 GPIO_ACTIVE_LOW>;
+		device-wake-gpios = <&r_pio 0 4 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 &usb_otg {

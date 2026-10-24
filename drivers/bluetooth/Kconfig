@@ -132,6 +132,24 @@ config BT_HCIUART_H4
 
 	  Say Y here to compile support for HCI UART (H4) protocol.
 
+config BT_HCIUART_XRADIO
+	tristate "Xradio XR829 Bluetooth support"
+	depends on BT_HCIUART
+	depends on BT_HCIUART_SERDEV
+	depends on OF && GPIOLIB && REGULATOR
+	select BT_HCIUART_H4
+	select CRYPTO_LIB_SHA256
+	select FW_LOADER
+	help
+	  Support the XR829 Bluetooth controller connected over UART with
+	  hardware flow control. Firmware loading and power sequencing are
+	  managed through serdev. Requires xr829/fw_xr829_bt.bin.
+
+	  This driver currently supports awake operation only.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called hci_xradio.
+
 config BT_HCIUART_NOKIA
 	tristate "UART Nokia H4+ protocol support"
 	depends on BT_HCIUART
