@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 %YAML 1.2
 ---
-$id: http://devicetree.org/schemas/regulator/trimui,brick-panel-supplies.yaml#
+$id: http://devicetree.org/schemas/mfd/trimui,brick-pmic.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: TrimUI Brick panel supplies
+title: TrimUI Brick boot-established PMIC
 
 maintainers:
   - Jack Kingston <998656+jkingston@users.noreply.github.com>
@@ -12,11 +12,13 @@ maintainers:
 description: |
   Panel supply interface at I2C address 0x34. CLDO1 is a shared,
   boot-enabled 1.8 V rail; CLDO4 supplies the panel at 3.3 V.
-  The driver preserves inherited voltage selectors and shared CLDO1.
+  The interface preserves inherited voltage selectors and shared CLDO1.
+  Read-only battery voltage, initialized gauge capacity and USB input
+  presence are provided by a child device. Charging remains boot-established.
 
 properties:
   compatible:
-    const: trimui,brick-panel-supplies
+    const: trimui,brick-pmic
   reg:
     maxItems: 1
   regulators:
@@ -25,13 +27,13 @@ properties:
     properties:
       cldo1:
         type: object
-        $ref: regulator.yaml#
+        $ref: /schemas/regulator/regulator.yaml#
         unevaluatedProperties: false
         required:
           - regulator-always-on
       cldo4:
         type: object
-        $ref: regulator.yaml#
+        $ref: /schemas/regulator/regulator.yaml#
         unevaluatedProperties: false
     required:
       - cldo1

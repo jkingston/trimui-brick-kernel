@@ -1814,8 +1814,7 @@ config REGULATOR_TPS68470
 
 config REGULATOR_TRIMUI_BRICK_PANEL
 	tristate "TrimUI Brick panel supplies"
-	depends on I2C && OF
-	select REGMAP_I2C
+	depends on MFD_TRIMUI_BRICK
 	help
 	  Fixed-voltage CLDO1/CLDO4 support for the Brick panel.
 	  Preserves shared CLDO1; does not configure charging or voltages.

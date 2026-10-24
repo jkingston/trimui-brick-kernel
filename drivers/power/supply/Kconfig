@@ -1202,4 +1202,13 @@ config MACSMC_POWER
 
 	  Say Y or M here if you have an Apple Silicon based Mac.
 
+config BATTERY_AXP2202_TELEMETRY
+	tristate "AXP2202 boot-established battery telemetry"
+	depends on MFD_TRIMUI_BRICK
+	help
+	  Read battery voltage, an initialized fuel gauge and USB input status.
+	  Charger and fuel-gauge configuration are left to boot firmware.
+	  Uninitialized or invalid gauge values are reported as unavailable.
+	  Battery presence and charge-state flags are not exposed.
+
 endif # POWER_SUPPLY

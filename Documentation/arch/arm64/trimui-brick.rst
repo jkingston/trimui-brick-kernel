@@ -40,3 +40,20 @@ GPIO keys are active-low. A/B/X/Y use PD12/PD13/PD18/PD19; the D-pad uses
 PD14..PD17 (down/left/right/up). L/R use PB4/PH17, L2/R2 use PB2/PB5,
 select/start use PH15/PH16, and menu/F1/F2 use PH14/PH12/PH13.
 Volume down/up use PD20/PD21. The PMIC power key is not yet supported.
+The rumble motor uses PH3, active-high, through the standard force-feedback
+interface; its supply remains boot-established.
+
+Other peripherals
+-----------------
+
+SD card detect is PF6, active-low with a pull-up. LEDC drives the stock
+23-entry RGB chain on PE5 at 24 MHz, using PIO. Physical LED index mapping
+has not been verified.
+
+AXP2202 telemetry reads battery voltage, initialized gauge capacity and USB
+input presence. Invalid or uninitialized readings return no data. Charging,
+battery-presence/full flags, power-key IRQs and shutdown are not implemented.
+The PMIC core preserves boot-established voltages and charging settings.
+
+These additional peripherals require validation on the device. Audio,
+wireless, USB host mode and CPU/GPU power management remain unsupported.

@@ -2578,5 +2578,16 @@ config MFD_MAX7360
 	  additional drivers must be enabled in order to use the functionality
 	  of the device.
 
+config MFD_TRIMUI_BRICK
+	tristate "TrimUI Brick PMIC"
+	depends on I2C && OF
+	select MFD_CORE
+	select REGMAP_I2C
+	help
+	  Boot-established AXP2202 supplies and read-only battery telemetry.
+	  Does not program charging parameters, voltage selectors or interrupts.
+	  The boot firmware must establish the board supplies and fuel gauge.
+	  Select the regulator and battery child drivers separately.
+
 endmenu
 endif
