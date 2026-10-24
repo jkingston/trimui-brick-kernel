@@ -469,9 +469,10 @@ static int xradio_bh_rx(struct xradio_common *hw_priv, u16* nextlen) {
 	u8 *data;
 	int ret;
 
-	read_len = *nextlen > 0 ? *nextlen : xradio_bh_rx_availlen(hw_priv);
-	if(read_len <= 0)
-		return read_len;
+	ret = *nextlen > 0 ? *nextlen : xradio_bh_rx_availlen(hw_priv);
+	if (ret <= 0)
+		return ret;
+	read_len = ret;
 
 	if (read_len < sizeof(struct wsm_hdr) || (read_len > EFFECTIVE_BUF_SIZE)) {
 		dev_err(hw_priv->pdev, "Invalid read len: %zu", read_len);
@@ -750,13 +751,14 @@ static int xradio_bh_exchange(struct xradio_common *hw_priv) {
 	do {
 		txdone = xradio_bh_tx(hw_priv);
 		if (txdone < 0) {
-			break;
+			return txdone;
 		}
 		rxdone = xradio_bh_rx(hw_priv, &nextlen);
 		if (rxdone < 0) {
-			break;
+			return rxdone;
 		}
-	} while ((txdone > 0 || rxdone > 0) && !kthread_should_stop());
+	} while ((txdone > 0 || rxdone > 0) && !kthread_should_stop() &&
+	         !READ_ONCE(hw_priv->bh_error));
 	return 0;
 }
 
@@ -767,6 +769,7 @@ static int xradio_bh(void *arg)
 	int wake = 0;
 	long timeout;
 	long status;
+	int available;
 
 	for (;;) {
 		timeout = HZ / 30;
@@ -776,22 +779,27 @@ static int xradio_bh(void *arg)
 					wake = atomic_xchg(&hw_priv->bh_tx, 0);
 					term = kthread_should_stop();
 					suspend = atomic_read(&hw_priv->bh_suspend);
-					(wake || term || suspend);}), timeout);
+					(wake || term || suspend || READ_ONCE(hw_priv->bh_error));}), timeout);
 
+		/* Stop and quarantine take precedence over queued traffic. */
+		if (term)
+			break;
+		if (READ_ONCE(hw_priv->bh_error))
+			break;
 		if (wake) {
 			if(xradio_bh_exchange(hw_priv) < 0){
 				break;
 			}
-		} else if (term) {
-			dev_dbg(hw_priv->pdev, "xradio_bh exit!\n");
-			break;
 		} else if (status < 0) {
 			dev_err(hw_priv->pdev, "bh_error=%d, status=%ld\n",
 					hw_priv->bh_error, status);
 			break;
 		} else if (!status) {
 			/* check if there is data waiting but we missed the interrupt*/
-			if (xradio_bh_rx_availlen(hw_priv) > 0) {
+			available = xradio_bh_rx_availlen(hw_priv);
+			if (available < 0)
+				break;
+			if (available > 0) {
 				dev_warn(hw_priv->pdev, "missed interrupt\n");
 				if(xradio_bh_exchange(hw_priv) < 0){
 					break;
@@ -826,6 +834,11 @@ static int xradio_bh(void *arg)
 		}
 	} /* for (;;)*/
 
+	/* Registered devices are reset by recovery_health; initial startup
+	 * failures unwind through probe. Never schedule recovery from probe BH.
+	 */
+	if (!kthread_should_stop())
+		WRITE_ONCE(hw_priv->bh_error, 1);
 	dev_err(hw_priv->pdev, "bh thread exiting\n");
 
 	return 0;
