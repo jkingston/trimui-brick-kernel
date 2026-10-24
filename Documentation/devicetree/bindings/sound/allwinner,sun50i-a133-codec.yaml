@@ -11,8 +11,9 @@ maintainers:
 
 description: |
   The A133 codec combines digital DMA FIFOs with direct MMIO analog controls.
-  Initial support covers stereo headphone playback. Its analog register layout
-  is not compatible with the H616 codec.
+  Initial support covers stereo headphone playback and an external amplifier
+  connected to those outputs. Its analog register layout is not compatible
+  with the H616 codec.
 
 allOf:
   - $ref: dai-common.yaml#
@@ -48,13 +49,20 @@ properties:
     description: Analog 1.8 V supply
   cpvin-supply:
     description: Headphone charge pump 1.8 V input supply
+  allwinner,pa-gpios:
+    maxItems: 1
+    description: GPIO enabling the external speaker amplifier
+  allwinner,pa-delay-ms:
+    description: Settling time after enabling the external speaker amplifier
+    default: 0
+    maximum: 1000
   allwinner,audio-routing:
     $ref: /schemas/types.yaml#/definitions/non-unique-string-array
-    description: Connections between the headphone connector and codec outputs.
+    description: Connections between the board outputs and codec outputs.
     minItems: 4
-    maxItems: 4
+    maxItems: 8
     items:
-      enum: [Headphone, HPOUTL, HPOUTR]
+      enum: [Headphone, Speaker, HPOUTL, HPOUTR]
 
 required:
   - compatible

@@ -547,7 +547,11 @@
 &codec {
 	avcc-supply = <&aldo4>;
 	cpvin-supply = <&cldo1>;
+	allwinner,pa-gpios = <&pio 7 6 GPIO_ACTIVE_HIGH>; /* PH6 */
+	allwinner,pa-delay-ms = <40>;
 	allwinner,audio-routing = "Headphone", "HPOUTL",
-				  "Headphone", "HPOUTR";
+				  "Headphone", "HPOUTR",
+				  "Speaker", "HPOUTL",
+				  "Speaker", "HPOUTR";
 	status = "okay";
 };

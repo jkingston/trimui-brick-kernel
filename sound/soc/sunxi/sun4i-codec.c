@@ -344,6 +344,7 @@ struct sun4i_codec {
 	struct reset_control *rst;
 	struct gpio_desc *gpio_pa;
 	struct gpio_desc *gpio_hp;
+	u32 pa_delay_ms;
 
 	/* ADC_FIFOC register is at different offset on different SoCs */
 	struct regmap_field *reg_adc_fifoc;
@@ -2274,8 +2275,46 @@ static const struct snd_soc_component_driver sun50i_a133_codec_component = {
 	.endianness = 1,
 };
 
+static int sun50i_a133_speaker_event(struct snd_soc_dapm_widget *w,
+				   struct snd_kcontrol *k, int event)
+{
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
+
+	if (event == SND_SOC_DAPM_POST_PMU) {
+		if (!scodec->gpio_pa)
+			return -ENODEV;
+		gpiod_set_value_cansleep(scodec->gpio_pa, 1);
+		msleep(scodec->pa_delay_ms);
+	} else {
+		gpiod_set_value_cansleep(scodec->gpio_pa, 0);
+	}
+	return 0;
+}
+
+static int sun50i_a133_card_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(rtd->card);
+	int ret;
+
+	ret = sun4i_codec_machine_init(rtd);
+	if (ret)
+		return ret;
+	/* The external amplifier requires an explicit userspace opt-in. */
+	ret = snd_soc_dapm_disable_pin(dapm, "Speaker");
+	if (ret)
+		return ret;
+	return snd_soc_dapm_sync(dapm);
+}
+
+static const struct snd_kcontrol_new sun50i_a133_card_controls[] = {
+	SOC_DAPM_PIN_SWITCH("Headphone"),
+	SOC_DAPM_PIN_SWITCH("Speaker"),
+};
+
 static const struct snd_soc_dapm_widget sun50i_a133_card_widgets[] = {
 	SND_SOC_DAPM_HP("Headphone", NULL),
+	SND_SOC_DAPM_SPK("Speaker", sun50i_a133_speaker_event),
 };
 
 static struct snd_soc_card *sun50i_a133_codec_create_card(struct device *dev)
@@ -2290,10 +2329,13 @@ static struct snd_soc_card *sun50i_a133_codec_create_card(struct device *dev)
 	if (!card->dai_link)
 		return ERR_PTR(-ENOMEM);
 	card->dai_link->playback_only = true;
+	card->dai_link->init = sun50i_a133_card_init;
 	card->dev = dev;
 	card->owner = THIS_MODULE;
 	card->name = "A133 Audio Codec";
 	card->driver_name = "sun4i-codec";
+	card->controls = sun50i_a133_card_controls;
+	card->num_controls = ARRAY_SIZE(sun50i_a133_card_controls);
 	card->dapm_widgets = sun50i_a133_card_widgets;
 	card->num_dapm_widgets = ARRAY_SIZE(sun50i_a133_card_widgets);
 	card->fully_routed = true;
@@ -2602,6 +2644,12 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 	if (IS_ERR(scodec->gpio_pa))
 		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->gpio_pa),
 				     "Failed to get pa gpio\n");
+	if (scodec->a133_playback) {
+		of_property_read_u32(pdev->dev.of_node, "allwinner,pa-delay-ms",
+				     &scodec->pa_delay_ms);
+		if (scodec->pa_delay_ms > 1000)
+			return -EINVAL;
+	}
 
 
 	scodec->gpio_hp = devm_gpiod_get_optional(&pdev->dev, "hp-det", GPIOD_IN);
