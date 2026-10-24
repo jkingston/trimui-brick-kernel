@@ -58,10 +58,15 @@ The PMIC core preserves boot-established voltages and charging settings.
 ALDO3 and BLDO1 are boot-enabled at 3.3 V for the radio; ALDO4 is 1.8 V
 for audio. Shared rails cannot be disabled or have their voltage changed.
 
-The audio codec exposes 48 kHz S16 stereo playback. Headphones and the speaker
+The audio codec exposes 44.1/48 kHz S16 stereo playback. Headphones and the speaker
 amplifier share HPOUTL/R. PH6 enables the amplifier with a 40 ms settling delay;
 the Speaker switch defaults off. Jack detection and other rates are unsupported.
 DMA request 7 feeds the DAC at 0x05096020; ALDO4/CLDO1 supply AVCC/CPVIN at 1.8 V.
+PLL_AUDIO must remain enabled at 98.304 MHz even for 44.1 kHz playback, which
+uses PLL_COM/5 at 90.3168 MHz and a 22.5792 MHz DAC module clock.
+
+TCS4838 at I2C address 0x41 preserves the boot-enabled CPU supply in bank 0.
+The regulator is registered without a CPU OPP consumer; DVFS remains disabled.
 
 MMC1 enumerates SDIO at 25 MHz and 3.3 V, with PL5 enable and a 100 ms delay.
 The populated XR829 enumerates as 0a9e:2282; its driver is not integrated yet.

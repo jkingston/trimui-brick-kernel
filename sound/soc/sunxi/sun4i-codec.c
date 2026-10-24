@@ -346,6 +346,8 @@ struct sun4i_codec {
 	struct clk *a133_rate_parent;
 	bool a133_module_rate_claimed;
 	bool a133_module_enabled;
+	bool a133_audio_rate_claimed;
+	bool a133_audio_enabled;
 	struct reset_control *rst;
 	struct gpio_desc *gpio_pa;
 	struct gpio_desc *gpio_hp;
@@ -377,6 +379,14 @@ static void sun50i_a133_release_stream_clocks(void *data)
 		clk_rate_exclusive_put(scodec->a133_rate_parent);
 		scodec->a133_rate_parent = NULL;
 	}
+	if (scodec->a133_audio_enabled) {
+		clk_disable_unprepare(scodec->a133_pll_audio);
+		scodec->a133_audio_enabled = false;
+	}
+	if (scodec->a133_audio_rate_claimed) {
+		clk_rate_exclusive_put(scodec->a133_pll_audio);
+		scodec->a133_audio_rate_claimed = false;
+	}
 }
 
 static int sun50i_a133_set_stream_clocks(struct sun4i_codec *scodec,
@@ -400,9 +410,29 @@ static int sun50i_a133_set_stream_clocks(struct sun4i_codec *scodec,
 
 	/* Repeated hw_params must not reparent an enabled DAC module. */
 	sun50i_a133_release_stream_clocks(scodec);
+	/*
+	 * A133 playback with COM selected stalls unless PLL_AUDIO is also
+	 * enabled. Holding it at 98.304 MHz, as the vendor does, restores
+	 * sample-counter progress. At 48 kHz the DAC parent already enables
+	 * PLL_AUDIO, so do not claim it twice.
+	 */
+	if (rate == 44100) {
+		ret = clk_set_rate_exclusive(scodec->a133_pll_audio, 98304000);
+		if (ret)
+			goto err_release;
+		scodec->a133_audio_rate_claimed = true;
+		if (clk_get_rate(scodec->a133_pll_audio) != 98304000) {
+			ret = -EINVAL;
+			goto err_release;
+		}
+		ret = clk_prepare_enable(scodec->a133_pll_audio);
+		if (ret)
+			goto err_release;
+		scodec->a133_audio_enabled = true;
+	}
 	ret = clk_set_rate_exclusive(parent, parent_rate);
 	if (ret)
-		return ret;
+		goto err_release;
 	scodec->a133_rate_parent = parent;
 	if (clk_get_rate(parent) != parent_rate) {
 		ret = -EINVAL;
