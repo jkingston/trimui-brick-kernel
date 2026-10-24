@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+menuconfig WLAN_VENDOR_XRADIO
+	bool "XRadio devices"
+	default y
+	help
+	  Support for XRadio wireless devices.
+
+if WLAN_VENDOR_XRADIO
+
+config XRADIO
+	tristate "XRadio XR829 SDIO wireless support"
+	depends on MAC80211 && MMC
+	help
+	  Station-mode support for the 2.4 GHz XR829 SDIO radio. Requires
+	  xr829/boot_xr829.bin, xr829/fw_xr829.bin and xr829/sdd_xr829.bin
+	  in the firmware search path.
+
+	  System suspend, AP mode, WPA3 and background scanning are not
+	  supported. HT20 is experimental and requires the allow_ht option.
+
+	  To build a module, choose M. The module is called xradio_wlan.
+
+endif # WLAN_VENDOR_XRADIO
