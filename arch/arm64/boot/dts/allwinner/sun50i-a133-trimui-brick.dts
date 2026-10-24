@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /dts-v1/;
 #include "sun50i-a133.dtsi"
+#include "sun50i-a133-c0-cpu-opp.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/thermal/thermal.h>
 
 / {
 	model = "TrimUI Brick";
@@ -564,4 +566,38 @@
 				  "Speaker", "HPOUTL",
 				  "Speaker", "HPOUTR";
 	status = "okay";
+};
+
+&ccu {
+	compatible = "allwinner,sun50i-a133-ccu";
+};
+
+&cpu0 {
+	cpu-supply = <&vdd_cpu>;
+};
+
+&{/thermal-zones/cpu-thermal} {
+	polling-delay-passive = <500>;
+	polling-delay = <1000>;
+
+	trips {
+		cpu_passive: cpu-passive {
+			temperature = <63000>;
+			hysteresis = <0>;
+			type = "passive";
+		};
+
+		cpu_critical: cpu-critical {
+			temperature = <90000>;
+			hysteresis = <0>;
+			type = "critical";
+		};
+	};
+
+	cooling-maps {
+		map-cpu {
+			trip = <&cpu_passive>;
+			cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+		};
+	};
 };

@@ -39,6 +39,7 @@ properties:
       - allwinner,sun50i-a64-ccu
       - allwinner,sun50i-a64-r-ccu
       - allwinner,sun50i-a100-ccu
+      - allwinner,sun50i-a133-ccu
       - allwinner,sun50i-a100-r-ccu
       - allwinner,sun50i-h5-ccu
       - allwinner,sun50i-h6-ccu
@@ -104,6 +105,7 @@ else:
         enum:
           - allwinner,sun20i-d1-ccu
           - allwinner,sun50i-a100-ccu
+          - allwinner,sun50i-a133-ccu
           - allwinner,sun50i-h6-ccu
           - allwinner,sun50i-h616-ccu
 

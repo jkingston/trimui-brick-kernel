@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* A133 speed fuse 0x8000: official TrimUI Brick v1.1.1 c0 table. */
+
+/ {
+	cpu_opp_table: opp-table-cpu {
+		compatible = "allwinner,sun50i-a133-operating-points";
+		nvmem-cells = <&a133_cpu_speed>;
+		opp-shared;
+
+		opp-408000000 {
+			opp-hz = /bits/ 64 <408000000>;
+			opp-microvolt-speed0 = <900000>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+		};
+
+		opp-600000000 {
+			opp-hz = /bits/ 64 <600000000>;
+			opp-microvolt-speed0 = <900000>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+		};
+
+		opp-816000000 {
+			opp-hz = /bits/ 64 <816000000>;
+			opp-microvolt-speed0 = <900000>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+		};
+
+		opp-1008000000 {
+			opp-hz = /bits/ 64 <1008000000>;
+			opp-microvolt-speed0 = <900000>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+		};
+
+		opp-1200000000 {
+			opp-hz = /bits/ 64 <1200000000>;
+			opp-microvolt-speed0 = <937500 937500 940000>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+			/* Enable individually after clock/rail validation. */
+			status = "disabled";
+		};
+
+		opp-1416000000 {
+			opp-hz = /bits/ 64 <1416000000>;
+			opp-microvolt-speed0 = <1020000 1020000 1025000>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+			/* Enable individually after clock/rail validation. */
+			status = "disabled";
+		};
+
+		opp-1608000000 {
+			opp-hz = /bits/ 64 <1608000000>;
+			opp-microvolt-speed0 = <1100000>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+			/* Enable individually after clock/rail validation. */
+			status = "disabled";
+		};
+
+		opp-1800000000 {
+			opp-hz = /bits/ 64 <1800000000>;
+			opp-microvolt-speed0 = <1180000 1180000 1187500>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+			/* Enable individually after clock/rail validation. */
+			status = "disabled";
+		};
+
+		opp-2000000000 {
+			opp-hz = /bits/ 64 <2000000000>;
+			opp-microvolt-speed0 = <1250000 1250000 1257500>;
+			opp-supported-hw = <1>;
+			clock-latency-ns = <244144>;
+			/* Enable individually after clock/rail validation. */
+			status = "disabled";
+		};
+	};
+};
+
+&{/soc/efuse@3006000} {
+	a133_cpu_speed: cpu-speed@0 {
+		reg = <0 2>;
+	};
+};
+
+&cpu0 {
+	operating-points-v2 = <&cpu_opp_table>;
+	#cooling-cells = <2>;
+};
+
+&cpu1 {
+	operating-points-v2 = <&cpu_opp_table>;
+	#cooling-cells = <2>;
+};
+
+&cpu2 {
+	operating-points-v2 = <&cpu_opp_table>;
+	#cooling-cells = <2>;
+};
+
+&cpu3 {
+	operating-points-v2 = <&cpu_opp_table>;
+	#cooling-cells = <2>;
+};

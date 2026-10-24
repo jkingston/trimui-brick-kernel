@@ -21,6 +21,7 @@
 #include "ccu_nm.h"
 
 #include "ccu-sun50i-a100.h"
+#include "ccu-sun50i-a133-cpufreq.h"
 
 #define SUN50I_A100_PLL_SDM_ENABLE		BIT(24)
 #define SUN50I_A100_PLL_OUTPUT_ENABLE		BIT(27)
@@ -1177,6 +1178,10 @@ static struct ccu_mux_nb sun50i_a100_cpu_nb = {
 	.bypass_index   = 4, /* index of pll periph0 */
 };
 
+static struct clk_ops a133_pll_ops;
+static struct clk_init_data a133_pll_init;
+static struct clk_init_data a133_cpux_init;
+
 static int sun50i_a100_ccu_probe(struct platform_device *pdev)
 {
 	void __iomem *reg;
@@ -1246,9 +1251,29 @@ static int sun50i_a100_ccu_probe(struct platform_device *pdev)
 		writel(val, reg + sun50i_a100_usb2_clk_regs[i]);
 	}
 
+	if (of_device_is_compatible(pdev->dev.of_node, "allwinner,sun50i-a133-ccu")) {
+		a133_pll_ops = ccu_mult_ops;
+		a133_pll_ops.set_rate = sun50i_a133_pll_set_rate;
+		a133_pll_init = *pll_cpux_clk.common.hw.init;
+		a133_pll_init.ops = &a133_pll_ops;
+		pll_cpux_clk.common.hw.init = &a133_pll_init;
+		a133_cpux_init = *cpux_clk.common.hw.init;
+		a133_cpux_init.flags |= CLK_SET_RATE_NO_REPARENT;
+		cpux_clk.common.hw.init = &a133_cpux_init;
+	}
+
 	ret = devm_sunxi_ccu_probe(&pdev->dev, reg, &sun50i_a100_ccu_desc);
 	if (ret)
 		return ret;
+
+	if (of_device_is_compatible(pdev->dev.of_node, "allwinner,sun50i-a133-ccu")) {
+		ret = sun50i_a133_cpufreq_register(&pdev->dev, &pll_cpux_clk.common,
+						 &cpux_clk.common, &cpux_clk.mux,
+						 &pll_periph0_clk.common.hw);
+		if (ret)
+			dev_warn(&pdev->dev, "CPU DVFS unavailable: %d\n", ret);
+		return 0;
+	}
 
 	/* Gate then ungate PLL CPU after any rate changes */
 	ccu_pll_notifier_register(&sun50i_a100_pll_cpu_nb);
@@ -1262,6 +1287,7 @@ static int sun50i_a100_ccu_probe(struct platform_device *pdev)
 
 static const struct of_device_id sun50i_a100_ccu_ids[] = {
 	{ .compatible = "allwinner,sun50i-a100-ccu" },
+	{ .compatible = "allwinner,sun50i-a133-ccu" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sun50i_a100_ccu_ids);

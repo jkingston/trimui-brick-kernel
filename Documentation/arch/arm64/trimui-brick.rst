@@ -66,10 +66,15 @@ PLL_AUDIO must remain enabled at 98.304 MHz even for 44.1 kHz playback, which
 uses PLL_COM/5 at 90.3168 MHz and a 22.5792 MHz DAC module clock.
 
 TCS4838 at I2C address 0x41 preserves the boot-enabled CPU supply in bank 0.
-The regulator is registered without a CPU OPP consumer; DVFS remains disabled.
+CPU frequency control requires speed fuse 0x8000 and checks PLL/mux completion
+before allowing voltage reduction. The initial table enables 408–1008 MHz at
+900 mV; the userspace governor preserves the boot frequency until requested.
+A failed clock transition latches a 600 MHz bypass until reboot. Higher stock
+operating points are disabled pending hardware validation.
 
 MMC1 enumerates SDIO at 25 MHz and 3.3 V, with PL5 enable and a 100 ms delay.
 The populated XR829 enumerates as 0a9e:2282; its driver is not integrated yet.
 RTC clock outputs remain boot-established. Wireless operation, USB host mode
-and CPU/GPU power management remain unsupported. Audio DMA and amplifier
+and GPU power management remain unsupported. CPU transitions are not yet
+hardware-validated. Audio DMA and amplifier
 sequencing have been exercised; audible output remains unverified.

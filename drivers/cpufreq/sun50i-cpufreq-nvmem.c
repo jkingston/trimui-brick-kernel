@@ -12,6 +12,8 @@
 
 #include <linux/arm-smccc.h>
 #include <linux/cpu.h>
+#include <linux/clk.h>
+#include <linux/clk/sunxi-a133.h>
 #include <linux/module.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/of.h>
@@ -28,10 +30,12 @@
 static struct platform_device *cpufreq_dt_pdev, *sun50i_cpufreq_pdev;
 
 struct sunxi_cpufreq_data {
-	u32 (*efuse_xlate)(u32 speedbin);
+	int (*efuse_xlate)(u32 speedbin);
+	unsigned int nvmem_length;
+	bool checked_clock;
 };
 
-static u32 sun50i_h6_efuse_xlate(u32 speedbin)
+static int sun50i_h6_efuse_xlate(u32 speedbin)
 {
 	u32 efuse_value;
 
@@ -48,7 +52,7 @@ static u32 sun50i_h6_efuse_xlate(u32 speedbin)
 		return 0;
 }
 
-static u32 sun50i_a100_efuse_xlate(u32 speedbin)
+static int sun50i_a100_efuse_xlate(u32 speedbin)
 {
 	u32 efuse_value;
 
@@ -65,6 +69,16 @@ static u32 sun50i_a100_efuse_xlate(u32 speedbin)
 	}
 }
 
+/* Only the vendor c0 table for this exact A133 speed fuse is established. */
+static int sun50i_a133_efuse_xlate(u32 speedbin)
+{
+	if (speedbin == 0x8000)
+		return 0;
+
+	pr_err("unsupported A133 speed fuse 0x%x\n", speedbin);
+	return -ENODEV;
+}
+
 static int get_soc_id_revision(void)
 {
 #ifdef CONFIG_HAVE_ARM_SMCCC_DISCOVERY
@@ -79,7 +93,7 @@ static int get_soc_id_revision(void)
  * returned speedbin index is 4 -> 0/2 -> 3 -> 1, from worst to best.
  * 0 and 2 seem identical from the OPP tables' point of view.
  */
-static u32 sun50i_h616_efuse_xlate(u32 speedbin)
+static int sun50i_h616_efuse_xlate(u32 speedbin)
 {
 	int ver_bits = get_soc_id_revision();
 	u32 value = 0;
@@ -132,11 +146,20 @@ static struct sunxi_cpufreq_data sun50i_a100_cpufreq_data = {
 	.efuse_xlate = sun50i_a100_efuse_xlate,
 };
 
+static struct sunxi_cpufreq_data sun50i_a133_cpufreq_data = {
+	.efuse_xlate = sun50i_a133_efuse_xlate,
+	.nvmem_length = 2,
+	.checked_clock = true,
+};
+
 static struct sunxi_cpufreq_data sun50i_h616_cpufreq_data = {
 	.efuse_xlate = sun50i_h616_efuse_xlate,
 };
 
 static const struct of_device_id cpu_opp_match_list[] = {
+	{ .compatible = "allwinner,sun50i-a133-operating-points",
+	  .data = &sun50i_a133_cpufreq_data,
+	},
 	{ .compatible = "allwinner,sun50i-h6-operating-points",
 	  .data = &sun50i_h6_cpufreq_data,
 	},
@@ -188,7 +211,7 @@ static bool dt_has_supported_hw(void)
  * Returns non-negative speed bin index on success, a negative error
  * value otherwise.
  */
-static int sun50i_cpufreq_get_efuse(void)
+static int sun50i_cpufreq_get_efuse(bool *checked_clock)
 {
 	const struct sunxi_cpufreq_data *opp_data;
 	struct nvmem_cell *speedbin_nvmem;
@@ -213,6 +236,7 @@ static int sun50i_cpufreq_get_efuse(void)
 		return -ENOENT;
 
 	opp_data = match->data;
+	*checked_clock = opp_data->checked_clock;
 
 	speedbin_nvmem = of_nvmem_cell_get(np, NULL);
 	if (IS_ERR(speedbin_nvmem))
@@ -224,8 +248,12 @@ static int sun50i_cpufreq_get_efuse(void)
 	if (IS_ERR(speedbin_ptr))
 		return PTR_ERR(speedbin_ptr);
 
-	if (len <= 4)
-		memcpy(&speedbin, speedbin_ptr, len);
+	if (!len || len > sizeof(speedbin) ||
+	    (opp_data->nvmem_length && len != opp_data->nvmem_length)) {
+		kfree(speedbin_ptr);
+		return -EINVAL;
+	}
+	memcpy(&speedbin, speedbin_ptr, len);
 	speedbin = le32_to_cpu(speedbin);
 
 	ret = opp_data->efuse_xlate(speedbin);
@@ -235,12 +263,36 @@ static int sun50i_cpufreq_get_efuse(void)
 	return ret;
 };
 
+static const char * const a133_clk_names[] = { NULL, NULL };
+
+static int a133_config_clks(struct device *dev, struct opp_table *table,
+			   struct dev_pm_opp *opp, void *data, bool scaling_down)
+{
+	struct clk *clk;
+	unsigned long target;
+	int ret;
+
+	if (data)
+		target = *(unsigned long *)data;
+	else if (opp)
+		target = dev_pm_opp_get_freq(opp);
+	else
+		return -EINVAL;
+	clk = clk_get(dev, NULL);
+	if (IS_ERR(clk))
+		return PTR_ERR(clk);
+	ret = sun50i_a133_cpux_set_rate_checked(clk, target);
+	clk_put(clk);
+	return ret;
+}
+
 static int sun50i_cpufreq_nvmem_probe(struct platform_device *pdev)
 {
 	int *opp_tokens;
 	char name[] = "speedXXXXXXXXXXX"; /* Integers can take 11 chars max */
 	unsigned int cpu, supported_hw;
 	struct dev_pm_opp_config config = {};
+	bool checked_clock = false;
 	int speed;
 	int ret;
 
@@ -248,7 +300,7 @@ static int sun50i_cpufreq_nvmem_probe(struct platform_device *pdev)
 	if (!opp_tokens)
 		return -ENOMEM;
 
-	speed = sun50i_cpufreq_get_efuse();
+	speed = sun50i_cpufreq_get_efuse(&checked_clock);
 	if (speed < 0) {
 		kfree(opp_tokens);
 		return speed;
@@ -266,6 +318,22 @@ static int sun50i_cpufreq_nvmem_probe(struct platform_device *pdev)
 
 	snprintf(name, sizeof(name), "speed%d", speed);
 	config.prop_name = name;
+	if (checked_clock) {
+		struct clk *clk = clk_get(get_cpu_device(0), NULL);
+
+		if (IS_ERR(clk)) {
+			kfree(opp_tokens);
+			return PTR_ERR(clk);
+		}
+		ret = sun50i_a133_cpux_is_ready(clk);
+		clk_put(clk);
+		if (ret) {
+			kfree(opp_tokens);
+			return ret;
+		}
+		config.clk_names = a133_clk_names;
+		config.config_clks = a133_config_clks;
+	}
 
 	for_each_present_cpu(cpu) {
 		struct device *cpu_dev = get_cpu_device(cpu);
@@ -324,6 +392,7 @@ static struct platform_driver sun50i_cpufreq_driver = {
 static const struct of_device_id sun50i_cpufreq_match_list[] = {
 	{ .compatible = "allwinner,sun50i-h6" },
 	{ .compatible = "allwinner,sun50i-a100" },
+	{ .compatible = "allwinner,sun50i-a133" },
 	{ .compatible = "allwinner,sun50i-h616" },
 	{ .compatible = "allwinner,sun50i-h618" },
 	{ .compatible = "allwinner,sun50i-h700" },
