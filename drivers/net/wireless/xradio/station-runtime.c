@@ -4,6 +4,7 @@
 #include <linux/seq_file.h>
 #include "bh.h"
 #include "station-runtime.h"
+#include "monitor-frame.h"
 #include "recovery.h"
 #include "station-address.h"
 #include "station-power.h"
@@ -475,8 +476,15 @@ void xrs_runtime_tx(struct xradio_common *hw,struct ieee80211_sta *sta,struct sk
   if((skb->data[1]&3)!=1 || memcmp(skb->data+4,s->settings.bssid,6))goto drop;
  } else if((skb->data[0]&0x0c)==0) {
   u8 subtype=skb->data[0]&0xf0;
-  if(subtype!=0 && subtype!=0x20 && subtype!=0xb0 && subtype!=0xa0 && subtype!=0xc0)goto drop;
-  if(memcmp(skb->data+4,s->settings.bssid,6))goto drop;
+  if(subtype==0x40) {
+   struct ieee80211_vif *vif=IEEE80211_SKB_CB(skb)->control.vif;
+   if(!vif || xrs_monitor_probe(skb->data,skb->len,vif->addr,
+       s->settings.bssid,s->settings.ssid,s->settings.ssid_len,
+       smp_load_acquire(&s->associated)))goto drop;
+  } else {
+   if(subtype!=0 && subtype!=0x20 && subtype!=0xb0 && subtype!=0xa0 && subtype!=0xc0)goto drop;
+   if(memcmp(skb->data+4,s->settings.bssid,6))goto drop;
+  }
  } else goto drop;
  wire=kzalloc(XRS_BUS_BUFFER,GFP_ATOMIC);if(!wire)goto drop;
  spin_lock_irqsave(&s->lock,flags);

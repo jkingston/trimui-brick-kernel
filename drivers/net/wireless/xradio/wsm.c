@@ -356,8 +356,14 @@ static int wsm_join_confirm(struct xradio_common *hw_priv,
 			    struct wsm_join *arg,
 			    struct wsm_buf *buf)
 {
-	if (WSM_GET32(buf) != WSM_STATUS_SUCCESS)
+	u32 status = WSM_GET32(buf);
+
+	if (status != WSM_STATUS_SUCCESS) {
+		dev_warn_ratelimited(hw_priv->pdev,
+				     "JOIN rejected by firmware: status=%u\n",
+				     status);
 		return -EINVAL;
+	}
 	arg->minPowerLevel = WSM_GET32(buf);
 	arg->maxPowerLevel = WSM_GET32(buf);
 
