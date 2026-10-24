@@ -76,10 +76,12 @@ The stock 2000 MHz request rounds to 1992 MHz on the 24 MHz integer PLL.
 
 MMC1 enumerates SDIO at 25 MHz and 3.3 V, with PL5 enable and a 100 ms delay.
 The populated XR829 enumerates as 0a9e:2282; its driver is not integrated yet.
-RTC time is read-only, using stock firmware's one-based days from 1970. The
-bus clock stays enabled after a startup counter check. Clock outputs remain
-boot-established; time writes, alarms and automatic system-clock initialization
-are unsupported. Wireless operation, USB host mode
+RTC time uses stock firmware's one-based days from 1970. The bus clock stays
+enabled after a startup counter check. Time writes use bounded busy checks
+and readback; a partial failure blocks reads until a successful explicit set
+within the current driver instance. Rebinding or rebooting clears that state.
+An inherited armed alarm blocks time writes. Clock outputs remain
+boot-established; alarms and automatic system-clock initialization are unsupported. Wireless operation, USB host mode
 and GPU power management remain unsupported. All CPU operating points,
 clock-failure recovery, automatic scaling and passive thermal throttling have
 been exercised. Audio DMA and amplifier sequencing have been exercised;

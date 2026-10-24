@@ -1683,9 +1683,8 @@ config RTC_DRV_TRIMUI_BRICK
 	depends on ARCH_SUNXI || COMPILE_TEST
 	depends on COMMON_CLK && RESET_CONTROLLER
 	help
-	  Read the A133 RTC using the stock Brick firmware day encoding.
-	  Preserves inherited clock outputs; setting time and alarms are
-	  not yet supported.
+	  Access the A133 RTC using the stock Brick firmware day encoding.
+	  Preserves inherited clock outputs. Alarms are not yet supported.
 
 config RTC_DRV_SUN6I
 	bool "Allwinner A31 RTC"
