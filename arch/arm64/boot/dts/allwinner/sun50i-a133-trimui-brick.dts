@@ -12,6 +12,7 @@
 	compatible = "trimui,brick", "allwinner,sun50i-a133", "allwinner,sun50i-a100";
 
 	aliases {
+		ethernet0 = &wifi;
 		serial0 = &uart0;
 		mmc0 = &mmc0;
 		mmc1 = &mmc1;
@@ -259,6 +260,10 @@
 	no-1-8-v;
 	max-frequency = <25000000>;
 	status = "okay";
+
+	wifi: wifi@1 {
+		reg = <1>;
+	};
 };
 
 /* Keep internal eMMC unavailable. */
