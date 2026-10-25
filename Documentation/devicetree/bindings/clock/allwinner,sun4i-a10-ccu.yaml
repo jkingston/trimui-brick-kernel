@@ -17,6 +17,14 @@ properties:
   "#reset-cells":
     const: 1
 
+  allwinner,stock-suspend:
+    type: boolean
+    description:
+      Enable the A133 stock monitor/SCP clock-context contract. Both the A133
+      main CCU and its A100-compatible R-CCU must opt in together. The original
+      stock monitor, initialized SCP and service device tree must be retained.
+      This does not apply to a TF-A boot chain.
+
   compatible:
     enum:
       - allwinner,sun4i-a10-ccu
@@ -128,6 +136,18 @@ else:
       clock-names:
         minItems: 2
         maxItems: 2
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          not:
+            enum:
+              - allwinner,sun50i-a133-ccu
+              - allwinner,sun50i-a100-r-ccu
+    then:
+      properties:
+        allwinner,stock-suspend: false
 
 additionalProperties: false
 
