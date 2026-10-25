@@ -7,7 +7,11 @@
  * Maxime Ripard <maxime.ripard@free-electrons.com>
  */
 
+#include <linux/arm-smccc.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
@@ -176,6 +180,7 @@ struct sun6i_desc {
 };
 
 struct sun6i_pchan {
+	u32 sleep_regs[8];
 	u32			idx;
 	void __iomem		*base;
 	struct sun6i_vchan	*vchan;
@@ -194,6 +199,8 @@ struct sun6i_vchan {
 };
 
 struct sun6i_dma_dev {
+	bool brick, pm_blocked, pm_fault, pm_clock_off, pm_fenced, pm_reset;
+	u32 sleep_irq_en, sleep_irq_status;
 	struct dma_device	slave;
 	void __iomem		*base;
 	struct clk		*clk;
@@ -485,6 +492,9 @@ static void sun6i_dma_tasklet(struct tasklet_struct *t)
 	unsigned int pchan_alloc = 0;
 	unsigned int pchan_idx;
 
+	if (READ_ONCE(sdev->pm_blocked))
+		return;
+
 	list_for_each_entry(vchan, &sdev->slave.channels, vc.chan.device_node) {
 		spin_lock_irq(&vchan->vc.lock);
 
@@ -680,6 +690,9 @@ static struct dma_async_tx_descriptor *sun6i_dma_prep_dma_memcpy(
 	if (!len)
 		return NULL;
 
+	if (READ_ONCE(sdev->pm_blocked))
+		return NULL;
+
 	txd = kzalloc_obj(*txd, GFP_NOWAIT);
 	if (!txd)
 		return NULL;
@@ -728,6 +741,9 @@ static struct dma_async_tx_descriptor *sun6i_dma_prep_slave_sg(
 	dma_addr_t p_lli;
 	u32 lli_cfg;
 	int i, ret;
+
+	if (READ_ONCE(sdev->pm_blocked))
+		return NULL;
 
 	if (!sgl)
 		return NULL;
@@ -815,6 +831,9 @@ static struct dma_async_tx_descriptor *sun6i_dma_prep_dma_cyclic(
 	unsigned int i, periods = buf_len / period_len;
 	int ret;
 
+	if (READ_ONCE(sdev->pm_blocked))
+		return NULL;
+
 	ret = set_config(sdev, sconfig, dir, &lli_cfg);
 	if (ret) {
 		dev_err(chan2dev(chan), "Invalid DMA configuration\n");
@@ -892,32 +911,44 @@ static int sun6i_dma_pause(struct dma_chan *chan)
 {
 	struct sun6i_dma_dev *sdev = to_sun6i_dma_dev(chan->device);
 	struct sun6i_vchan *vchan = to_sun6i_vchan(chan);
-	struct sun6i_pchan *pchan = vchan->phy;
+	struct sun6i_pchan *pchan;
+	unsigned long flags;
+	int ret = 0;
 
-	dev_dbg(chan2dev(chan), "vchan %p: pause\n", &vchan->vc);
-
+	spin_lock_irqsave(&vchan->vc.lock, flags);
+	if (READ_ONCE(sdev->pm_blocked)) {
+		ret = sdev->pm_fault ? -EIO : -EBUSY;
+		goto out;
+	}
+	pchan = vchan->phy;
 	if (pchan) {
-		writel(DMA_CHAN_PAUSE_PAUSE,
-		       pchan->base + DMA_CHAN_PAUSE);
+		writel(DMA_CHAN_PAUSE_PAUSE, pchan->base + DMA_CHAN_PAUSE);
 	} else {
 		spin_lock(&sdev->lock);
 		list_del_init(&vchan->node);
 		spin_unlock(&sdev->lock);
 	}
-
-	return 0;
+out:
+	spin_unlock_irqrestore(&vchan->vc.lock, flags);
+	return ret;
 }
 
 static int sun6i_dma_resume(struct dma_chan *chan)
 {
 	struct sun6i_dma_dev *sdev = to_sun6i_dma_dev(chan->device);
 	struct sun6i_vchan *vchan = to_sun6i_vchan(chan);
-	struct sun6i_pchan *pchan = vchan->phy;
+	struct sun6i_pchan *pchan;
 	unsigned long flags;
+	int ret = 0;
 
 	dev_dbg(chan2dev(chan), "vchan %p: resume\n", &vchan->vc);
 
 	spin_lock_irqsave(&vchan->vc.lock, flags);
+	if (READ_ONCE(sdev->pm_blocked)) {
+		ret = sdev->pm_fault ? -EIO : -EBUSY;
+		goto out;
+	}
+	pchan = vchan->phy;
 
 	if (pchan) {
 		writel(DMA_CHAN_PAUSE_RESUME,
@@ -928,24 +959,30 @@ static int sun6i_dma_resume(struct dma_chan *chan)
 		spin_unlock(&sdev->lock);
 	}
 
+out:
 	spin_unlock_irqrestore(&vchan->vc.lock, flags);
 
-	return 0;
+	return ret;
 }
 
 static int sun6i_dma_terminate_all(struct dma_chan *chan)
 {
 	struct sun6i_dma_dev *sdev = to_sun6i_dma_dev(chan->device);
 	struct sun6i_vchan *vchan = to_sun6i_vchan(chan);
-	struct sun6i_pchan *pchan = vchan->phy;
+	struct sun6i_pchan *pchan;
 	unsigned long flags;
 	LIST_HEAD(head);
+
+	spin_lock_irqsave(&vchan->vc.lock, flags);
+	if (READ_ONCE(sdev->pm_blocked) && !sdev->pm_reset) {
+		spin_unlock_irqrestore(&vchan->vc.lock, flags);
+		return -EBUSY;
+	}
+	pchan = vchan->phy;
 
 	spin_lock(&sdev->lock);
 	list_del_init(&vchan->node);
 	spin_unlock(&sdev->lock);
-
-	spin_lock_irqsave(&vchan->vc.lock, flags);
 
 	if (pchan && pchan->desc && pchan->desc != pchan->done) {
 		struct virt_dma_desc *vd = &pchan->desc->vd;
@@ -957,8 +994,10 @@ static int sun6i_dma_terminate_all(struct dma_chan *chan)
 	vchan_get_all_descriptors(&vchan->vc, &head);
 
 	if (pchan) {
-		writel(DMA_CHAN_ENABLE_STOP, pchan->base + DMA_CHAN_ENABLE);
-		writel(DMA_CHAN_PAUSE_RESUME, pchan->base + DMA_CHAN_PAUSE);
+		if (!sdev->pm_fault) {
+			writel(DMA_CHAN_ENABLE_STOP, pchan->base + DMA_CHAN_ENABLE);
+			writel(DMA_CHAN_PAUSE_RESUME, pchan->base + DMA_CHAN_PAUSE);
+		}
 
 		vchan->phy = NULL;
 		pchan->vchan = NULL;
@@ -977,8 +1016,9 @@ static enum dma_status sun6i_dma_tx_status(struct dma_chan *chan,
 					   dma_cookie_t cookie,
 					   struct dma_tx_state *state)
 {
+	struct sun6i_dma_dev *sdev = to_sun6i_dma_dev(chan->device);
 	struct sun6i_vchan *vchan = to_sun6i_vchan(chan);
-	struct sun6i_pchan *pchan = vchan->phy;
+	struct sun6i_pchan *pchan;
 	struct sun6i_dma_lli *lli;
 	struct virt_dma_desc *vd;
 	enum dma_status ret;
@@ -990,6 +1030,11 @@ static enum dma_status sun6i_dma_tx_status(struct dma_chan *chan,
 		return ret;
 
 	spin_lock_irqsave(&vchan->vc.lock, flags);
+	if (READ_ONCE(sdev->pm_blocked)) {
+		spin_unlock_irqrestore(&vchan->vc.lock, flags);
+		return DMA_ERROR;
+	}
+	pchan = vchan->phy;
 
 	vd = vchan_find_desc(&vchan->vc, cookie);
 
@@ -1017,6 +1062,8 @@ static void sun6i_dma_issue_pending(struct dma_chan *chan)
 	unsigned long flags;
 
 	spin_lock_irqsave(&vchan->vc.lock, flags);
+	if (READ_ONCE(sdev->pm_blocked))
+		goto out;
 
 	if (vchan_issue_pending(&vchan->vc)) {
 		spin_lock(&sdev->lock);
@@ -1034,6 +1081,7 @@ static void sun6i_dma_issue_pending(struct dma_chan *chan)
 			&vchan->vc);
 	}
 
+out:
 	spin_unlock_irqrestore(&vchan->vc.lock, flags);
 }
 
@@ -1043,6 +1091,8 @@ static void sun6i_dma_free_chan_resources(struct dma_chan *chan)
 	struct sun6i_vchan *vchan = to_sun6i_vchan(chan);
 	unsigned long flags;
 
+	if (READ_ONCE(sdev->pm_blocked) && !sdev->pm_reset)
+		return;
 	spin_lock_irqsave(&sdev->lock, flags);
 	list_del_init(&vchan->node);
 	spin_unlock_irqrestore(&sdev->lock, flags);
@@ -1074,8 +1124,10 @@ static struct dma_chan *sun6i_dma_of_xlate(struct of_phandle_args *dma_spec,
 static inline void sun6i_kill_tasklet(struct sun6i_dma_dev *sdev)
 {
 	/* Disable all interrupts from DMA */
-	writel(0, sdev->base + DMA_IRQ_EN(0));
-	writel(0, sdev->base + DMA_IRQ_EN(1));
+	if (!sdev->pm_fault) {
+		writel(0, sdev->base + DMA_IRQ_EN(0));
+		writel(0, sdev->base + DMA_IRQ_EN(1));
+	}
 
 	/* Prevent spurious interrupts from scheduling the tasklet */
 	atomic_inc(&sdev->tasklet_shutdown);
@@ -1313,6 +1365,8 @@ static int sun6i_dma_probe(struct platform_device *pdev)
 	if (!sdc)
 		return -ENOMEM;
 
+	sdc->brick = of_machine_is_compatible("trimui,brick") &&
+		of_device_is_compatible(np, "allwinner,sun50i-a100-dma");
 	sdc->cfg = of_device_get_match_data(&pdev->dev);
 	if (!sdc->cfg)
 		return -ENODEV;
@@ -1503,17 +1557,234 @@ static void sun6i_dma_remove(struct platform_device *pdev)
 	sun6i_kill_tasklet(sdc);
 
 	clk_disable_unprepare(sdc->clk_mbus);
-	clk_disable_unprepare(sdc->clk);
+	if (!sdc->pm_clock_off)
+		clk_disable_unprepare(sdc->clk);
 	reset_control_assert(sdc->rstc);
 
 	sun6i_dma_free(sdc);
 }
+
+/* The shipped A133 driver gates AHB and reinstates non-secure ownership;
+ * it does not replay channel registers. Retain paused PCM context, and reject
+ * loss rather than restarting a cyclic transfer at an invented position.
+ */
+static int sun6i_dma_pm_prepare(struct device *dev)
+{
+	struct sun6i_dma_dev *sdev = dev_get_drvdata(dev);
+	struct resource *res;
+
+	if (!sdev->brick)
+		return 0;
+	if (sdev->pm_fault || sdev->pm_fenced)
+		return -EIO;
+	if (pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
+		return 0;
+	if (pm_suspend_target_state != PM_SUSPEND_MEM)
+		return -EOPNOTSUPP;
+	res = platform_get_resource(to_platform_device(dev), IORESOURCE_MEM, 0);
+	if (!res || res->start != 0x03002000 || sdev->num_pchans != 8)
+		return -ENODEV;
+	return sun50i_a133_ccu_deep_ready();
+}
+
+static int sun6i_dma_pm_suspend_late(struct device *dev)
+{
+	struct sun6i_dma_dev *sdev = dev_get_drvdata(dev);
+	unsigned long flags;
+	unsigned int i;
+
+	if (!sdev->brick || pm_suspend_target_state != PM_SUSPEND_MEM)
+		return 0;
+	WRITE_ONCE(sdev->pm_blocked, true);
+	disable_irq(sdev->irq);
+	tasklet_disable(&sdev->task);
+	for (i = 0; i < sdev->num_vchans; i++) {
+		tasklet_disable(&sdev->vchans[i].vc.task);
+		/* Drain a control/status operation that entered before the gate. */
+		spin_lock_irqsave(&sdev->vchans[i].vc.lock, flags);
+		spin_unlock_irqrestore(&sdev->vchans[i].vc.lock, flags);
+	}
+	sdev->pm_fenced = true;
+	return 0;
+}
+
+static int sun6i_dma_pm_snapshot(struct sun6i_dma_dev *sdev, bool verify)
+{
+	unsigned int i, r;
+	u32 value;
+
+	if (!list_empty(&sdev->pending))
+		return -EBUSY;
+	for (i = 0; i < sdev->num_pchans; i++) {
+		struct sun6i_pchan *pchan = &sdev->pchans[i];
+
+		if (pchan->done)
+			return -EBUSY;
+		value = readl(pchan->base + DMA_CHAN_ENABLE) & DMA_CHAN_ENABLE_START;
+		if (verify) {
+			if (value != pchan->sleep_regs[0])
+				return -EIO;
+		} else {
+			pchan->sleep_regs[0] = value;
+		}
+		if (!value) {
+			if (pchan->desc)
+				return -EBUSY;
+			continue;
+		}
+		/* Only the board's paused cyclic codec client is qualified here.
+		 * Other active DMA clients must terminate before system sleep.
+		 */
+		if (!pchan->vchan || !pchan->desc || !pchan->vchan->cyclic ||
+		    pchan->vchan->port != 7 ||
+		    !(readl(pchan->base + DMA_CHAN_PAUSE) & DMA_CHAN_PAUSE_PAUSE))
+			return -EBUSY;
+		for (r = 1; r < ARRAY_SIZE(pchan->sleep_regs); r++) {
+			value = readl(pchan->base + r * 4);
+			if (verify) {
+				if (value != pchan->sleep_regs[r])
+					return -EIO;
+			} else {
+				pchan->sleep_regs[r] = value;
+			}
+		}
+	}
+	return 0;
+}
+
+static int sun6i_dma_pm_suspend_noirq(struct device *dev)
+{
+	struct sun6i_dma_dev *sdev = dev_get_drvdata(dev);
+	int ret;
+
+	if (!sdev->pm_fenced)
+		return 0;
+	ret = sun6i_dma_pm_snapshot(sdev, false);
+	if (ret)
+		return ret;
+	/* A pause request must have stopped register progression before gating.
+	 * This is the noirq phase, so a sleeping delay is not available.
+	 */
+	udelay(10);
+	ret = sun6i_dma_pm_snapshot(sdev, true);
+	if (ret)
+		return ret;
+	sdev->sleep_irq_en = readl(sdev->base + DMA_IRQ_EN(0));
+	sdev->sleep_irq_status = readl(sdev->base + DMA_IRQ_STAT(0));
+	/* Stock owns only AHB here; retain our independent MBUS clock vote. */
+	clk_disable_unprepare(sdev->clk);
+	sdev->pm_clock_off = true;
+	return 0;
+}
+
+static int sun6i_dma_pm_secure_init(void)
+{
+	struct arm_smccc_res res;
+
+	/* Exact stock monitor: x1=physical address, w2=value; the write call
+	 * has no status result. Its secure-read service supplies the readback.
+	 */
+	arm_smccc_smc(0xc000ff06, 0x03002020, 0xff, 0, 0, 0, 0, 0, &res);
+	arm_smccc_smc(0xc000ff05, 0x03002020, 0, 0, 0, 0, 0, 0, &res);
+	return res.a0 == 0xff ? 0 : -EIO;
+}
+
+static int sun6i_dma_pm_resume_noirq(struct device *dev)
+{
+	struct sun6i_dma_dev *sdev = dev_get_drvdata(dev);
+	int ret, err;
+
+	if (!sdev->pm_clock_off)
+		return 0;
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		goto fault;
+	ret = clk_prepare_enable(sdev->clk);
+	if (ret)
+		goto fault;
+	sdev->pm_clock_off = false;
+	ret = reset_control_status(sdev->rstc);
+	if (ret) {
+		ret = ret < 0 ? ret : -EIO;
+		goto fault;
+	}
+	if (!__clk_is_enabled(sdev->clk) || !__clk_is_enabled(sdev->clk_mbus)) {
+		ret = -EIO;
+		goto fault;
+	}
+	ret = sun6i_dma_pm_secure_init();
+	if (ret)
+		goto fault;
+	ret = sun6i_dma_pm_snapshot(sdev, true);
+	if (ret)
+		goto fault;
+	if (readl(sdev->base + DMA_IRQ_STAT(0)) != sdev->sleep_irq_status) {
+		ret = -EIO;
+		goto fault;
+	}
+	/* Pending period notifications belong to the retained transfer. Do not
+	 * acknowledge or synthesize them; the IRQ handles them after unfencing.
+	 */
+	writel(sdev->sleep_irq_en, sdev->base + DMA_IRQ_EN(0));
+	sdev->cfg->clock_autogate_enable(sdev);
+	if (readl(sdev->base + DMA_IRQ_EN(0)) != sdev->sleep_irq_en ||
+	    !(readl(sdev->base + SUNXI_H3_DMA_GATE) & SUNXI_H3_DMA_GATE_ENABLE)) {
+		ret = -EIO;
+		goto fault;
+	}
+	return 0;
+fault:
+	/* Reset is in the always-mapped CCU, not the inaccessible DMA bank.
+	 * Confirm isolation before permitting descriptor cleanup.
+	 */
+	err = reset_control_assert(sdev->rstc);
+	if (!err) {
+		err = reset_control_status(sdev->rstc);
+		err = err == 1 ? 0 : (err < 0 ? err : -EIO);
+	}
+	sdev->pm_reset = !err;
+	WRITE_ONCE(sdev->pm_fault, true);
+	dev_err(dev, "DMA context restore failed: %d, reset isolation: %d\n", ret, err);
+	return ret;
+}
+
+static int sun6i_dma_pm_resume_early(struct device *dev)
+{
+	struct sun6i_dma_dev *sdev = dev_get_drvdata(dev);
+	unsigned int i;
+
+	if (!sdev->pm_fenced)
+		return 0;
+	if (!sdev->pm_fault)
+		WRITE_ONCE(sdev->pm_blocked, false);
+	/* A terminal fault still drains software callbacks. The service tasklet
+	 * and all hardware-facing DMA APIs remain gated until reboot.
+	 */
+	for (i = 0; i < sdev->num_vchans; i++)
+		tasklet_enable(&sdev->vchans[i].vc.task);
+	tasklet_enable(&sdev->task);
+	if (!sdev->pm_fault) {
+		enable_irq(sdev->irq);
+		tasklet_schedule(&sdev->task);
+	}
+	sdev->pm_fenced = false;
+	return sdev->pm_fault ? -EIO : 0;
+}
+
+static const struct dev_pm_ops sun6i_dma_pm_ops = {
+	.prepare = sun6i_dma_pm_prepare,
+	.suspend_late = sun6i_dma_pm_suspend_late,
+	.suspend_noirq = sun6i_dma_pm_suspend_noirq,
+	.resume_noirq = sun6i_dma_pm_resume_noirq,
+	.resume_early = sun6i_dma_pm_resume_early,
+};
 
 static struct platform_driver sun6i_dma_driver = {
 	.probe		= sun6i_dma_probe,
 	.remove		= sun6i_dma_remove,
 	.driver = {
 		.name		= "sun6i-dma",
+		.pm = pm_sleep_ptr(&sun6i_dma_pm_ops),
 		.of_match_table	= sun6i_dma_match,
 	},
 };
