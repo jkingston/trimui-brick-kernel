@@ -217,6 +217,8 @@ int __must_check media_devnode_register(struct media_device *mdev,
 	if (minor == MEDIA_NUM_DEVICES) {
 		mutex_unlock(&media_devnode_lock);
 		pr_err("could not get a free minor\n");
+		if (devnode->release)
+			devnode->release(devnode);
 		kfree(devnode);
 		return -ENFILE;
 	}
@@ -256,7 +258,7 @@ int __must_check media_devnode_register(struct media_device *mdev,
 cdev_add_error:
 	mutex_lock(&media_devnode_lock);
 	clear_bit(devnode->minor, media_devnode_nums);
-	devnode->media_dev = NULL;
+	/* A cdev exposed during cdev_device_add() may already have users. */
 	mutex_unlock(&media_devnode_lock);
 
 	put_device(&devnode->dev);
@@ -279,7 +281,7 @@ void media_devnode_unregister(struct media_devnode *devnode)
 	mutex_lock(&media_devnode_lock);
 	/* Delete the cdev on this minor as well */
 	cdev_device_del(&devnode->cdev, &devnode->dev);
-	devnode->media_dev = NULL;
+	/* A cdev exposed during cdev_device_add() may already have users. */
 	clear_bit(devnode->minor, media_devnode_nums);
 	mutex_unlock(&media_devnode_lock);
 

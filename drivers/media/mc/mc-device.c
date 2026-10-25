@@ -746,6 +746,9 @@ int __must_check __media_device_register(struct media_device *mdev,
 	devnode->fops = &media_device_fops;
 	devnode->parent = mdev->dev;
 	devnode->release = media_device_release;
+	devnode->media_dev = mdev;
+	if (mdev->ops && mdev->ops->devnode_init)
+		mdev->ops->devnode_init(devnode);
 
 	/* Set version 0 to indicate user-space that the graph is static */
 	mdev->topology_version = 0;

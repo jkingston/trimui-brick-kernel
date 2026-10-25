@@ -111,9 +111,9 @@ struct media_devnode {
  *
  * Zero is returned on success.
  *
- * Note that if the media_devnode_register call fails, the release() callback of
- * the media_devnode structure is *not* called, so the caller is responsible for
- * freeing any data.
+ * The release() callback is called exactly once, including on registration
+ * failure. It may be delayed until the final file closes if the character
+ * device became visible before registration failed.
  */
 int __must_check media_devnode_register(struct media_device *mdev,
 					struct media_devnode *devnode,
