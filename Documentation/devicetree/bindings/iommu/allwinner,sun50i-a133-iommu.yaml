@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/iommu/allwinner,sun50i-a133-iommu.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Allwinner A133 IOMMU
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description: |
+  One translation root is shared by seven masters. Each master ID must belong
+  to exactly one consumer; consumers share one IOMMU group. Unattached masters
+  retain physical bypass. Master IDs are 0 through 6. This variant uses direct
+  read/write permission bits rather than H6 authority-control indices.
+
+properties:
+  compatible:
+    const: allwinner,sun50i-a133-iommu
+  reg:
+    maxItems: 1
+  interrupts:
+    maxItems: 1
+  clocks:
+    maxItems: 1
+  "#iommu-cells":
+    const: 1
+    description: Hardware master ID (0 through 6).
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - "#iommu-cells"
+
+additionalProperties: false
