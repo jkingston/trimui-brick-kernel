@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* A133 CE v4 AES: isolated DMA storage and coordinated four-flow recovery. */
+/* A133 CE v4 AES/SHA-256: isolated DMA storage and coordinated four-flow recovery. */
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
@@ -17,6 +17,8 @@
 #include <linux/workqueue.h>
 #include <crypto/aes.h>
 #include <crypto/internal/skcipher.h>
+#include <crypto/internal/hash.h>
+#include <crypto/sha2.h>
 #include "recovery.h"
 #include "wire.h"
 
@@ -55,7 +57,7 @@ struct a133_ce {
 	unsigned int armed;
 	int irq, registered;
 	bool irq_owned, irq_disabled, clocks_on, clocks_acquired, rate_held, pm_held;
-	bool stopping, unexpected;
+	bool stopping, unexpected, hash_registered;
 };
 
 struct ce_tfm {
@@ -188,7 +190,7 @@ static const struct ce_recovery_ops recovery_ops = {
 };
 
 /* Caller holds lifecycle. Only publication/retirement is serialized, not DMA. */
-static int ce_launch(struct ce_flow *flow)
+static int ce_launch(struct ce_flow *flow, unsigned int task_class)
 {
 	struct a133_ce *ce = flow->ce;
 	unsigned long flags;
@@ -208,7 +210,7 @@ static int ce_launch(struct ce_flow *flow)
 	writel(ce->armed, ce->base + CE_ICR);
 	dma_wmb();
 	writel(flow->dma >> 2, ce->base + CE_TDQ);
-	writel(1, ce->base + CE_TLR);
+	writel(task_class, ce->base + CE_TLR);
 	spin_unlock_irqrestore(&ce->irq_lock, flags);
 	return 0;
 }
@@ -331,7 +333,7 @@ static void ce_work(struct work_struct *work)
 	ret = ce_encode_aes(s, flow->dma, flow->index, ctx->keylen,
 			    cbc, rctx->decrypt, req->cryptlen);
 	if (!ret)
-		ret = ce_launch(flow);
+		ret = ce_launch(flow, BIT(0));
 unlock:
 	mutex_unlock(&ce->lifecycle);
 	if (ret)
@@ -456,6 +458,193 @@ static struct skcipher_alg algorithms[] = {
 	CE_ALG("cbc", AES_BLOCK_SIZE),
 };
 
+/* Streaming and large digests use a synchronous fallback, as in sun8i-ce.
+ * Hardware digest requests share the same four queues and reset coordinator as
+ * AES. No hash descriptor ever points outside a retained per-flow allocation.
+ */
+struct ce_hash_tfm {
+	struct a133_ce *ce;
+	struct crypto_ahash *fallback;
+};
+struct ce_hash_request {
+	struct work_struct work;
+	struct ahash_request *request;
+	struct ce_flow *flow;
+	u8 digest[SHA256_DIGEST_SIZE];
+	struct ahash_request fallback;
+};
+
+static struct ahash_request *ce_hash_fallback(struct ahash_request *req)
+{
+	struct ce_hash_tfm *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(req));
+	struct ce_hash_request *rctx = ahash_request_ctx(req);
+	struct ahash_request *fb = &rctx->fallback;
+
+	ahash_request_set_tfm(fb, ctx->fallback);
+	ahash_request_set_callback(fb, req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP,
+				   NULL, NULL);
+	ahash_request_set_crypt(fb, req->src, rctx->digest, req->nbytes);
+	return fb;
+}
+
+static int ce_hash_commit(struct ahash_request *req, int ret)
+{
+	struct ce_hash_request *rctx = ahash_request_ctx(req);
+
+	if (!ret)
+		memcpy(req->result, rctx->digest, SHA256_DIGEST_SIZE);
+	memzero_explicit(rctx->digest, sizeof(rctx->digest));
+	return ret;
+}
+
+static int ce_hash_init(struct ahash_request *req)
+{
+	return crypto_ahash_init(ce_hash_fallback(req));
+}
+
+static int ce_hash_update(struct ahash_request *req)
+{
+	return crypto_ahash_update(ce_hash_fallback(req));
+}
+
+static int ce_hash_final(struct ahash_request *req)
+{
+	return ce_hash_commit(req, crypto_ahash_final(ce_hash_fallback(req)));
+}
+
+static int ce_hash_finup(struct ahash_request *req)
+{
+	return ce_hash_commit(req, crypto_ahash_finup(ce_hash_fallback(req)));
+}
+
+static int ce_hash_export(struct ahash_request *req, void *out)
+{
+	return crypto_ahash_export(ce_hash_fallback(req), out);
+}
+
+static int ce_hash_import(struct ahash_request *req, const void *in)
+{
+	return crypto_ahash_import(ce_hash_fallback(req), in);
+}
+
+static void ce_hash_work(struct work_struct *work)
+{
+	struct ce_hash_request *rctx = container_of(work, struct ce_hash_request, work);
+	struct ahash_request *req = rctx->request;
+	struct ce_flow *flow = rctx->flow;
+	struct a133_ce *ce = flow->ce;
+	struct ce_storage *s = flow->storage;
+	bool release = true, prepared = false;
+	int ret;
+
+	mutex_lock(&ce->lifecycle);
+	if (ce->stopping || ce->recovery.dead) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	prepared = true;
+	if (req->nbytes && sg_copy_to_buffer(req->src, sg_nents(req->src),
+					  s->input, req->nbytes) != req->nbytes) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+	ret = ce_encode_sha256(s, flow->dma, flow->index, req->nbytes);
+	if (!ret)
+		ret = ce_launch(flow, BIT(1));
+unlock:
+	mutex_unlock(&ce->lifecycle);
+	if (ret)
+		goto finish;
+	ret = ce_wait(flow, &release);
+	if (!ret) {
+		dma_rmb();
+		memcpy(req->result, s->output, SHA256_DIGEST_SIZE);
+	}
+finish:
+	if (prepared && release)
+		memzero_explicit(s, sizeof(*s));
+	ahash_request_complete(req, ret);
+}
+
+static int ce_hash_digest(struct ahash_request *req)
+{
+	struct ce_hash_tfm *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(req));
+	struct a133_ce *ce = ctx->ce;
+	struct ce_hash_request *rctx = ahash_request_ctx(req);
+	unsigned long flags;
+	unsigned int flow;
+	int ret = -EINPROGRESS;
+
+	if (req->nbytes && sg_nents_for_len(req->src, req->nbytes) < 0)
+		return -EINVAL;
+	/* This fallback cannot submit DMA or asynchronously retain the request. */
+	if (req->nbytes > 65408)
+		return ce_hash_commit(req, crypto_ahash_digest(ce_hash_fallback(req)));
+	spin_lock_irqsave(&ce->irq_lock, flags);
+	if (ce->stopping || READ_ONCE(ce->recovery.dead)) {
+		ret = -ENODEV;
+		goto out;
+	}
+	flow = (unsigned int)atomic_inc_return(&ce->next_flow) % 4;
+	rctx->request = req;
+	rctx->flow = &ce->flows[flow];
+	INIT_WORK(&rctx->work, ce_hash_work);
+	queue_work(rctx->flow->queue, &rctx->work);
+out:
+	spin_unlock_irqrestore(&ce->irq_lock, flags);
+	return ret;
+}
+
+static int ce_hash_tfm_init(struct crypto_ahash *tfm)
+{
+	struct ce_hash_tfm *ctx = crypto_ahash_ctx(tfm);
+
+	ctx->fallback = crypto_alloc_ahash("sha256", 0,
+				CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK);
+	if (IS_ERR(ctx->fallback))
+		return PTR_ERR(ctx->fallback);
+	mutex_lock(&ce_device_lock);
+	ctx->ce = device_ce;
+	if (ctx->ce)
+		kref_get(&ctx->ce->refs);
+	mutex_unlock(&ce_device_lock);
+	if (!ctx->ce) {
+		crypto_free_ahash(ctx->fallback);
+		return -ENODEV;
+	}
+	crypto_ahash_set_reqsize(tfm, sizeof(struct ce_hash_request) +
+				crypto_ahash_reqsize(ctx->fallback));
+	crypto_ahash_set_statesize(tfm, crypto_ahash_statesize(ctx->fallback));
+	return 0;
+}
+
+static void ce_hash_tfm_exit(struct crypto_ahash *tfm)
+{
+	struct ce_hash_tfm *ctx = crypto_ahash_ctx(tfm);
+
+	crypto_free_ahash(ctx->fallback);
+	kref_put(&ctx->ce->refs, ce_release);
+}
+
+static struct ahash_alg hash_algorithm = {
+	.init = ce_hash_init, .update = ce_hash_update,
+	.final = ce_hash_final, .finup = ce_hash_finup, .digest = ce_hash_digest,
+	.export = ce_hash_export, .import = ce_hash_import,
+	.init_tfm = ce_hash_tfm_init, .exit_tfm = ce_hash_tfm_exit,
+	.halg = {
+		.digestsize = SHA256_DIGEST_SIZE,
+		.statesize = sizeof(struct sha256_state),
+		.base = {
+			.cra_name = "sha256", .cra_driver_name = "sha256-a133-ce",
+			.cra_priority = 300,
+			.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK,
+			.cra_blocksize = SHA256_BLOCK_SIZE,
+			.cra_ctxsize = sizeof(struct ce_hash_tfm),
+			.cra_module = THIS_MODULE,
+		},
+	},
+};
+
 static void ce_cleanup(struct a133_ce *ce)
 {
 	int i;
@@ -507,6 +696,10 @@ static void ce_quiesce(struct a133_ce *ce)
 	ce->stopping = true;
 	spin_unlock_irqrestore(&ce->irq_lock, flags);
 	mutex_unlock(&ce->lifecycle);
+	if (ce->hash_registered) {
+		crypto_unregister_ahash(&hash_algorithm);
+		ce->hash_registered = false;
+	}
 	while (ce->registered)
 		crypto_unregister_skcipher(&algorithms[--ce->registered]);
 	for (i = 0; i < 4; i++)
@@ -660,6 +853,10 @@ static int ce_probe(struct platform_device *pdev)
 			goto fail;
 		ce->registered++;
 	}
+	ret = crypto_register_ahash(&hash_algorithm);
+	if (ret)
+		goto fail;
+	ce->hash_registered = true;
 	return 0;
 fail:
 	ce_stop(ce);
@@ -707,5 +904,5 @@ static struct platform_driver ce_driver = {
 	},
 };
 module_platform_driver(ce_driver);
-MODULE_DESCRIPTION("Allwinner A133 Crypto Engine AES driver");
+MODULE_DESCRIPTION("Allwinner A133 Crypto Engine AES and SHA-256 driver");
 MODULE_LICENSE("GPL");

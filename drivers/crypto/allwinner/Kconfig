@@ -115,16 +115,19 @@ config CRYPTO_DEV_SUN8I_SS_HASH
 	  Say y to enable support for hash algorithms.
 
 config CRYPTO_DEV_SUN50I_A133_CE
-	tristate "Allwinner A133 Crypto Engine AES"
+	tristate "Allwinner A133 Crypto Engine AES and SHA-256"
 	depends on CRYPTO_DEV_ALLWINNER && PM
 	select CRYPTO_SKCIPHER
 	select CRYPTO_ECB
 	select CRYPTO_CBC
 	select CRYPTO_AES
+	select CRYPTO_HASH
+	select CRYPTO_SHA256
 	select SGL_ALLOC
 	help
-	  AES ECB/CBC on the A133 CE v4, with four concurrent flows and
-	  isolated DMA buffers. Larger requests use a software fallback.
+	  AES ECB/CBC and SHA-256 digests on the A133 CE v4, with four
+	  concurrent flows and isolated DMA buffers. Larger requests and
+	  streaming hash updates use a software fallback.
 	  Failed reset containment retains DMA resources until cold power-off.
 	  System suspend is not supported while this driver is bound.
 
