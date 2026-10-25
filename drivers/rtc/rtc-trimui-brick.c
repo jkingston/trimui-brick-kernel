@@ -816,6 +816,7 @@ static int brick_rtc_resume(struct device *dev)
 	struct brick_rtc *chip = dev_get_drvdata(dev);
 	unsigned long flags;
 	int ret = 0;
+	bool rescan;
 
 	mutex_lock(&chip->lock);
 	if (chip->wake_armed) {
@@ -832,8 +833,16 @@ static int brick_rtc_resume(struct device *dev)
 		ret = ret ?: -EIO;
 	else
 		chip->pm_suspended = false;
+	rescan = !ret && !chip->time_uncertain && !chip->alarm_untrusted;
 	spin_unlock_irqrestore(&chip->alarm_lock, flags);
 	mutex_unlock(&chip->lock);
+	/* A wake IRQ may have queued timer work before this callback unblocked
+	 * read_time. The RTC core returns on that temporary error; rescan after
+	 * admission reopens so an already-acknowledged alarm is not lost. This
+	 * queues expiry evaluation, not a synthetic alarm event.
+	 */
+	if (rescan)
+		rtc_update_irq(chip->rtc, 0, 0);
 	return ret;
 }
 
