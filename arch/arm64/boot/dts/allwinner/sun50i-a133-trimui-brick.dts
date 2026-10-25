@@ -740,29 +740,3 @@
 	polling-delay = <1000>;
 	sustainable-power = <1100>;
 };
-
-/* Both SRAM selectors are required by VE; leave unclaimed until integration. */
-&sram_c {
-	multimedia_sram: sram-section@0 {
-		compatible = "allwinner,sun50i-a133-sram-c";
-		reg = <0 0x21000>;
-		status = "disabled";
-	};
-};
-
-&syscon {
-	sram@1a00000 {
-		compatible = "mmio-sram";
-		reg = <0x01a00000 0x200000>;
-		#address-cells = <1>;
-		#size-cells = <1>;
-		ranges = <0 0x01a00000 0x200000>;
-		status = "disabled";
-
-		ve_sram: sram-section@0 {
-			compatible = "allwinner,sun50i-a133-ve-sram";
-			reg = <0 0x200000>;
-			status = "disabled";
-		};
-	};
-};
