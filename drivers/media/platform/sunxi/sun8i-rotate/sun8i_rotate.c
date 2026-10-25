@@ -24,6 +24,31 @@
 #include "sun8i-formats.h"
 #include "sun8i-rotate.h"
 
+/* A133 file handles may outlive platform removal, but cannot touch hardware. */
+static void rotate_a133_release(struct kref *ref)
+{
+	struct rotate_dev *dev = container_of(ref, struct rotate_dev, ref);
+
+	if (!IS_ERR_OR_NULL(dev->m2m_dev))
+		v4l2_m2m_release(dev->m2m_dev);
+	put_device(dev->dev);
+	kfree(dev);
+}
+
+static void rotate_a133_put(void *data)
+{
+	struct rotate_dev *dev = data;
+
+	kref_put(&dev->ref, rotate_a133_release);
+}
+
+static void rotate_video_release(struct video_device *vfd)
+{
+	struct rotate_dev *dev = container_of(vfd, struct rotate_dev, vfd);
+
+	rotate_a133_put(dev);
+}
+
 static inline u32 rotate_read(struct rotate_dev *dev, u32 reg)
 {
 	return readl(dev->base + reg);
@@ -572,10 +597,19 @@ static int rotate_start_streaming(struct vb2_queue *vq, unsigned int count)
 
 static void rotate_stop_streaming(struct vb2_queue *vq)
 {
+	struct rotate_ctx *owner = vb2_get_drv_priv(vq);
+
+	/* job_finish wakes streamoff before its scheduler tail has returned. */
+	if (owner->dev->a133)
+		flush_work(&owner->dev->work);
+
 	if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
 		struct rotate_ctx *ctx = vb2_get_drv_priv(vq);
 
-		pm_runtime_put(ctx->dev->dev);
+		if (ctx->dev->removing)
+			pm_runtime_put_noidle(ctx->dev->dev);
+		else
+			pm_runtime_put(ctx->dev->dev);
 	}
 
 	rotate_queue_cleanup(vq, VB2_BUF_STATE_ERROR);
@@ -675,6 +709,8 @@ static const struct v4l2_ctrl_ops rotate_ctrl_ops = {
 
 static int rotate_setup_ctrls(struct rotate_ctx *ctx)
 {
+	int ret;
+
 	v4l2_ctrl_handler_init(&ctx->ctrl_handler, 3);
 
 	v4l2_ctrl_new_std(&ctx->ctrl_handler, &rotate_ctrl_ops,
@@ -695,7 +731,10 @@ static int rotate_setup_ctrls(struct rotate_ctx *ctx)
 		return err;
 	}
 
-	return v4l2_ctrl_handler_setup(&ctx->ctrl_handler);
+	ret = v4l2_ctrl_handler_setup(&ctx->ctrl_handler);
+	if (ret)
+		v4l2_ctrl_handler_free(&ctx->ctrl_handler);
+	return ret;
 }
 
 static int rotate_open(struct file *file)
@@ -706,6 +745,11 @@ static int rotate_open(struct file *file)
 
 	if (mutex_lock_interruptible(&dev->dev_mutex))
 		return -ERESTARTSYS;
+
+	if (dev->removing) {
+		mutex_unlock(&dev->dev_mutex);
+		return -ENODEV;
+	}
 
 	ctx = kzalloc_obj(*ctx);
 	if (!ctx) {
@@ -730,14 +774,14 @@ static int rotate_open(struct file *file)
 					    &rotate_queue_init);
 	if (IS_ERR(ctx->fh.m2m_ctx)) {
 		ret = PTR_ERR(ctx->fh.m2m_ctx);
-		goto err_free;
+		goto err_fh;
 	}
 
 	v4l2_fh_add(&ctx->fh, file);
 
 	ret = rotate_setup_ctrls(ctx);
 	if (ret)
-		goto err_free;
+		goto err_m2m;
 
 	ctx->fh.ctrl_handler = &ctx->ctrl_handler;
 
@@ -745,7 +789,11 @@ static int rotate_open(struct file *file)
 
 	return 0;
 
-err_free:
+err_m2m:
+	v4l2_fh_del(&ctx->fh, file);
+	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
+err_fh:
+	v4l2_fh_exit(&ctx->fh);
 	kfree(ctx);
 	mutex_unlock(&dev->dev_mutex);
 
@@ -759,10 +807,16 @@ static int rotate_release(struct file *file)
 
 	mutex_lock(&dev->dev_mutex);
 
+	if (dev->a133) {
+		v4l2_m2m_suspend(dev->m2m_dev);
+		flush_work(&dev->work);
+	}
 	v4l2_ctrl_handler_free(&ctx->ctrl_handler);
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_fh_exit(&ctx->fh);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
+	if (dev->a133 && !dev->removing)
+		v4l2_m2m_resume(dev->m2m_dev);
 
 	kfree(ctx);
 
@@ -799,17 +853,26 @@ static int rotate_probe(struct platform_device *pdev)
 	struct rotate_dev *dev;
 	struct video_device *vfd;
 	int irq, ret;
+	bool a133 = of_device_is_compatible(pdev->dev.of_node,
+					   "allwinner,sun50i-a133-g2d");
 
-	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = a133 ? kzalloc(sizeof(*dev), GFP_KERNEL) :
+		devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
 	if (!dev)
 		return -ENOMEM;
 
 	dev->vfd = rotate_video_device;
 	dev->dev = &pdev->dev;
-	dev->a133 = of_device_is_compatible(pdev->dev.of_node,
-					  "allwinner,sun50i-a133-g2d");
+	dev->a133 = a133;
 	if (dev->a133) {
 		struct iommu_domain *domain = iommu_get_domain_for_dev(dev->dev);
+
+		kref_init(&dev->ref);
+		get_device(dev->dev);
+		ret = devm_add_action_or_reset(dev->dev, rotate_a133_put, dev);
+		if (ret)
+			return ret;
+		dev->vfd.release = rotate_video_release;
 
 		if (!domain || !(domain->type & __IOMMU_DOMAIN_PAGING))
 			return dev_err_probe(dev->dev, -EINVAL,
@@ -894,12 +957,17 @@ static int rotate_probe(struct platform_device *pdev)
 	}
 	platform_set_drvdata(pdev, dev);
 	pm_runtime_enable(dev->dev);
+	if (dev->a133)
+		kref_get(&dev->ref);
 	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
 	if (!ret)
 		return 0;
 
 	pm_runtime_disable(dev->dev);
-	v4l2_m2m_release(dev->m2m_dev);
+	if (dev->a133)
+		rotate_a133_put(dev);
+	else
+		v4l2_m2m_release(dev->m2m_dev);
 err_v4l2:
 	v4l2_device_unregister(&dev->v4l2_dev);
 
@@ -910,12 +978,24 @@ static void rotate_remove(struct platform_device *pdev)
 {
 	struct rotate_dev *dev = platform_get_drvdata(pdev);
 
-	if (dev->a133)
+	if (dev->a133) {
+		mutex_lock(&dev->dev_mutex);
+		dev->removing = true;
+		video_unregister_device(&dev->vfd);
+		v4l2_m2m_suspend(dev->m2m_dev);
 		flush_work(&dev->work);
+		if (pm_runtime_force_suspend(&pdev->dev))
+			panic("A133 G2D: cannot quiesce removal");
+		pm_runtime_disable(&pdev->dev);
+		v4l2_device_unregister(&dev->v4l2_dev);
+		mutex_unlock(&dev->dev_mutex);
+		/* The last video file releases m2m and memory after its contexts. */
+		return;
+	}
+
 	v4l2_m2m_release(dev->m2m_dev);
 	video_unregister_device(&dev->vfd);
 	v4l2_device_unregister(&dev->v4l2_dev);
-
 	pm_runtime_force_suspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 }
@@ -1029,7 +1109,8 @@ static void rotate_shutdown(struct platform_device *pdev)
 	if (dev->a133) {
 		v4l2_m2m_suspend(dev->m2m_dev);
 		flush_work(&dev->work);
-		pm_runtime_force_suspend(&pdev->dev);
+		if (pm_runtime_force_suspend(&pdev->dev))
+			panic("A133 G2D: cannot quiesce shutdown");
 	}
 }
 
@@ -1047,7 +1128,6 @@ static struct platform_driver rotate_driver = {
 		.name		= ROTATE_NAME,
 		.of_match_table	= rotate_dt_match,
 		.pm		= &rotate_pm_ops,
-		.suppress_bind_attrs = true,
 	},
 };
 module_platform_driver(rotate_driver);

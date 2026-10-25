@@ -16,6 +16,7 @@
 
 #include <linux/platform_device.h>
 #include <linux/completion.h>
+#include <linux/kref.h>
 #include <linux/workqueue.h>
 
 #define ROTATE_NAME		"sun8i-rotate"
@@ -129,6 +130,8 @@ struct rotate_dev {
 	void __iomem		*base;
 	void __iomem		*top;
 	bool a133;
+	bool removing;
+	struct kref ref;
 	int irq;
 	struct clk *mbus_clk;
 	struct completion complete;
