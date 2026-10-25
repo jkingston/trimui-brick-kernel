@@ -9,6 +9,8 @@
 
 #include <linux/delay.h>
 #include <linux/types.h>
+#include <linux/ktime.h>
+#include <linux/reset.h>
 
 #include <media/videobuf2-dma-contig.h>
 
@@ -61,6 +63,9 @@ static enum cedrus_irq_status cedrus_h265_irq_status(struct cedrus_ctx *ctx)
 
 	reg = cedrus_read(dev, VE_DEC_H265_STATUS);
 	reg &= VE_DEC_H265_STATUS_CHECK_MASK;
+
+	if (!reg)
+		return CEDRUS_IRQ_NONE;
 
 	if (reg & VE_DEC_H265_STATUS_CHECK_ERROR ||
 	    !(reg & VE_DEC_H265_STATUS_SUCCESS))
@@ -237,34 +242,67 @@ static void cedrus_h265_pred_weight_write(struct cedrus_dev *dev,
 	}
 }
 
-static void cedrus_h265_skip_bits(struct cedrus_dev *dev, int num)
+/* One deadline covers all header commands before the job watchdog starts. */
+static int cedrus_h265_bits(struct cedrus_dev *dev, u32 command,
+			    unsigned int num, ktime_t deadline)
 {
-	int count = 0;
+	s64 remaining = ktime_us_delta(deadline, ktime_get());
+	u32 status;
 
-	while (count < num) {
-		int tmp = min(num - count, 32);
-
-		cedrus_write(dev, VE_DEC_H265_TRIGGER,
-			     VE_DEC_H265_TRIGGER_FLUSH_BITS |
-			     VE_DEC_H265_TRIGGER_TYPE_N_BITS(tmp));
-
-		if (cedrus_wait_for(dev, VE_DEC_H265_STATUS, VE_DEC_H265_STATUS_VLD_BUSY))
-			dev_err_ratelimited(dev->dev, "timed out waiting to skip bits\n");
-
-		count += tmp;
-	}
+	if (remaining <= 0)
+		return -ETIMEDOUT;
+	cedrus_write(dev, VE_DEC_H265_TRIGGER,
+		     command | VE_DEC_H265_TRIGGER_TYPE_N_BITS(num));
+	return readl_poll_timeout_atomic(dev->base + VE_DEC_H265_STATUS, status,
+					 !(status & VE_DEC_H265_STATUS_VLD_BUSY),
+					 1, remaining);
 }
 
-static u32 cedrus_h265_show_bits(struct cedrus_dev *dev, int num)
+static int cedrus_h265_skip_bits(struct cedrus_dev *dev, unsigned int num,
+				 ktime_t deadline)
 {
-	cedrus_write(dev, VE_DEC_H265_TRIGGER,
-		     VE_DEC_H265_TRIGGER_SHOW_BITS |
-		     VE_DEC_H265_TRIGGER_TYPE_N_BITS(num));
+	while (num) {
+		unsigned int bits = min(num, 32U);
+		int ret;
 
-	cedrus_wait_for(dev, VE_DEC_H265_STATUS,
-			VE_DEC_H265_STATUS_VLD_BUSY);
+		ret = cedrus_h265_bits(dev, VE_DEC_H265_TRIGGER_FLUSH_BITS,
+				       bits, deadline);
+		if (ret)
+			return ret;
+		num -= bits;
+	}
+	return 0;
+}
 
-	return cedrus_read(dev, VE_DEC_H265_BITS_READ);
+static int cedrus_h265_skip_header(struct cedrus_dev *dev, unsigned int offset)
+{
+	ktime_t deadline = ktime_add_us(ktime_get(), 1000);
+	u8 padding;
+	int ret, reset_ret;
+
+	cedrus_write(dev, VE_DEC_H265_TRIGGER, VE_DEC_H265_TRIGGER_INIT_SWDEC);
+	ret = cedrus_h265_skip_bits(dev, (offset - 1) * 8, deadline);
+	if (ret)
+		goto reset;
+	ret = cedrus_h265_bits(dev, VE_DEC_H265_TRIGGER_SHOW_BITS, 8, deadline);
+	if (ret)
+		goto reset;
+	padding = cedrus_read(dev, VE_DEC_H265_BITS_READ);
+	if (!padding) {
+		ret = -EINVAL;
+		goto reset;
+	}
+	/* Skip through the header, leaving its byte-alignment padding unread. */
+	ret = cedrus_h265_skip_bits(dev, 8 - ffs(padding), deadline);
+	if (!ret)
+		return 0;
+reset:
+	/* Software bitstream access may already own the submitted DMA buffer. */
+	reset_ret = reset_control_reset(dev->rstc);
+	if (reset_ret)
+		panic("%s: VE reset failed (%d); DMA buffers remain owned",
+		      dev_name(dev->dev), reset_ret);
+	return ret;
 }
 
 static void cedrus_h265_write_scaling_list(struct cedrus_ctx *ctx,
@@ -355,10 +393,52 @@ static int cedrus_h265_is_low_delay(struct cedrus_run *run)
 	return 0;
 }
 
+static int cedrus_h265_validate_tiles(struct cedrus_run *run,
+				      unsigned int width, unsigned int height)
+{
+	const struct v4l2_ctrl_hevc_pps *pps = run->h265.pps;
+	const struct v4l2_ctrl_hevc_slice_params *slice = run->h265.slice_params;
+	unsigned int x = 0, y = 0, tx = 0, ty = 0, i;
+	unsigned int columns = pps->num_tile_columns_minus1 + 1;
+	unsigned int rows = pps->num_tile_rows_minus1 + 1;
+	unsigned int start_x, start_y;
+
+	if (!width || !height || slice->slice_segment_addr >= width * height)
+		return -EINVAL;
+	if (!(pps->flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED)) {
+		if (slice->num_entry_point_offsets &&
+		    !(pps->flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED))
+			return -EINVAL;
+		return 0;
+	}
+	if (columns > ARRAY_SIZE(pps->column_width_minus1) ||
+	    rows > ARRAY_SIZE(pps->row_height_minus1))
+		return -EINVAL;
+	start_x = slice->slice_segment_addr % width;
+	start_y = slice->slice_segment_addr / width;
+	for (i = 0; i < columns; i++) {
+		x += pps->column_width_minus1[i] + 1;
+		if (x <= start_x)
+			tx++;
+	}
+	for (i = 0; i < rows; i++) {
+		y += pps->row_height_minus1[i] + 1;
+		if (y <= start_y)
+			ty++;
+	}
+	if (x != width || y != height)
+		return -EINVAL;
+	if (!(pps->flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED) &&
+	    slice->num_entry_point_offsets > columns * rows - (ty * columns + tx) - 1)
+		return -ERANGE;
+	return 0;
+}
+
 static void cedrus_h265_write_tiles(struct cedrus_ctx *ctx,
 				    struct cedrus_run *run,
 				    unsigned int ctb_addr_x,
-				    unsigned int ctb_addr_y)
+				    unsigned int ctb_addr_y,
+				    unsigned int width, unsigned int height)
 {
 	const struct v4l2_ctrl_hevc_slice_params *slice_params;
 	const struct v4l2_ctrl_hevc_pps *pps;
@@ -371,6 +451,16 @@ static void cedrus_h265_write_tiles(struct cedrus_ctx *ctx,
 	slice_params = run->h265.slice_params;
 	entry_points = run->h265.entry_points;
 	entry_points_buf = ctx->codec.h265.entry_points_buf;
+
+	/* Without tiles, PPS tile dimensions are zeroed by control validation. */
+	if (!(pps->flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED)) {
+		cedrus_write(dev, VE_DEC_H265_TILE_START_CTB, 0);
+		cedrus_write(dev, VE_DEC_H265_TILE_END_CTB,
+			     ((height - 1) << 16) | (width - 1));
+		for (i = 0; i < slice_params->num_entry_point_offsets; i++)
+			entry_points_buf[i] = entry_points[i];
+		return;
+	}
 
 	for (x = 0, tx = 0; tx < pps->num_tile_columns_minus1 + 1; tx++) {
 		if (x + pps->column_width_minus1[tx] + 1 > ctb_addr_x)
@@ -414,6 +504,28 @@ static void cedrus_h265_write_tiles(struct cedrus_ctx *ctx,
 	}
 }
 
+static int cedrus_h265_validate_slice(struct cedrus_run *run, size_t bytes)
+{
+	const struct v4l2_ctrl_hevc_slice_params *slice = run->h265.slice_params;
+	const struct v4l2_ctrl_hevc_pps *pps = run->h265.pps;
+	u32 count = slice->num_entry_point_offsets;
+	unsigned int i;
+
+	if (!slice->data_byte_offset)
+		return -EOPNOTSUPP;
+	if (bytes > GENMASK(29, 0) / 8 || slice->data_byte_offset > bytes)
+		return -EINVAL;
+	if (count != run->h265.entry_points_count)
+		return -ERANGE;
+	if (count > CEDRUS_H265_ENTRY_POINTS_BUF_SIZE /
+	    ((pps->flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED) ? 4 : 16))
+		return -ERANGE;
+	for (i = 0; i < count; i++)
+		if (run->h265.entry_points[i] > bytes)
+			return -EINVAL;
+	return 0;
+}
+
 static int cedrus_h265_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 {
 	struct cedrus_dev *dev = ctx->dev;
@@ -422,7 +534,7 @@ static int cedrus_h265_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 	const struct v4l2_ctrl_hevc_slice_params *slice_params;
 	const struct v4l2_ctrl_hevc_decode_params *decode_params;
 	const struct v4l2_hevc_pred_weight_table *pred_weight_table;
-	unsigned int width_in_ctb_luma, ctb_size_luma;
+	unsigned int width_in_ctb_luma, height_in_ctb_luma, ctb_size_luma;
 	unsigned int log2_max_luma_coding_block_size;
 	unsigned int ctb_addr_x, ctb_addr_y;
 	struct cedrus_buffer *cedrus_buf;
@@ -432,9 +544,8 @@ static int cedrus_h265_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 	u32 output_pic_list_index;
 	u32 pic_order_cnt[2];
 	size_t slice_bytes;
-	u8 padding;
-	int count;
 	u32 reg;
+	int ret;
 
 	sps = run->h265.sps;
 	pps = run->h265.pps;
@@ -445,13 +556,9 @@ static int cedrus_h265_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 	cedrus_buf = vb2_to_cedrus_buffer(&run->dst->vb2_buf);
 	slice_bytes = vb2_get_plane_payload(&run->src->vb2_buf, 0);
 
-	/*
-	 * If entry points offsets are present, we should get them
-	 * exactly the right amount.
-	 */
-	if (num_entry_point_offsets &&
-	    num_entry_point_offsets != run->h265.entry_points_count)
-		return -ERANGE;
+	ret = cedrus_h265_validate_slice(run, slice_bytes);
+	if (ret)
+		return ret;
 
 	log2_max_luma_coding_block_size =
 		sps->log2_min_luma_coding_block_size_minus3 + 3 +
@@ -459,6 +566,12 @@ static int cedrus_h265_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 	ctb_size_luma = 1UL << log2_max_luma_coding_block_size;
 	width_in_ctb_luma =
 		DIV_ROUND_UP(sps->pic_width_in_luma_samples, ctb_size_luma);
+
+	height_in_ctb_luma =
+		DIV_ROUND_UP(sps->pic_height_in_luma_samples, ctb_size_luma);
+	ret = cedrus_h265_validate_tiles(run, width_in_ctb_luma, height_in_ctb_luma);
+	if (ret)
+		return ret;
 
 	/* MV column buffer size and allocation. */
 	if (!cedrus_buf->codec.h265.mv_col_buf_size) {
@@ -517,7 +630,8 @@ static int cedrus_h265_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 
 	if ((pps->flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED) ||
 	    (pps->flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED)) {
-		cedrus_h265_write_tiles(ctx, run, ctb_addr_x, ctb_addr_y);
+		cedrus_h265_write_tiles(ctx, run, ctb_addr_x, ctb_addr_y,
+					width_in_ctb_luma, height_in_ctb_luma);
 	} else {
 		cedrus_write(dev, VE_DEC_H265_TILE_START_CTB, 0);
 		cedrus_write(dev, VE_DEC_H265_TILE_END_CTB, 0);
@@ -527,34 +641,10 @@ static int cedrus_h265_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 	if (ctx->fh.m2m_ctx->new_frame)
 		cedrus_write(dev, VE_DEC_H265_DEC_CTB_NUM, 0);
 
-	/* Initialize bitstream access. */
-	cedrus_write(dev, VE_DEC_H265_TRIGGER, VE_DEC_H265_TRIGGER_INIT_SWDEC);
-
-	/*
-	 * Cedrus expects that bitstream pointer is actually at the end of the slice header
-	 * instead of start of slice data. Padding is 8 bits at most (one bit set to 1 and
-	 * at most seven bits set to 0), so we have to inspect only one byte before slice data.
-	 */
-
-	if (slice_params->data_byte_offset == 0)
-		return -EOPNOTSUPP;
-
-	cedrus_h265_skip_bits(dev, (slice_params->data_byte_offset - 1) * 8);
-
-	padding = cedrus_h265_show_bits(dev, 8);
-
-	/* at least one bit must be set in that byte */
-	if (padding == 0)
-		return -EINVAL;
-
-	for (count = 0; count < 8; count++)
-		if (padding & (1 << count))
-			break;
-
-	/* Include the one bit. */
-	count++;
-
-	cedrus_h265_skip_bits(dev, 8 - count);
+	/* Parse only the header; preserve padding for the slice decoder. */
+	ret = cedrus_h265_skip_header(dev, slice_params->data_byte_offset);
+	if (ret)
+		return ret;
 
 	/* Bitstream parameters. */
 
