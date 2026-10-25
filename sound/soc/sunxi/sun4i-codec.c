@@ -367,6 +367,9 @@ struct sun4i_codec {
 	struct clk *a133_pll_audio;
 	struct clk *a133_pll_com_audio;
 	struct mutex a133_clock_lock;
+	struct mutex a133_volume_lock;
+	unsigned int a133_dac_volume;
+	bool a133_dac_muted;
 	struct a133_stream_clocks a133_stream[2];
 	struct reset_control *rst;
 	struct gpio_desc *gpio_pa;
@@ -1009,6 +1012,35 @@ static void sun4i_codec_shutdown(struct snd_pcm_substream *substream,
 		clk_disable_unprepare(scodec->clk_module);
 	}
 }
+
+/* Keep the requested stereo gains separate from the stream's mute state. */
+static int a133_codec_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
+{
+	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(dai->component);
+	int ret;
+
+	if (direction != SNDRV_PCM_STREAM_PLAYBACK)
+		return 0;
+
+	mutex_lock(&scodec->a133_volume_lock);
+	/* Stock clears selection and gains on mute, restoring selection on unmute. */
+	ret = regmap_update_bits(scodec->regmap, SUN50I_A133_DAC_VOL,
+				GENMASK(16, 0), mute ? 0 : BIT(16) | scodec->a133_dac_volume);
+	if (!ret)
+		scodec->a133_dac_muted = !!mute;
+	mutex_unlock(&scodec->a133_volume_lock);
+	return ret;
+}
+
+static const struct snd_soc_dai_ops a133_codec_dai_ops = {
+	.startup = sun4i_codec_startup,
+	.shutdown = sun4i_codec_shutdown,
+	.trigger = sun4i_codec_trigger,
+	.hw_params = sun4i_codec_hw_params,
+	.prepare = sun4i_codec_prepare,
+	.mute_stream = a133_codec_mute_stream,
+	.no_capture_mute = 1,
+};
 
 static const struct snd_soc_dai_ops sun4i_codec_dai_ops = {
 	.startup	= sun4i_codec_startup,
@@ -2611,6 +2643,7 @@ static int a133_dac_dsp_init(struct snd_soc_component *c)
 /* Low initial digital level; userspace deliberately raises volume for test. */
 static int a133_component_probe(struct snd_soc_component *c)
 {
+	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(c);
 	static const struct { unsigned int reg, mask, value; } init[] = {
 		/* Match DAPM's initial off state, including inherited analog state. */
 		/* Leave capture and both microphone paths off until DAPM/trigger. */
@@ -2626,8 +2659,8 @@ static int a133_component_probe(struct snd_soc_component *c)
 		{ SUN50I_A133_HEADPHONE, BIT(11), 0 },
 		{ SUN50I_A133_DAC_DPC, BIT(31) | GENMASK(17, 12), 48 << 12 },
 		{ SUN50I_A133_DAC_ANALOG, GENMASK(15, 12), 0 },
-		/* Vendor channel gains; common DAC attenuation remains low. */
-		{ SUN50I_A133_DAC_VOL, GENMASK(16, 0), 0x1a0a0 },
+		/* Start muted; ASoC restores the requested gains after DAPM startup. */
+		{ SUN50I_A133_DAC_VOL, GENMASK(16, 0), 0 },
 		{ SUN50I_A133_DAC_ANALOG, GENMASK(30, 28), 0 },
 		{ SUN50I_A133_DAC_ANALOG, GENMASK(4, 0) | BIT(13) | BIT(12), 0 },
 		{ SUN50I_A133_DAC_DEBUG, BIT(6), 0 }, /* Preserve PCM channel order. */
@@ -2645,6 +2678,10 @@ static int a133_component_probe(struct snd_soc_component *c)
 		if (ret < 0)
 			return ret;
 	}
+	/* A component reprobe must reflect the freshly muted register state. */
+	mutex_lock(&scodec->a133_volume_lock);
+	scodec->a133_dac_muted = true;
+	mutex_unlock(&scodec->a133_volume_lock);
 	ret = a133_adc_dsp_init(c);
 	if (ret)
 		return ret;
@@ -2660,14 +2697,57 @@ static int a133_adc_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+static int a133_dac_volume_get(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
+	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(c);
+
+	mutex_lock(&scodec->a133_volume_lock);
+	ucontrol->value.integer.value[0] = scodec->a133_dac_volume >> 8;
+	ucontrol->value.integer.value[1] = scodec->a133_dac_volume & 0xff;
+	mutex_unlock(&scodec->a133_volume_lock);
+	return 0;
+}
+
+static int a133_dac_volume_put(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
+	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(c);
+	long left = ucontrol->value.integer.value[0];
+	long right = ucontrol->value.integer.value[1];
+	unsigned int volume;
+	int ret = 0;
+
+	if (left < 0 || left > 255 || right < 0 || right > 255)
+		return -EINVAL;
+	volume = (left << 8) | right;
+	mutex_lock(&scodec->a133_volume_lock);
+	if (volume == scodec->a133_dac_volume)
+		goto out;
+	/* Mixer changes while muted apply on the next actual unmute. */
+	if (!scodec->a133_dac_muted) {
+		ret = regmap_update_bits(scodec->regmap, SUN50I_A133_DAC_VOL,
+					GENMASK(15, 0), volume);
+		if (ret)
+			goto out;
+	}
+	scodec->a133_dac_volume = volume;
+	ret = 1;
+out:
+	mutex_unlock(&scodec->a133_volume_lock);
+	return ret;
+}
+
 static const DECLARE_TLV_DB_SCALE(a133_digital_tlv, -7308, 116, 0);
 static const struct snd_kcontrol_new a133_controls[] = {
 	SOC_DOUBLE("ADC Capture Volume", SUN50I_A133_ADC_VOL, 8, 0, 255, 0),
 	SOC_SINGLE("MIC1 Capture Gain", SUN50I_A133_ADCL, 8, 31, 0),
 	SOC_SINGLE("MIC2 Capture Gain", SUN50I_A133_ADCR, 8, 31, 0),
 	/* Independent channel gains; preserve DAC_VOL_SEL at bit 16. */
-	SOC_DOUBLE("DAC Digital Playback Volume", SUN50I_A133_DAC_VOL,
-		   8, 0, 255, 0),
+	SOC_DOUBLE_EXT("DAC Digital Playback Volume", SUN50I_A133_DAC_VOL,
+		       8, 0, 255, 0, a133_dac_volume_get, a133_dac_volume_put),
 	SOC_SINGLE_TLV("DAC Playback Volume", SUN50I_A133_DAC_DPC, 12, 63, 1, a133_digital_tlv),
 	/* Analog TLV deliberately omitted until vendor gain curves audited. */
 	SOC_SINGLE("Headphone Playback Volume", SUN50I_A133_DAC_ANALOG, 28, 7, 0),
@@ -2848,7 +2928,7 @@ static struct snd_soc_card *sun50i_a133_codec_create_card(struct device *dev)
 
 static struct snd_soc_dai_driver sun50i_a133_codec_dai = {
 	.name = "Codec",
-	.ops = &sun4i_codec_dai_ops,
+	.ops = &a133_codec_dai_ops,
 	.playback = {
 		.stream_name = "Codec Playback",
 		.channels_min = 2,
@@ -2929,6 +3009,9 @@ static int sun50i_a133_codec_resources(struct sun4i_codec *scodec)
 		return PTR_ERR(scodec->a133_pll_com_audio);
 
 	mutex_init(&scodec->a133_clock_lock);
+	mutex_init(&scodec->a133_volume_lock);
+	scodec->a133_dac_volume = 0xa0a0;
+	scodec->a133_dac_muted = true;
 	scodec->a133_stream[SNDRV_PCM_STREAM_PLAYBACK].module = scodec->clk_module;
 	scodec->a133_stream[SNDRV_PCM_STREAM_CAPTURE].module = devm_clk_get(dev, "adc");
 	if (IS_ERR(scodec->a133_stream[SNDRV_PCM_STREAM_CAPTURE].module))
