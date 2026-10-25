@@ -18,6 +18,25 @@
 #include "host.h"
 
 /**
+ * sdio_check_card_state - check MMC's card lifecycle before I/O
+ * @func: SDIO function whose card is checked
+ *
+ * The caller must hold the host claim. Return -ENODEV for a removed card,
+ * -EHOSTDOWN if MMC has not completed card resume, or zero otherwise.
+ * This only checks software lifecycle state; zero does not establish that
+ * the card is physically usable. No card state is modified or I/O issued.
+ */
+int sdio_check_card_state(struct sdio_func *func)
+{
+	if (mmc_card_removed(func->card))
+		return -ENODEV;
+	if (mmc_card_suspended(func->card))
+		return -EHOSTDOWN;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sdio_check_card_state);
+
+/**
  *	sdio_claim_host - exclusively claim a bus for a certain SDIO function
  *	@func: SDIO function that will be accessed
  *
