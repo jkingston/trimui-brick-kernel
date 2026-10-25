@@ -433,6 +433,16 @@
 	status = "okay";
 };
 
+/* The shared PHY retains ownership of auxiliary PHY1/EHCI1 resources. */
+&ohci0 {
+	compatible = "trimui,brick-ohci", "generic-ohci";
+	clocks = <&ccu CLK_BUS_OHCI0>, <&ccu CLK_USB_OHCI0>,
+		 <&ccu CLK_BUS_OHCI1>, <&ccu CLK_USB_OHCI1>;
+	clock-names = "bus", "mod", "aux-bus", "aux-mod";
+	resets = <&ccu RST_BUS_OHCI0>, <&ccu RST_BUS_OHCI1>;
+	status = "disabled";
+};
+
 &usbphy {
 	compatible = "trimui,brick-usb-phy", "allwinner,sun20i-d1-usb-phy";
 	clocks = <&ccu CLK_USB_PHY0>, <&ccu CLK_USB_PHY1>, <&ccu CLK_BUS_EHCI1>;

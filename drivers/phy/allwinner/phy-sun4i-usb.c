@@ -127,6 +127,7 @@ struct sun4i_usb_phy_data {
 		struct clk *clk;
 		struct clk *clk2;
 		bool regulator_on;
+		int vbus_error;
 		int index;
 	} phys[MAX_PHYS];
 	/* phy0 / otg related variables */
@@ -417,9 +418,11 @@ static int sun4i_usb_phy_init(struct phy *_phy)
 		/* Board diagnostic quirk, recovered from the stock USB init. */
 		if (data->cfg->phy0_ctl_clear) {
 			/* Match stock ordering before clearing the control bit. */
-			sun4i_usb_phy0_set_id_detect(_phy, 1);
+			sun4i_usb_phy0_set_id_detect(_phy,
+				data->dr_mode != USB_DR_MODE_HOST);
 			sun4i_usb_phy0_set_vbus_detect(_phy, 1);
-			sun4i_usb_phy0_reroute(data, 1);
+			sun4i_usb_phy0_reroute(data,
+				data->dr_mode != USB_DR_MODE_HOST);
 			val = readl(data->base + data->cfg->phyctl_offset);
 			writel(val & ~data->cfg->phy0_ctl_clear,
 			       data->base + data->cfg->phyctl_offset);
@@ -549,6 +552,16 @@ static int sun4i_usb_phy_power_on(struct phy *_phy)
 	struct sun4i_usb_phy_data *data = to_sun4i_usb_phy_data(phy);
 	int ret;
 
+	if (phy->vbus_error)
+		return phy->vbus_error;
+
+	if (data->cfg->needs_phy1_clock && phy->index == 0 &&
+	    data->dr_mode == USB_DR_MODE_HOST) {
+		ret = gpiod_get_value_cansleep(data->id_det_gpio);
+		if (ret)
+			return ret < 0 ? ret : 0;
+	}
+
 	if (!phy->vbus || phy->regulator_on)
 		return 0;
 
@@ -560,8 +573,11 @@ static int sun4i_usb_phy_power_on(struct phy *_phy)
 	}
 
 	ret = regulator_enable(phy->vbus);
-	if (ret)
+	if (ret) {
+		if (data->cfg->needs_phy1_clock)
+			phy->vbus_error = ret;
 		return ret;
+	}
 
 	phy->regulator_on = true;
 
@@ -576,11 +592,22 @@ static int sun4i_usb_phy_power_off(struct phy *_phy)
 {
 	struct sun4i_usb_phy *phy = phy_get_drvdata(_phy);
 	struct sun4i_usb_phy_data *data = to_sun4i_usb_phy_data(phy);
+	int ret;
+
+	if (phy->vbus_error)
+		return phy->vbus_error;
 
 	if (!phy->vbus || !phy->regulator_on)
 		return 0;
 
-	regulator_disable(phy->vbus);
+	ret = regulator_disable(phy->vbus);
+	if (ret && data->cfg->needs_phy1_clock) {
+		/* A parent failure may already have consumed our child vote.
+		 * Do not retry or enable again with unknown regulator ownership.
+		 */
+		phy->vbus_error = ret;
+		return ret;
+	}
 	phy->regulator_on = false;
 
 	/*
@@ -591,6 +618,22 @@ static int sun4i_usb_phy_power_off(struct phy *_phy)
 		mod_delayed_work(system_percpu_wq, &data->detect, POLL_TIME);
 
 	return 0;
+}
+
+/* The fixed host keeps its HCDs bound; the ID input only gates source power. */
+static int sun4i_usb_phy_host_vbus(struct phy *phy0)
+{
+	struct sun4i_usb_phy *phy = phy_get_drvdata(phy0);
+	struct sun4i_usb_phy_data *data = to_sun4i_usb_phy_data(phy);
+	int id, ret;
+
+	id = gpiod_get_value_cansleep(data->id_det_gpio);
+	if (id || !phy0->power_count) {
+		ret = sun4i_usb_phy_power_off(phy0);
+		return ret ? ret : (id < 0 ? id : 0);
+	}
+
+	return sun4i_usb_phy_power_on(phy0);
 }
 
 static int sun4i_usb_phy_set_mode(struct phy *_phy,
@@ -620,10 +663,13 @@ static int sun4i_usb_phy_set_mode(struct phy *_phy,
 		return -EINVAL;
 	}
 
-	/* Brick host routing and VBUS ownership are not implemented yet. */
-	if (data->cfg->needs_phy1_clock &&
-	    new_mode != USB_DR_MODE_PERIPHERAL)
-		return -EOPNOTSUPP;
+	/* The Brick profiles have one fixed controller owner per boot. */
+	if (data->cfg->needs_phy1_clock) {
+		if (new_mode != data->dr_mode)
+			return -EOPNOTSUPP;
+		if (new_mode == USB_DR_MODE_HOST)
+			return 0;
+	}
 
 	if (new_mode != data->dr_mode) {
 		dev_info(&_phy->dev, "Changing dr_mode to %d\n", new_mode);
@@ -689,6 +735,17 @@ static void sun4i_usb_phy0_id_vbus_det_scan(struct work_struct *work)
 
 	if (!data->phy0_init) {
 		mutex_unlock(&phy0->mutex);
+		return;
+	}
+
+	if (data->cfg->needs_phy1_clock && data->dr_mode == USB_DR_MODE_HOST) {
+		int ret = sun4i_usb_phy_host_vbus(phy0);
+
+		mutex_unlock(&phy0->mutex);
+		if (ret)
+			dev_err_ratelimited(&phy0->dev, "Host VBUS update failed: %d\n", ret);
+		if (sun4i_usb_phy0_poll(data))
+			queue_delayed_work(system_percpu_wq, &data->detect, POLL_TIME);
 		return;
 	}
 
@@ -789,6 +846,25 @@ static struct phy *sun4i_usb_phy_xlate(struct device *dev,
 	return data->phys[args->args[0]].phy;
 }
 
+static void sun4i_usb_phy_shutdown(struct platform_device *pdev)
+{
+	struct sun4i_usb_phy_data *data = dev_get_drvdata(&pdev->dev);
+	struct phy *phy0 = data->phys[0].phy;
+	int ret;
+
+	if (!data->cfg->needs_phy1_clock || data->dr_mode != USB_DR_MODE_HOST)
+		return;
+
+	/* HCD shutdown quiesces transfers but does not drop its PHY power vote. */
+	mutex_lock(&phy0->mutex);
+	data->phy0_init = false;
+	ret = sun4i_usb_phy_power_off(phy0);
+	mutex_unlock(&phy0->mutex);
+	cancel_delayed_work_sync(&data->detect);
+	if (ret)
+		dev_err(&pdev->dev, "Cannot disable host VBUS at shutdown: %d\n", ret);
+}
+
 static void sun4i_usb_phy_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -861,10 +937,11 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 
 	data->dr_mode = of_usb_get_dr_mode_by_phy(np, 0);
 	if (data->cfg->needs_phy1_clock &&
-	    (data->dr_mode != USB_DR_MODE_PERIPHERAL ||
+	    ((data->dr_mode != USB_DR_MODE_PERIPHERAL &&
+	      data->dr_mode != USB_DR_MODE_HOST) ||
 	     data->vbus_det_gpio || data->vbus_power_supply))
 		return dev_err_probe(dev, -EINVAL,
-				     "Brick PHY requires fixed peripheral mode without VBUS detection\n");
+				     "Brick PHY requires a fixed role without VBUS detection\n");
 	data->extcon = devm_extcon_dev_allocate(dev, sun4i_usb_phy0_cable);
 	if (IS_ERR(data->extcon)) {
 		dev_err(dev, "Couldn't allocate our extcon device\n");
@@ -952,6 +1029,10 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 		phy_set_drvdata(phy->phy, &data->phys[i]);
 	}
 	data->num_phys = i;
+	if (data->cfg->needs_phy1_clock && data->dr_mode == USB_DR_MODE_HOST &&
+	    (!data->phys[0].vbus || !data->id_det_gpio))
+		return dev_err_probe(dev, -EINVAL,
+				     "Brick host requires VBUS supply and ID input\n");
 	if (data->cfg->needs_phy1_clock) {
 		if (data->num_phys < 2 || !data->phys[1].clk2)
 			return dev_err_probe(dev, -EINVAL,
@@ -1162,6 +1243,7 @@ MODULE_DEVICE_TABLE(of, sun4i_usb_phy_of_match);
 static struct platform_driver sun4i_usb_phy_driver = {
 	.probe = sun4i_usb_phy_probe,
 	.remove = sun4i_usb_phy_remove,
+	.shutdown = sun4i_usb_phy_shutdown,
 	.driver = {
 		.of_match_table= sun4i_usb_phy_of_match,
 		.name = "sun4i-usb-phy",

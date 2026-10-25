@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Opt-in fixed USB host profile; the normal board DT remains peripheral-only.
+ * PH8 gates source power for the OTG adapter; controllers never become gadgets.
+ * Requires the independent VMID/switch PMIC implementation (selector != 0).
+ */
+#include "sun50i-a133-trimui-brick.dts"
+
+/ {
+	model = "TrimUI Brick (fixed USB host)";
+};
+
+&r_i2c0 {
+	pmic@34 {
+		regulators {
+			usb_vmid: vmid {
+				regulator-name = "brick-usb-vmid";
+			};
+			usb_vbus: drivevbus {
+				regulator-name = "brick-usb-vbus";
+				vin-supply = <&usb_vmid>;
+			};
+		};
+	};
+};
+
+&usb_otg {
+	status = "disabled";
+};
+
+&usbphy {
+	usb0_id_det-gpios = <&pio 7 8 GPIO_ACTIVE_HIGH>;
+	usb0_vbus-supply = <&usb_vbus>;
+};
+
+&ehci0 {
+	dr_mode = "host";
+	status = "okay";
+};
+
+&ohci0 {
+	dr_mode = "host";
+	status = "okay";
+};
