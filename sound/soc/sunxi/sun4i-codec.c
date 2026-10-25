@@ -275,6 +275,14 @@
 #define SUN50I_A133_DAC_FIFOS		0x014
 #define SUN50I_A133_DAC_CNT		0x024
 #define SUN50I_A133_DAC_DEBUG		0x028
+#define SUN50I_A133_ADC_FIFOC		0x030
+#define SUN50I_A133_ADC_VOL		0x034
+#define SUN50I_A133_ADC_FIFOS		0x038
+#define SUN50I_A133_ADC_CNT		0x044
+#define SUN50I_A133_ADC_DAP		0x0f8
+#define SUN50I_A133_ADCL			0x300
+#define SUN50I_A133_ADCR			0x304
+#define SUN50I_A133_MICBIAS		0x318
 #define SUN50I_A133_DAC_ANALOG		0x310
 #define SUN50I_A133_HEADPHONE		0x324
 
@@ -338,19 +346,23 @@
 
 #define SUNIV_CODEC_ADC_DBG		(0x4c)
 
+struct a133_stream_clocks {
+	struct clk *module;
+	struct clk *parent;
+	bool module_claimed, module_enabled;
+	bool audio_claimed, audio_enabled;
+};
+
 struct sun4i_codec {
 	struct device	*dev;
 	struct regmap	*regmap;
 	struct clk	*clk_apb;
 	struct clk	*clk_module;
-	bool a133_playback;
+	bool a133;
 	struct clk *a133_pll_audio;
 	struct clk *a133_pll_com_audio;
-	struct clk *a133_rate_parent;
-	bool a133_module_rate_claimed;
-	bool a133_module_enabled;
-	bool a133_audio_rate_claimed;
-	bool a133_audio_enabled;
+	struct mutex a133_clock_lock;
+	struct a133_stream_clocks a133_stream[2];
 	struct reset_control *rst;
 	struct gpio_desc *gpio_pa;
 	struct gpio_desc *gpio_hp;
@@ -376,31 +388,40 @@ struct sun4i_codec {
 	struct snd_dmaengine_dai_dma_data	playback_dma_data;
 };
 
-/* A133 has one playback stream; ALSA serializes its clock transactions. */
+/* Each direction owns its module and PLL votes; shared PLL transactions serialize. */
+static void sun50i_a133_release_clocks(struct sun4i_codec *scodec,
+				     struct a133_stream_clocks *stream)
+{
+	if (stream->module_enabled) {
+		clk_disable_unprepare(stream->module);
+		stream->module_enabled = false;
+	}
+	if (stream->module_claimed) {
+		clk_rate_exclusive_put(stream->module);
+		stream->module_claimed = false;
+	}
+	if (stream->parent) {
+		clk_rate_exclusive_put(stream->parent);
+		stream->parent = NULL;
+	}
+	if (stream->audio_enabled) {
+		clk_disable_unprepare(scodec->a133_pll_audio);
+		stream->audio_enabled = false;
+	}
+	if (stream->audio_claimed) {
+		clk_rate_exclusive_put(scodec->a133_pll_audio);
+		stream->audio_claimed = false;
+	}
+}
+
 static void sun50i_a133_release_stream_clocks(void *data)
 {
 	struct sun4i_codec *scodec = data;
 
-	if (scodec->a133_module_enabled) {
-		clk_disable_unprepare(scodec->clk_module);
-		scodec->a133_module_enabled = false;
-	}
-	if (scodec->a133_module_rate_claimed) {
-		clk_rate_exclusive_put(scodec->clk_module);
-		scodec->a133_module_rate_claimed = false;
-	}
-	if (scodec->a133_rate_parent) {
-		clk_rate_exclusive_put(scodec->a133_rate_parent);
-		scodec->a133_rate_parent = NULL;
-	}
-	if (scodec->a133_audio_enabled) {
-		clk_disable_unprepare(scodec->a133_pll_audio);
-		scodec->a133_audio_enabled = false;
-	}
-	if (scodec->a133_audio_rate_claimed) {
-		clk_rate_exclusive_put(scodec->a133_pll_audio);
-		scodec->a133_audio_rate_claimed = false;
-	}
+	mutex_lock(&scodec->a133_clock_lock);
+	for (int i = 0; i < ARRAY_SIZE(scodec->a133_stream); i++)
+		sun50i_a133_release_clocks(scodec, &scodec->a133_stream[i]);
+	mutex_unlock(&scodec->a133_clock_lock);
 }
 
 static unsigned long sun50i_a133_module_rate(unsigned int rate)
@@ -425,8 +446,9 @@ static unsigned long sun50i_a133_module_rate(unsigned int rate)
 }
 
 static int sun50i_a133_set_stream_clocks(struct sun4i_codec *scodec,
-				       unsigned int rate)
+				       unsigned int rate, int direction)
 {
+	struct a133_stream_clocks *stream = &scodec->a133_stream[direction];
 	struct clk *parent;
 	unsigned long parent_rate, module_rate;
 	int ret;
@@ -443,8 +465,8 @@ static int sun50i_a133_set_stream_clocks(struct sun4i_codec *scodec,
 		return -EINVAL;
 	}
 
-	/* Repeated hw_params must not reparent an enabled DAC module. */
-	sun50i_a133_release_stream_clocks(scodec);
+	/* Repeated hw_params must not reparent an enabled module. */
+	sun50i_a133_release_clocks(scodec, stream);
 	/*
 	 * A133 playback with COM selected stalls unless PLL_AUDIO is also
 	 * enabled. Holding it at 98.304 MHz, as the vendor does, restores
@@ -455,7 +477,7 @@ static int sun50i_a133_set_stream_clocks(struct sun4i_codec *scodec,
 		ret = clk_set_rate_exclusive(scodec->a133_pll_audio, 98304000);
 		if (ret)
 			goto err_release;
-		scodec->a133_audio_rate_claimed = true;
+		stream->audio_claimed = true;
 		if (clk_get_rate(scodec->a133_pll_audio) != 98304000) {
 			ret = -EINVAL;
 			goto err_release;
@@ -463,36 +485,36 @@ static int sun50i_a133_set_stream_clocks(struct sun4i_codec *scodec,
 		ret = clk_prepare_enable(scodec->a133_pll_audio);
 		if (ret)
 			goto err_release;
-		scodec->a133_audio_enabled = true;
+		stream->audio_enabled = true;
 	}
 	ret = clk_set_rate_exclusive(parent, parent_rate);
 	if (ret)
 		goto err_release;
-	scodec->a133_rate_parent = parent;
+	stream->parent = parent;
 	if (clk_get_rate(parent) != parent_rate) {
 		ret = -EINVAL;
 		goto err_release;
 	}
-	ret = clk_set_parent(scodec->clk_module, parent);
+	ret = clk_set_parent(stream->module, parent);
 	if (ret)
 		goto err_release;
-	ret = clk_set_rate_exclusive(scodec->clk_module, module_rate);
+	ret = clk_set_rate_exclusive(stream->module, module_rate);
 	if (ret)
 		goto err_release;
-	scodec->a133_module_rate_claimed = true;
-	if (clk_get_rate(scodec->clk_module) != module_rate ||
-	    !clk_is_match(clk_get_parent(scodec->clk_module), parent)) {
+	stream->module_claimed = true;
+	if (clk_get_rate(stream->module) != module_rate ||
+	    !clk_is_match(clk_get_parent(stream->module), parent)) {
 		ret = -EINVAL;
 		goto err_release;
 	}
-	ret = clk_prepare_enable(scodec->clk_module);
+	ret = clk_prepare_enable(stream->module);
 	if (ret)
 		goto err_release;
-	scodec->a133_module_enabled = true;
+	stream->module_enabled = true;
 	return 0;
 
 err_release:
-	sun50i_a133_release_stream_clocks(scodec);
+	sun50i_a133_release_clocks(scodec, stream);
 	return ret;
 }
 
@@ -534,6 +556,21 @@ static int sun4i_codec_trigger(struct snd_pcm_substream *substream, int cmd,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(rtd->card);
 
+	if (scodec->a133 && substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+		switch (cmd) {
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
+		case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+			return regmap_field_set_bits(scodec->reg_adc_fifoc, BIT(28) | BIT(3));
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
+		case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+			return regmap_field_clear_bits(scodec->reg_adc_fifoc, BIT(28) | BIT(3));
+		default:
+			return -EINVAL;
+		}
+	}
+
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
@@ -565,6 +602,18 @@ static int sun4i_codec_prepare_capture(struct snd_pcm_substream *substream,
 {
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(rtd->card);
+
+	int ret;
+
+	if (scodec->a133) {
+		ret = regmap_field_set_bits(scodec->reg_adc_fifoc, BIT(0));
+		if (ret)
+			return ret;
+		ret = regmap_write(scodec->regmap, SUN50I_A133_ADC_FIFOS, BIT(3) | BIT(1));
+		if (ret)
+			return ret;
+		return regmap_write(scodec->regmap, SUN50I_A133_ADC_CNT, 0);
+	}
 
 
 	/* Flush RX FIFO */
@@ -612,7 +661,7 @@ static int sun4i_codec_prepare_playback(struct snd_pcm_substream *substream,
 	/* Flush the TX FIFO */
 	ret = regmap_field_set_bits(scodec->reg_dac_fifoc,
 				   BIT(SUN4I_CODEC_DAC_FIFOC_FIFO_FLUSH));
-	if (scodec->a133_playback) {
+	if (scodec->a133) {
 		if (ret)
 			return ret;
 		/* W1C: TX empty, underrun and overrun status, not FIFO count. */
@@ -775,7 +824,7 @@ static int sun4i_codec_hw_params_playback(struct sun4i_codec *scodec,
 {
 	u32 val;
 
-	if (scodec->a133_playback) {
+	if (scodec->a133) {
 		val = hwrate << 29;
 		if (params_format(params) == SNDRV_PCM_FORMAT_S24_LE) {
 			val |= BIT(5);
@@ -836,19 +885,45 @@ static int sun4i_codec_hw_params(struct snd_pcm_substream *substream,
 	unsigned long clk_freq;
 	int ret, hwrate;
 
-	if (scodec->a133_playback) {
+	if (scodec->a133) {
+		bool capture = substream->stream == SNDRV_PCM_STREAM_CAPTURE;
+		struct a133_stream_clocks *stream = &scodec->a133_stream[substream->stream];
+		u32 val;
+
 		if (!sun50i_a133_module_rate(params_rate(params)) ||
-		    params_channels(params) != 2 ||
+		    params_channels(params) < 1 || params_channels(params) > 2 ||
+		    (!capture && params_channels(params) != 2) ||
+		    (capture && params_rate(params) > 48000) ||
 		    (params_format(params) != SNDRV_PCM_FORMAT_S16_LE &&
 		     params_format(params) != SNDRV_PCM_FORMAT_S24_LE))
 			return -EINVAL;
-		ret = sun50i_a133_set_stream_clocks(scodec, params_rate(params));
-		if (ret)
-			return ret;
 		hwrate = sun4i_codec_get_hw_rate(params);
-		ret = sun4i_codec_hw_params_playback(scodec, params, hwrate);
+		if (hwrate < 0)
+			return hwrate;
+		mutex_lock(&scodec->a133_clock_lock);
+		ret = sun50i_a133_set_stream_clocks(scodec, params_rate(params),
+						  substream->stream);
 		if (ret)
-			sun50i_a133_release_stream_clocks(scodec);
+			goto a133_unlock;
+		if (capture) {
+			val = hwrate << 29;
+			val |= (params_channels(params) == 1 ? 1 : 3) << 12;
+			if (params_format(params) == SNDRV_PCM_FORMAT_S24_LE) {
+				val |= BIT(16);
+				scodec->capture_dma_data.addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
+			} else {
+				val |= BIT(24);
+				scodec->capture_dma_data.addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+			}
+			ret = regmap_field_update_bits(scodec->reg_adc_fifoc,
+				GENMASK(31, 29) | BIT(24) | BIT(16) | GENMASK(13, 12), val);
+		} else {
+			ret = sun4i_codec_hw_params_playback(scodec, params, hwrate);
+		}
+		if (ret)
+			sun50i_a133_release_clocks(scodec, stream);
+a133_unlock:
+		mutex_unlock(&scodec->a133_clock_lock);
 		return ret;
 	}
 
@@ -878,6 +953,9 @@ static int sun4i_codec_startup(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(rtd->card);
 
+	if (scodec->a133 && substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+		return 0;
+
 	/*
 	 * Stop issuing DRQ when we have room for less than 16 samples
 	 * in our TX FIFO
@@ -886,7 +964,7 @@ static int sun4i_codec_startup(struct snd_pcm_substream *substream,
 			      3 << SUN4I_CODEC_DAC_FIFOC_DRQ_CLR_CNT);
 
 	/* A133 hw_params selects its family before enabling the module. */
-	if (scodec->a133_playback)
+	if (scodec->a133)
 		return 0;
 	return clk_prepare_enable(scodec->clk_module);
 }
@@ -897,10 +975,13 @@ static void sun4i_codec_shutdown(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(rtd->card);
 
-	if (scodec->a133_playback)
-		sun50i_a133_release_stream_clocks(scodec);
-	else
+	if (scodec->a133) {
+		mutex_lock(&scodec->a133_clock_lock);
+		sun50i_a133_release_clocks(scodec, &scodec->a133_stream[substream->stream]);
+		mutex_unlock(&scodec->a133_clock_lock);
+	} else {
 		clk_disable_unprepare(scodec->clk_module);
+	}
 }
 
 static const struct snd_soc_dai_ops sun4i_codec_dai_ops = {
@@ -2372,6 +2453,14 @@ static int a133_component_probe(struct snd_soc_component *c)
 {
 	static const struct { unsigned int reg, mask, value; } init[] = {
 		/* Match DAPM's initial off state, including inherited analog state. */
+		/* Leave capture and both microphone paths off until DAPM/trigger. */
+		{ SUN50I_A133_ADC_FIFOC, BIT(28) | BIT(3) | GENMASK(27, 25), GENMASK(27, 25) },
+		{ SUN50I_A133_ADC_VOL, BIT(17) | GENMASK(15, 0), BIT(17) | 0xa0a0 },
+		{ SUN50I_A133_ADCL, BIT(31) | BIT(30) | GENMASK(12, 8) | GENMASK(7, 0), 0x55 },
+		{ SUN50I_A133_ADCR, BIT(31) | BIT(30) | GENMASK(12, 8) | GENMASK(7, 0), 0x55 },
+		{ SUN50I_A133_MICBIAS, BIT(7), 0 },
+		/* DSP coefficient programming is separate from the ADC transport. */
+		{ SUN50I_A133_ADC_DAP, BIT(31) | BIT(29) | BIT(28), 0 },
 		{ SUN50I_A133_HEADPHONE, BIT(15), 0 },
 		{ SUN50I_A133_HEADPHONE, BIT(10), 0 },
 		{ SUN50I_A133_HEADPHONE, BIT(11), 0 },
@@ -2399,8 +2488,20 @@ static int a133_component_probe(struct snd_soc_component *c)
 	return 0;
 }
 
+static int a133_adc_event(struct snd_soc_dapm_widget *w,
+			  struct snd_kcontrol *k, int event)
+{
+	/* Settle the powered analog input before trigger enables conversion. */
+	if (event == SND_SOC_DAPM_POST_PMU)
+		msleep(80);
+	return 0;
+}
+
 static const DECLARE_TLV_DB_SCALE(a133_digital_tlv, -7308, 116, 0);
 static const struct snd_kcontrol_new a133_controls[] = {
+	SOC_DOUBLE("ADC Capture Volume", SUN50I_A133_ADC_VOL, 8, 0, 255, 0),
+	SOC_SINGLE("MIC1 Capture Gain", SUN50I_A133_ADCL, 8, 31, 0),
+	SOC_SINGLE("MIC2 Capture Gain", SUN50I_A133_ADCR, 8, 31, 0),
 	/* Independent channel gains; preserve DAC_VOL_SEL at bit 16. */
 	SOC_DOUBLE("DAC Digital Playback Volume", SUN50I_A133_DAC_VOL,
 		   8, 0, 255, 0),
@@ -2409,6 +2510,15 @@ static const struct snd_kcontrol_new a133_controls[] = {
 	SOC_SINGLE("Headphone Playback Volume", SUN50I_A133_DAC_ANALOG, 28, 7, 0),
 };
 static const struct snd_soc_dapm_widget a133_widgets[] = {
+	SND_SOC_DAPM_ADC_E("Left ADC", "Codec Capture", SUN50I_A133_ADCL, 31, 0,
+			   a133_adc_event, SND_SOC_DAPM_POST_PMU),
+	SND_SOC_DAPM_ADC_E("Right ADC", "Codec Capture", SUN50I_A133_ADCR, 31, 0,
+			   a133_adc_event, SND_SOC_DAPM_POST_PMU),
+	SND_SOC_DAPM_PGA("MIC1 Amplifier", SUN50I_A133_ADCL, 30, 0, NULL, 0),
+	SND_SOC_DAPM_PGA("MIC2 Amplifier", SUN50I_A133_ADCR, 30, 0, NULL, 0),
+	SND_SOC_DAPM_SUPPLY("Main Mic Bias", SUN50I_A133_MICBIAS, 7, 0, NULL, 0),
+	SND_SOC_DAPM_INPUT("MIC1"),
+	SND_SOC_DAPM_INPUT("MIC2"),
 	SND_SOC_DAPM_SUPPLY("DAC Enable", SUN50I_A133_DAC_DPC, 31, 0, a133_dac_event,
 			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
 	SND_SOC_DAPM_DAC("Left DAC", "Codec Playback", SUN50I_A133_DAC_ANALOG, 15, 0),
@@ -2420,6 +2530,10 @@ static const struct snd_soc_dapm_widget a133_widgets[] = {
 	SND_SOC_DAPM_OUTPUT("HPOUTR"),
 };
 static const struct snd_soc_dapm_route a133_routes[] = {
+	{ "Left ADC", NULL, "MIC1 Amplifier" },
+	{ "Right ADC", NULL, "MIC2 Amplifier" },
+	{ "MIC1 Amplifier", NULL, "MIC1" },
+	{ "MIC2 Amplifier", NULL, "MIC2" },
 	{ "Left DAC", NULL, "DAC Enable" },
 	{ "Right DAC", NULL, "DAC Enable" },
 	{ "Headphone Driver", NULL, "Left DAC" },
@@ -2468,15 +2582,21 @@ static int sun50i_a133_card_init(struct snd_soc_pcm_runtime *rtd)
 	ret = snd_soc_dapm_disable_pin(dapm, "Speaker");
 	if (ret)
 		return ret;
+	/* Recording is opt-in; board routing must identify the wired ADC input. */
+	ret = snd_soc_dapm_disable_pin(dapm, "Onboard Mic");
+	if (ret)
+		return ret;
 	return snd_soc_dapm_sync(dapm);
 }
 
 static const struct snd_kcontrol_new sun50i_a133_card_controls[] = {
+	SOC_DAPM_PIN_SWITCH("Onboard Mic"),
 	SOC_DAPM_PIN_SWITCH("Headphone"),
 	SOC_DAPM_PIN_SWITCH("Speaker"),
 };
 
 static const struct snd_soc_dapm_widget sun50i_a133_card_widgets[] = {
+	SND_SOC_DAPM_MIC("Onboard Mic", NULL),
 	SND_SOC_DAPM_HP("Headphone", NULL),
 	SND_SOC_DAPM_SPK("Speaker", sun50i_a133_speaker_event),
 };
@@ -2492,7 +2612,6 @@ static struct snd_soc_card *sun50i_a133_codec_create_card(struct device *dev)
 	card->dai_link = sun4i_codec_create_link(dev, &card->num_links);
 	if (!card->dai_link)
 		return ERR_PTR(-ENOMEM);
-	card->dai_link->playback_only = true;
 	/* DAI shutdown releases clocks; power down the analog path first. */
 	card->dai_link->ignore_pmdown_time = true;
 	card->dai_link->init = sun50i_a133_card_init;
@@ -2529,6 +2648,16 @@ static struct snd_soc_dai_driver sun50i_a133_codec_dai = {
 		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
 		.sig_bits = 24,
 	},
+	.capture = {
+		.stream_name = "Codec Capture",
+		.channels_min = 1,
+		.channels_max = 2,
+		.rates = SUN50I_A133_RATES & ~(SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000),
+		.rate_min = 8000,
+		.rate_max = 48000,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
+		.sig_bits = 24,
+	},
 };
 
 static struct snd_soc_dai_driver sun50i_a133_cpu_dai = {
@@ -2542,6 +2671,16 @@ static struct snd_soc_dai_driver sun50i_a133_cpu_dai = {
 		.sig_bits = 24,
 	},
 	.ops = &dummy_dai_ops,
+	.capture = {
+		.stream_name = "Capture",
+		.channels_min = 1,
+		.channels_max = 2,
+		.rates = SUN50I_A133_RATES & ~(SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000),
+		.rate_min = 8000,
+		.rate_max = 48000,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
+		.sig_bits = 24,
+	},
 };
 
 static const struct regmap_config sun50i_a133_regmap_config = {
@@ -2577,6 +2716,12 @@ static int sun50i_a133_codec_resources(struct sun4i_codec *scodec)
 	scodec->a133_pll_com_audio = devm_clk_get(dev, "pll-com-audio");
 	if (IS_ERR(scodec->a133_pll_com_audio))
 		return PTR_ERR(scodec->a133_pll_com_audio);
+
+	mutex_init(&scodec->a133_clock_lock);
+	scodec->a133_stream[SNDRV_PCM_STREAM_PLAYBACK].module = scodec->clk_module;
+	scodec->a133_stream[SNDRV_PCM_STREAM_CAPTURE].module = devm_clk_get(dev, "adc");
+	if (IS_ERR(scodec->a133_stream[SNDRV_PCM_STREAM_CAPTURE].module))
+		return PTR_ERR(scodec->a133_stream[SNDRV_PCM_STREAM_CAPTURE].module);
 
 	/* No PLL retuning until the PCM stream chooses its rate family. */
 	return devm_add_action_or_reset(dev, sun50i_a133_release_stream_clocks,
@@ -2682,7 +2827,8 @@ static const struct sun4i_codec_quirks sun50i_a133_codec_quirks = {
 	.reg_dac_fifoc = REG_FIELD(0x10, 0, 31),
 	.reg_dac_txdata = 0x20,
 	.has_reset = true,
-	.playback_only = true,
+	.reg_adc_fifoc = REG_FIELD(SUN50I_A133_ADC_FIFOC, 0, 31),
+	.reg_adc_rxdata = 0x40,
 	.dma_max_burst = 4,
 };
 
@@ -2982,8 +3128,8 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->clk_module),
 				     "Failed to get the module clock\n");
 
-	scodec->a133_playback = quirks == &sun50i_a133_codec_quirks;
-	if (scodec->a133_playback) {
+	scodec->a133 = quirks == &sun50i_a133_codec_quirks;
+	if (scodec->a133) {
 		ret = sun50i_a133_codec_resources(scodec);
 		if (ret)
 			return dev_err_probe(&pdev->dev, ret, "Audio resources unavailable\n");
@@ -3001,7 +3147,7 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 	if (IS_ERR(scodec->gpio_pa))
 		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->gpio_pa),
 				     "Failed to get pa gpio\n");
-	if (scodec->a133_playback) {
+	if (scodec->a133) {
 		of_property_read_u32(pdev->dev.of_node, "allwinner,pa-delay-ms",
 				     &scodec->pa_delay_ms);
 		if (scodec->pa_delay_ms > 1000)
@@ -3043,14 +3189,14 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_snd_soc_register_component(&pdev->dev, quirks->codec,
-				     scodec->a133_playback ? &sun50i_a133_codec_dai :
+				     scodec->a133 ? &sun50i_a133_codec_dai :
 				     &sun4i_codec_dai, 1);
 	if (ret)
 		return ret;
 
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &sun4i_codec_component,
-					      scodec->a133_playback ? &sun50i_a133_cpu_dai :
+					      scodec->a133 ? &sun50i_a133_cpu_dai :
 					      &dummy_cpu_dai, 1);
 	if (ret)
 		return ret;
@@ -3070,7 +3216,7 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "Failed to register our card\n");
 
-	if (scodec->a133_playback) {
+	if (scodec->a133) {
 		/* Deferred ASoC binding has no live ALSA card for jack reporting. */
 		if (!card->instantiated) {
 			snd_soc_unregister_card(card);
@@ -3092,7 +3238,7 @@ static void sun4i_codec_remove(struct platform_device *pdev)
 	struct snd_soc_card *card = platform_get_drvdata(pdev);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
 
-	if (scodec->a133_playback)
+	if (scodec->a133)
 		a133_jack_stop(scodec);
 	snd_soc_unregister_card(card);
 }
