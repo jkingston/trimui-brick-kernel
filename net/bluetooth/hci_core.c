@@ -2403,6 +2403,12 @@ static int hci_suspend_notifier(struct notifier_block *nb, unsigned long action,
 			   action, ret);
 
 	hci_dev_put(hdev);
+	/* Preparation failure already attempted local restoration. Abort entry;
+	 * the PM notifier chain restores earlier successful participants. Never
+	 * stop the post-resume chain, even if this controller failed to restore.
+	 */
+	if (action == PM_HIBERNATION_PREPARE || action == PM_SUSPEND_PREPARE)
+		return notifier_from_errno(ret > 0 ? -bt_to_errno(ret) : ret);
 	return NOTIFY_DONE;
 }
 
@@ -2827,6 +2833,8 @@ int hci_suspend_dev(struct hci_dev *hdev)
 	hci_req_sync_lock(hdev);
 	ret = hci_suspend_sync(hdev);
 	hci_req_sync_unlock(hdev);
+	if (ret)
+		return ret;
 
 	hci_clear_wake_reason(hdev);
 	mgmt_suspending(hdev, hdev->suspend_state);
