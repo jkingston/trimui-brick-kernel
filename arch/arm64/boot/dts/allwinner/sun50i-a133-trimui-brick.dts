@@ -130,6 +130,20 @@
 		};
 	};
 
+	fn-switch {
+		compatible = "gpio-keys";
+		label = "TrimUI Brick Fn";
+		pinctrl-names = "default";
+		pinctrl-0 = <&fn_switch_pin>;
+
+		button-fn {
+			label = "Fn";
+			linux,code = <KEY_FN>;
+			gpios = <&pio 7 19 GPIO_ACTIVE_HIGH>;
+			debounce-interval = <5>;
+		};
+	};
+
 	volume-keys {
 		compatible = "gpio-keys";
 		autorepeat;
@@ -623,13 +637,21 @@
 
 &cpu0 {
 	cpu-supply = <&vdd_cpu>;
+	dynamic-power-coefficient = <190>;
 };
 
 &{/thermal-zones/cpu-thermal} {
 	polling-delay-passive = <500>;
 	polling-delay = <1000>;
+	sustainable-power = <1200>;
 
 	trips {
+		cpu_threshold: cpu-threshold {
+			temperature = <58000>;
+			hysteresis = <0>;
+			type = "passive";
+		};
+
 		cpu_passive: cpu-passive {
 			temperature = <63000>;
 			hysteresis = <0>;
@@ -647,6 +669,7 @@
 		map-cpu {
 			trip = <&cpu_passive>;
 			cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+			contribution = <1024>;
 		};
 	};
 };
@@ -662,4 +685,18 @@
 		resets = <&r_ccu RST_R_AHB_BUS_RTC>;
 		reset-names = "bus";
 	};
+};
+
+&pio {
+	fn_switch_pin: fn-switch-pin {
+		pins = "PH19";
+		function = "gpio_in";
+		bias-disable;
+	};
+};
+
+&{/thermal-zones/gpu-thermal} {
+	polling-delay-passive = <500>;
+	polling-delay = <1000>;
+	sustainable-power = <1100>;
 };
