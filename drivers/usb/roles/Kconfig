@@ -26,4 +26,16 @@ config USB_ROLES_INTEL_XHCI
 	  To compile the driver as a module, choose M here: the module will
 	  be called intel-xhci-usb-role-switch.
 
+config USB_ROLES_TRIMUI_BRICK
+	bool "TrimUI Brick bottom USB role coordinator"
+	depends on OF && ARCH_SUNXI && GPIOLIB
+	depends on USB_ROLE_SWITCH=y && POWER_SUPPLY=y
+	depends on PHY_SUN4I_USB=y && USB_MUSB_SUNXI=y
+	depends on USB_EHCI_HCD_PLATFORM=y && USB_OHCI_HCD_PLATFORM=y
+	help
+	  Switch the Brick bottom connector between its MUSB device controller
+	  and EHCI/OHCI host pair. Requires the opt-in automatic-role device tree;
+	  the normal board profile retains its fixed peripheral role.
+	  The separate top USB host remains active during role changes.
+
 endif # USB_ROLE_SWITCH

@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Opt-in controller handoff; default board firmware stays fixed peripheral. */
+#include "sun50i-a133-trimui-brick-host.dts"
+
+/ {
+	model = "TrimUI Brick (automatic bottom USB role)";
+	usb-role-switch {
+		compatible = "trimui,brick-usb-role-switch";
+		phys = <&usbphy 0>;
+		phy-names = "usb";
+		id-gpios = <&pio 7 8 GPIO_ACTIVE_HIGH>;
+		vbus-power-supply = <&brick_pmic>;
+		peripheral = <&usb_otg>;
+		ehci = <&ehci0>;
+		ohci = <&ohci0>;
+	};
+};
+
+&usbphy {
+	/delete-property/ usb0_id_det-gpios;
+	usb-role-switch;
+};
+
+&ehci0 {
+	status = "disabled";
+};
+
+&ohci0 {
+	status = "disabled";
+};

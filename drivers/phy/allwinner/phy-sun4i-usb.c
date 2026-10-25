@@ -31,6 +31,7 @@
 #include <linux/reset.h>
 #include <linux/spinlock.h>
 #include <linux/usb/of.h>
+#include <linux/usb/role.h>
 #include <linux/workqueue.h>
 
 #define REG_ISCR			0x00
@@ -116,6 +117,7 @@ struct sun4i_usb_phy_data {
 	void __iomem *base;
 	const struct sun4i_usb_phy_cfg *cfg;
 	enum usb_dr_mode dr_mode;
+	bool role_switch;
 	spinlock_t reg_lock; /* guard access to phyctl reg */
 	int num_phys;
 	struct reset_control *phy1_bus_reset;
@@ -306,6 +308,10 @@ static int sun4i_usb_phy_init(struct phy *_phy)
 	int ret;
 	u32 val;
 
+	if (!phy->index && data->role_switch &&
+	    data->dr_mode == USB_DR_MODE_UNKNOWN)
+		return -EAGAIN;
+
 	/* OHCI1 can be the first consumer, before EHCI1 or PHY0 probes. */
 	if (data->cfg->needs_phy1_clock && phy->index == 1) {
 		ret = sun4i_usb_phy1_clock_enable(data);
@@ -415,7 +421,8 @@ clocks_ready:
 				    data->cfg->disc_thresh, 2);
 	}
 
-	sun4i_usb_phy_passby(phy, 1);
+	sun4i_usb_phy_passby(phy, !data->role_switch || phy->index ||
+			     data->dr_mode == USB_DR_MODE_HOST);
 
 	if (phy->index == 0) {
 		data->phy0_init = true;
@@ -453,7 +460,8 @@ clocks_ready:
 		/* Force ISCR and cable state updates */
 		data->id_det = -1;
 		data->vbus_det = -1;
-		queue_delayed_work(system_percpu_wq, &data->detect, 0);
+		if (!data->role_switch)
+			queue_delayed_work(system_percpu_wq, &data->detect, 0);
 	}
 
 	return 0;
@@ -565,11 +573,15 @@ static int sun4i_usb_phy_power_on(struct phy *_phy)
 	struct sun4i_usb_phy_data *data = to_sun4i_usb_phy_data(phy);
 	int ret;
 
+	if (!phy->index && data->role_switch &&
+	    data->dr_mode != USB_DR_MODE_HOST)
+		return 0;
+
 	if (phy->vbus_error)
 		return phy->vbus_error;
 
-	if (data->cfg->needs_phy1_clock && phy->index == 0 &&
-	    data->dr_mode == USB_DR_MODE_HOST) {
+	if (data->cfg->needs_phy1_clock && !data->role_switch &&
+	    phy->index == 0 && data->dr_mode == USB_DR_MODE_HOST) {
 		ret = gpiod_get_value_cansleep(data->id_det_gpio);
 		if (ret)
 			return ret < 0 ? ret : 0;
@@ -627,7 +639,8 @@ static int sun4i_usb_phy_power_off(struct phy *_phy)
 	 * phy0 vbus typically slowly discharges, sometimes this causes the
 	 * Vbus gpio to not trigger an edge irq on Vbus off, so force a rescan.
 	 */
-	if (phy->index == 0 && !sun4i_usb_phy0_poll(data))
+	if (phy->index == 0 && !data->role_switch &&
+	    !sun4i_usb_phy0_poll(data))
 		mod_delayed_work(system_percpu_wq, &data->detect, POLL_TIME);
 
 	return 0;
@@ -680,7 +693,7 @@ static int sun4i_usb_phy_set_mode(struct phy *_phy,
 	if (data->cfg->needs_phy1_clock) {
 		if (new_mode != data->dr_mode)
 			return -EOPNOTSUPP;
-		if (new_mode == USB_DR_MODE_HOST)
+		if (new_mode == USB_DR_MODE_HOST || data->role_switch)
 			return 0;
 	}
 
@@ -695,6 +708,33 @@ static int sun4i_usb_phy_set_mode(struct phy *_phy,
 
 	return 0;
 }
+
+/* Commit policy only with the bottom controllers fully quiesced. The next
+ * init applies routing with clocks held; this operation does no off-clock MMIO.
+ */
+int sun4i_usb_phy_set_role(struct phy *_phy, enum usb_role role)
+{
+	struct sun4i_usb_phy *phy = phy_get_drvdata(_phy);
+	struct sun4i_usb_phy_data *data = to_sun4i_usb_phy_data(phy);
+	int ret = 0;
+
+	if (phy->index || !data->role_switch)
+		return -EOPNOTSUPP;
+	if (role != USB_ROLE_NONE && role != USB_ROLE_DEVICE && role != USB_ROLE_HOST)
+		return -EINVAL;
+	mutex_lock(&_phy->mutex);
+	if (_phy->init_count || _phy->power_count || data->phy0_init)
+		ret = -EBUSY;
+	else if (phy->vbus_error || phy->regulator_on)
+		ret = phy->vbus_error ? phy->vbus_error : -EBUSY;
+	else
+		data->dr_mode = role == USB_ROLE_HOST ? USB_DR_MODE_HOST :
+			role == USB_ROLE_DEVICE ? USB_DR_MODE_PERIPHERAL :
+			USB_DR_MODE_UNKNOWN;
+	mutex_unlock(&_phy->mutex);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(sun4i_usb_phy_set_role);
 
 void sun4i_usb_phy_set_squelch_detect(struct phy *_phy, bool enabled)
 {
@@ -737,7 +777,7 @@ static void sun4i_usb_phy0_id_vbus_det_scan(struct work_struct *work)
 	bool force_session_end, id_notify = false, vbus_notify = false;
 	int id_det, vbus_det;
 
-	if (!phy0)
+	if (!phy0 || data->role_switch)
 		return;
 
 	phy = phy_get_drvdata(phy0);
@@ -951,8 +991,13 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 			return -EPROBE_DEFER;
 	}
 
+	data->role_switch = of_property_read_bool(np, "usb-role-switch");
+	if (data->role_switch && !data->cfg->needs_phy1_clock)
+		return -EINVAL;
 	data->dr_mode = of_usb_get_dr_mode_by_phy(np, 0);
-	if (data->cfg->needs_phy1_clock &&
+	if (data->role_switch)
+		data->dr_mode = USB_DR_MODE_UNKNOWN;
+	if (data->cfg->needs_phy1_clock && !data->role_switch &&
 	    ((data->dr_mode != USB_DR_MODE_PERIPHERAL &&
 	      data->dr_mode != USB_DR_MODE_HOST) ||
 	     data->vbus_det_gpio || data->vbus_power_supply))
@@ -1048,6 +1093,11 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 		phy_set_drvdata(phy->phy, &data->phys[i]);
 	}
 	data->num_phys = i;
+	if (data->role_switch && (!data->phys[0].vbus || data->id_det_gpio ||
+				 data->vbus_det_gpio || data->vbus_power_supply))
+		return dev_err_probe(dev, -EINVAL,
+			"Coordinated PHY requires VBUS and external detection ownership\n");
+
 	if (data->cfg->needs_phy1_clock && data->dr_mode == USB_DR_MODE_HOST &&
 	    (!data->phys[0].vbus || !data->id_det_gpio))
 		return dev_err_probe(dev, -EINVAL,
