@@ -11,8 +11,8 @@ maintainers:
 
 description: |
   The A133 codec combines digital DMA FIFOs with direct MMIO analog controls.
-  Initial support covers stereo headphone playback and an external amplifier
-  connected to those outputs. Its analog register layout is not compatible
+  The codec supports headphone playback, an external amplifier and two analog
+  ADC inputs; board routing identifies the connected microphone and bias. Its analog register layout is not compatible
   with the H616 codec.
 
 allOf:
@@ -33,20 +33,24 @@ properties:
       - description: DAC module clock
       - description: Audio PLL
       - description: COM PLL divided by five
+      - description: ADC module clock
   clock-names:
     items:
       - const: apb
       - const: codec
       - const: pll-audio
       - const: pll-com-audio
+      - const: adc
   resets:
     maxItems: 1
   dmas:
     items:
       - description: TX DMA channel
+      - description: RX DMA channel
   dma-names:
     items:
       - const: tx
+      - const: rx
   avcc-supply:
     description: Analog 1.8 V supply
   cpvin-supply:
@@ -60,11 +64,11 @@ properties:
     maximum: 1000
   allwinner,audio-routing:
     $ref: /schemas/types.yaml#/definitions/non-unique-string-array
-    description: Connections between the board outputs and codec outputs.
+    description: Connections between board inputs/outputs and codec pins or microphone bias.
     minItems: 4
-    maxItems: 8
+    maxItems: 12
     items:
-      enum: [Headphone, Speaker, HPOUTL, HPOUTR]
+      enum: [Headphone, Speaker, HPOUTL, HPOUTR, Onboard Mic, Main Mic Bias, MIC1, MIC2]
 
 required:
   - compatible
