@@ -35,6 +35,8 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 
 /* register offset definitions */
 #define SDXC_REG_GCTRL	(0x00) /* SMC Global Control Register */
@@ -306,6 +308,7 @@ struct sunxi_mmc_host {
 	bool		use_new_timings;
 	bool module_clk_enabled;
 	bool a133_emmc_irq_blocked;
+	bool brick_deep_suspended;
 	u32 a133_drive, a133_phase, a133_tuned_rate, a133_tuned_timing;
 	struct mmc_host_ops a133_ops;
 };
@@ -1806,6 +1809,12 @@ static int sunxi_mmc_runtime_resume(struct device *dev)
 	struct sunxi_mmc_host *host = mmc_priv(mmc);
 	int ret;
 
+	if (host->brick_deep_suspended) {
+		ret = sun50i_a133_ccu_deep_ready();
+		if (ret)
+			return ret;
+	}
+
 	ret = sunxi_mmc_enable(host);
 	if (ret)
 		return ret;
@@ -1819,6 +1828,7 @@ static int sunxi_mmc_runtime_resume(struct device *dev)
 	if (ret)
 		goto error_disable;
 	enable_irq(host->irq);
+	host->brick_deep_suspended = false;
 
 	return 0;
 
@@ -1844,8 +1854,30 @@ static int sunxi_mmc_runtime_suspend(struct device *dev)
 	return 0;
 }
 
+static int sunxi_mmc_system_prepare(struct device *dev)
+{
+	if (of_machine_is_compatible("trimui,brick") &&
+	    pm_suspend_target_state == PM_SUSPEND_MEM)
+		return sun50i_a133_ccu_deep_ready();
+	return 0;
+}
+
+static int sunxi_mmc_system_suspend(struct device *dev)
+{
+	struct mmc_host *mmc = dev_get_drvdata(dev);
+	struct sunxi_mmc_host *host = mmc_priv(mmc);
+	int ret;
+
+	ret = pm_runtime_force_suspend(dev);
+	if (!ret && of_machine_is_compatible("trimui,brick") &&
+	    pm_suspend_target_state == PM_SUSPEND_MEM)
+		host->brick_deep_suspended = true;
+	return ret;
+}
+
 static const struct dev_pm_ops sunxi_mmc_pm_ops = {
-	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+	.prepare = sunxi_mmc_system_prepare,
+	SYSTEM_SLEEP_PM_OPS(sunxi_mmc_system_suspend, pm_runtime_force_resume)
 	RUNTIME_PM_OPS(sunxi_mmc_runtime_suspend, sunxi_mmc_runtime_resume, NULL)
 };
 
