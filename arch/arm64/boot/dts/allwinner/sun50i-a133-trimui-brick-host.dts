@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
- * Opt-in fixed USB host profile; the normal board DT remains peripheral-only.
- * PH8 gates source power for the OTG adapter; controllers never become gadgets.
+ * Opt-in fixed host role for the bottom port; the top port is always a host.
+ * PH8 detects the OTG adapter; the AXP2202 supplies switched VBUS.
  * Requires the independent VMID/switch PMIC implementation (selector != 0).
  */
 #include "sun50i-a133-trimui-brick.dts"
