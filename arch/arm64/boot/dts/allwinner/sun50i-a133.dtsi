@@ -13,6 +13,16 @@
 };
 
 &{/soc} {
+	crypto: crypto@1904000 {
+		compatible = "allwinner,sun50i-a133-crypto";
+		reg = <0x01904000 0xa0>;
+		interrupts = <GIC_SPI 92 IRQ_TYPE_EDGE_RISING>;
+		clocks = <&ccu CLK_BUS_CE>, <&ccu CLK_CE>, <&ccu CLK_MBUS_CE>;
+		clock-names = "bus", "mod", "ram";
+		resets = <&ccu RST_BUS_CE>;
+		status = "disabled";
+	};
+
 	codec: audio-codec@5096000 {
 		compatible = "allwinner,sun50i-a133-codec";
 		reg = <0x05096000 0x400>;
