@@ -8,6 +8,7 @@
 #include <linux/platform_device.h>
 
 #include "ccu_common.h"
+#include "ccu-sun50i-a133-sleep.h"
 #include "ccu_reset.h"
 
 #include "ccu_div.h"
@@ -190,12 +191,17 @@ static const struct sunxi_ccu_desc sun50i_a100_r_ccu_desc = {
 static int sun50i_a100_r_ccu_probe(struct platform_device *pdev)
 {
 	void __iomem *reg;
+	int ret;
 
 	reg = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(reg))
 		return PTR_ERR(reg);
 
-	return devm_sunxi_ccu_probe(&pdev->dev, reg, &sun50i_a100_r_ccu_desc);
+	ret = devm_sunxi_ccu_probe(&pdev->dev, reg, &sun50i_a100_r_ccu_desc);
+	if (ret)
+		return ret;
+
+	return sun50i_a133_ccu_sleep_init(&pdev->dev, reg, true);
 }
 
 static const struct of_device_id sun50i_a100_r_ccu_ids[] = {

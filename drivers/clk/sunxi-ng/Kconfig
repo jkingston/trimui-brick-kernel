@@ -133,4 +133,14 @@ config SUN8I_R_CCU
 	default ARCH_SUNXI
 	depends on MACH_SUN8I || ARM64 || COMPILE_TEST
 
+config SUN50I_A133_CCU_SLEEP
+	bool "A133 stock-firmware clock context restoration"
+	depends on ARM64 && PM_SLEEP
+	depends on SUN50I_A100_CCU=y && SUN50I_A100_R_CCU=y
+	help
+	  Restore peripheral clock context with the stock A133 monitor and SCP.
+	  Both CCU nodes must explicitly opt in; modern TF-A is not supported.
+	  CPU and DRAM clock retention is checked without retuning those clocks.
+	  Dependent drivers must check context readiness before device resume.
+
 endif

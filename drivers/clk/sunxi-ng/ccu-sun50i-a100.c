@@ -9,6 +9,7 @@
 #include <linux/platform_device.h>
 
 #include "ccu_common.h"
+#include "ccu-sun50i-a133-sleep.h"
 #include "ccu_reset.h"
 
 #include "ccu_div.h"
@@ -1265,6 +1266,12 @@ static int sun50i_a100_ccu_probe(struct platform_device *pdev)
 	ret = devm_sunxi_ccu_probe(&pdev->dev, reg, &sun50i_a100_ccu_desc);
 	if (ret)
 		return ret;
+
+	if (of_device_is_compatible(pdev->dev.of_node, "allwinner,sun50i-a133-ccu")) {
+		ret = sun50i_a133_ccu_sleep_init(&pdev->dev, reg, false);
+		if (ret)
+			return ret;
+	}
 
 	if (of_device_is_compatible(pdev->dev.of_node, "allwinner,sun50i-a133-ccu")) {
 		ret = sun50i_a133_cpufreq_register(&pdev->dev, &pll_cpux_clk.common,

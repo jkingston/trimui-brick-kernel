@@ -79,3 +79,5 @@ sun8i-r-ccu-y			+= ccu-sun8i-r.o
 sun9i-a80-ccu-y			+= ccu-sun9i-a80.o
 sun9i-a80-de-ccu-y		+= ccu-sun9i-a80-de.o
 sun9i-a80-usb-ccu-y		+= ccu-sun9i-a80-usb.o
+
+obj-$(CONFIG_SUN50I_A133_CCU_SLEEP) += ccu-sun50i-a133-sleep.o
