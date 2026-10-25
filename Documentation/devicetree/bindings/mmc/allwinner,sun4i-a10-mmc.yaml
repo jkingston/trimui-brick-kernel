@@ -27,6 +27,7 @@ properties:
       - const: allwinner,sun20i-d1-mmc
       - const: allwinner,sun50i-a64-emmc
       - const: allwinner,sun50i-a64-mmc
+      - const: allwinner,sun50i-a133-emmc
       - const: allwinner,sun50i-a100-emmc
       - const: allwinner,sun50i-a133-mmc
       - const: allwinner,sun50i-a100-mmc
