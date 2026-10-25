@@ -147,6 +147,7 @@ struct sunxi_pinctrl_desc {
 	bool				disable_strict_mode;
 	enum sunxi_desc_bias_voltage	io_bias_cfg_variant;
 	bool				pf_voltage_selector;
+	bool				a133_deep_context;
 };
 
 struct sunxi_pinctrl_function {
@@ -163,6 +164,22 @@ struct sunxi_pinctrl_group {
 struct sunxi_pinctrl_regulator {
 	struct regulator	*regulator;
 	refcount_t		refcount;
+};
+
+struct sunxi_pinctrl_deep_context {
+	u32				*bank_regs;
+	u32				*irq_cfg;
+	u32				*irq_ctrl;
+	u32				*irq_debounce;
+	unsigned int			first_bank;
+	unsigned int			nbanks;
+	unsigned int			bank_words;
+	u32				pow_mode_sel;
+	u32				pow_mode_ctl;
+	u32				pf_voltage_sel;
+	bool				enabled;
+	bool				saved;
+	bool				fault;
 };
 
 struct sunxi_pinctrl {
@@ -191,6 +208,8 @@ struct sunxi_pinctrl {
 	u32				pull_regs_offset;
 	u32				dlevel_field_width;
 	u32				pow_mod_sel_offset;
+	unsigned int			nbanks;
+	struct sunxi_pinctrl_deep_context deep;
 };
 
 #define SUNXI_PIN(_pin, ...)					\
@@ -315,6 +334,8 @@ static inline u32 sunxi_grp_config_reg(u16 pin)
 int sunxi_pinctrl_init_with_flags(struct platform_device *pdev,
 				  const struct sunxi_pinctrl_desc *desc,
 				  unsigned long flags);
+
+extern const struct dev_pm_ops sunxi_pinctrl_pm_ops;
 
 #define sunxi_pinctrl_init(_dev, _desc) \
 	sunxi_pinctrl_init_with_flags(_dev, _desc, 0)

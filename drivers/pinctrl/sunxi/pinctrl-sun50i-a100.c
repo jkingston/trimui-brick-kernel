@@ -715,6 +715,7 @@ static const struct sunxi_pinctrl_desc a133_pinctrl_data = {
 	.irq_bank_map = a100_irq_bank_map,
 	.io_bias_cfg_variant = BIAS_VOLTAGE_PIO_POW_MODE_CTL,
 	.pf_voltage_selector = true,
+	.a133_deep_context = true,
 };
 
 static int a100_pinctrl_probe(struct platform_device *pdev)
@@ -734,6 +735,7 @@ static struct platform_driver a100_pinctrl_driver = {
 	.driver	= {
 		.name		= "sun50i-a100-pinctrl",
 		.of_match_table	= a100_pinctrl_match,
+		.pm		= pm_ptr(&sunxi_pinctrl_pm_ops),
 	},
 };
 module_platform_driver(a100_pinctrl_driver);

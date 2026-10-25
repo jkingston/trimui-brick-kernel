@@ -25,6 +25,8 @@
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 
 #include <linux/pinctrl/consumer.h>
 #include <linux/pinctrl/machine.h>
@@ -47,6 +49,11 @@ static struct lock_class_key sunxi_pinctrl_irq_request_class;
 
 static struct irq_chip sunxi_pinctrl_edge_irq_chip;
 static struct irq_chip sunxi_pinctrl_level_irq_chip;
+
+static bool sunxi_pinctrl_accessible(const struct sunxi_pinctrl *pctl)
+{
+	return !READ_ONCE(pctl->deep.fault);
+}
 
 /*
  * The sunXi PIO registers are organized as a series of banks, with registers
@@ -592,6 +599,9 @@ static int sunxi_pconf_get(struct pinctrl_dev *pctldev, unsigned pin,
 	u16 arg;
 	int ret;
 
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
+
 	pin -= pctl->desc->pin_base;
 
 	ret = sunxi_pconf_reg(pctl, pin, param, &reg, &shift, &mask);
@@ -650,6 +660,9 @@ static int sunxi_pconf_set(struct pinctrl_dev *pctldev, unsigned pin,
 {
 	struct sunxi_pinctrl *pctl = pinctrl_dev_get_drvdata(pctldev);
 	int i;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	pin -= pctl->desc->pin_base;
 
@@ -735,6 +748,9 @@ static int sunxi_a133_pf_get_voltage_sel(struct regulator_dev *rdev)
 	unsigned long flags;
 	u32 mode, select;
 
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
+
 	raw_spin_lock_irqsave(&pctl->lock, flags);
 	mode = readl(pctl->membase + 0x340);
 	select = readl(pctl->membase + 0x350);
@@ -751,6 +767,9 @@ static int sunxi_a133_pf_set_voltage_sel(struct regulator_dev *rdev,
 	struct sunxi_pinctrl *pctl = rdev_get_drvdata(rdev);
 	unsigned long flags;
 	u32 mode, select;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	if (selector >= ARRAY_SIZE(sunxi_a133_pf_voltages))
 		return -EINVAL;
@@ -867,6 +886,9 @@ static int sunxi_pinctrl_set_io_bias_cfg(struct sunxi_pinctrl *pctl,
 	u32 val, reg;
 	int uV;
 
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
+
 	/* PF is supplied by the A133 selector, never the generic bias path. */
 	if (pctl->desc->pf_voltage_selector && pin / PINS_PER_BANK == 5)
 		return 0;
@@ -966,13 +988,15 @@ static int sunxi_pmx_get_func_groups(struct pinctrl_dev *pctldev,
 	return 0;
 }
 
-static void sunxi_pmx_set(struct pinctrl_dev *pctldev,
-				 unsigned pin,
-				 u8 config)
+static int sunxi_pmx_set(struct pinctrl_dev *pctldev, unsigned int pin,
+			 u8 config)
 {
 	struct sunxi_pinctrl *pctl = pinctrl_dev_get_drvdata(pctldev);
 	u32 reg, shift, mask;
 	unsigned long flags;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	pin -= pctl->desc->pin_base;
 	sunxi_mux_reg(pctl, pin, &reg, &shift, &mask);
@@ -998,6 +1022,8 @@ static void sunxi_pmx_set(struct pinctrl_dev *pctldev,
 	}
 
 	raw_spin_unlock_irqrestore(&pctl->lock, flags);
+
+	return 0;
 }
 
 static int sunxi_pmx_set_mux(struct pinctrl_dev *pctldev,
@@ -1015,9 +1041,7 @@ static int sunxi_pmx_set_mux(struct pinctrl_dev *pctldev,
 	if (!desc)
 		return -EINVAL;
 
-	sunxi_pmx_set(pctldev, g->pin, desc->muxval);
-
-	return 0;
+	return sunxi_pmx_set(pctldev, g->pin, desc->muxval);
 }
 
 static int
@@ -1039,9 +1063,7 @@ sunxi_pmx_gpio_set_direction(struct pinctrl_dev *pctldev,
 	if (!desc)
 		return -EINVAL;
 
-	sunxi_pmx_set(pctldev, offset, desc->muxval);
-
-	return 0;
+	return sunxi_pmx_set(pctldev, offset, desc->muxval);
 }
 
 static int sunxi_pmx_request(struct pinctrl_dev *pctldev, unsigned offset)
@@ -1054,6 +1076,9 @@ static int sunxi_pmx_request(struct pinctrl_dev *pctldev, unsigned offset)
 	struct regulator *reg = s_reg->regulator;
 	char supply[16];
 	int ret;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	if (pctl->desc->pf_voltage_selector && bank == 5)
 		return 0;
@@ -1080,7 +1105,11 @@ static int sunxi_pmx_request(struct pinctrl_dev *pctldev, unsigned offset)
 		goto out;
 	}
 
-	sunxi_pinctrl_set_io_bias_cfg(pctl, offset, reg);
+	ret = sunxi_pinctrl_set_io_bias_cfg(pctl, offset, reg);
+	if (ret) {
+		regulator_disable(reg);
+		goto out;
+	}
 
 	s_reg->regulator = reg;
 	refcount_set(&s_reg->refcount, 1);
@@ -1134,6 +1163,9 @@ static int sunxi_pinctrl_gpio_get_direction(struct gpio_chip *chip,
 	u32 reg, shift, mask;
 	u8 muxval;
 
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
+
 	sunxi_mux_reg(pctl, offset, &reg, &shift, &mask);
 
 	muxval = (readl(pctl->membase + reg) & mask) >> shift;
@@ -1165,16 +1197,26 @@ static int sunxi_pinctrl_gpio_get(struct gpio_chip *chip, unsigned offset)
 		gpiochip_line_is_irq(chip, offset);
 	u32 pin = offset + chip->base;
 	u32 reg, shift, mask, val;
+	int ret;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	sunxi_data_reg(pctl, offset, &reg, &shift, &mask);
 
-	if (set_mux)
-		sunxi_pmx_set(pctl->pctl_dev, pin, SUN4I_FUNC_INPUT);
+	if (set_mux) {
+		ret = sunxi_pmx_set(pctl->pctl_dev, pin, SUN4I_FUNC_INPUT);
+		if (ret)
+			return ret;
+	}
 
 	val = (readl(pctl->membase + reg) & mask) >> shift;
 
-	if (set_mux)
-		sunxi_pmx_set(pctl->pctl_dev, pin, SUN4I_FUNC_IRQ);
+	if (set_mux) {
+		ret = sunxi_pmx_set(pctl->pctl_dev, pin, SUN4I_FUNC_IRQ);
+		if (ret)
+			return ret;
+	}
 
 	return val;
 }
@@ -1186,6 +1228,9 @@ static int sunxi_pinctrl_gpio_set(struct gpio_chip *chip, unsigned int offset,
 	u32 *shadow = &pctl->dat_shadow[offset / PINS_PER_BANK];
 	u32 reg, shift, mask;
 	unsigned long flags;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	sunxi_data_reg(pctl, offset, &reg, &shift, &mask);
 
@@ -1216,8 +1261,10 @@ static int sunxi_pinctrl_gpio_direction_output(struct gpio_chip *chip,
 					unsigned offset, int value)
 {
 	struct sunxi_pinctrl *pctl = gpiochip_get_data(chip);
+	int ret = sunxi_pinctrl_gpio_set(chip, offset, value);
 
-	sunxi_pinctrl_gpio_set(chip, offset, value);
+	if (ret)
+		return ret;
 	return sunxi_pmx_gpio_set_direction(pctl->pctl_dev, NULL,
 					    chip->base + offset, false);
 }
@@ -1266,10 +1313,13 @@ static int sunxi_pinctrl_irq_request_resources(struct irq_data *d)
 {
 	struct sunxi_pinctrl *pctl = irq_data_get_irq_chip_data(d);
 	struct sunxi_desc_function *func;
-	unsigned int offset;
+	unsigned int offset, pin;
 	u32 reg, shift, mask;
 	u8 disabled_mux, muxval;
 	int ret;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	func = sunxi_pinctrl_desc_find_function_by_pin(pctl,
 					pctl->irq_array[d->hwirq], "irq");
@@ -1298,9 +1348,11 @@ static int sunxi_pinctrl_irq_request_resources(struct irq_data *d)
 	}
 
 	/* Change muxing to INT mode */
-	sunxi_pmx_set(pctl->pctl_dev, pctl->irq_array[d->hwirq], func->muxval);
-
-	return 0;
+	pin = pctl->irq_array[d->hwirq];
+	ret = sunxi_pmx_set(pctl->pctl_dev, pin, func->muxval);
+	if (ret)
+		gpiochip_unlock_as_irq(pctl->chip, offset);
+	return ret;
 }
 
 static void sunxi_pinctrl_irq_release_resources(struct irq_data *d)
@@ -1319,6 +1371,9 @@ static int sunxi_pinctrl_irq_set_type(struct irq_data *d, unsigned int type)
 	unsigned long flags;
 	u32 regval;
 	u8 mode;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	switch (type) {
 	case IRQ_TYPE_EDGE_RISING:
@@ -1364,6 +1419,9 @@ static void sunxi_pinctrl_irq_ack(struct irq_data *d)
 	u32 status_reg = sunxi_irq_status_reg(pctl->desc, d->hwirq);
 	u8 status_idx = sunxi_irq_status_offset(d->hwirq);
 
+	if (!sunxi_pinctrl_accessible(pctl))
+		return;
+
 	/* Clear the IRQ */
 	writel(1 << status_idx, pctl->membase + status_reg);
 }
@@ -1375,6 +1433,9 @@ static void sunxi_pinctrl_irq_mask(struct irq_data *d)
 	u8 idx = sunxi_irq_ctrl_offset(d->hwirq);
 	unsigned long flags;
 	u32 val;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return;
 
 	raw_spin_lock_irqsave(&pctl->lock, flags);
 
@@ -1392,6 +1453,9 @@ static void sunxi_pinctrl_irq_unmask(struct irq_data *d)
 	u8 idx = sunxi_irq_ctrl_offset(d->hwirq);
 	unsigned long flags;
 	u32 val;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return;
 
 	raw_spin_lock_irqsave(&pctl->lock, flags);
 
@@ -1412,6 +1476,9 @@ static int sunxi_pinctrl_irq_set_wake(struct irq_data *d, unsigned int on)
 {
 	struct sunxi_pinctrl *pctl = irq_data_get_irq_chip_data(d);
 	u8 bank = d->hwirq / IRQ_PER_BANK;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return -EIO;
 
 	return irq_set_irq_wake(pctl->irq[bank], on);
 }
@@ -1483,6 +1550,9 @@ static void sunxi_pinctrl_irq_handler(struct irq_desc *desc)
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 	struct sunxi_pinctrl *pctl = irq_desc_get_handler_data(desc);
 	unsigned long bank, reg, val;
+
+	if (!sunxi_pinctrl_accessible(pctl))
+		return;
 
 	for (bank = 0; bank < pctl->desc->irq_banks; bank++)
 		if (irq == pctl->irq[bank])
@@ -1737,6 +1807,229 @@ static int sunxi_pinctrl_setup_debounce(struct sunxi_pinctrl *pctl,
 	return 0;
 }
 
+static int sunxi_pinctrl_deep_init(struct platform_device *pdev,
+				   struct sunxi_pinctrl *pctl)
+{
+	struct sunxi_pinctrl_deep_context *deep = &pctl->deep;
+	unsigned int first_pin, last_pin;
+	size_t count;
+
+	if (!of_property_read_bool(pdev->dev.of_node, "allwinner,stock-suspend"))
+		return 0;
+	if (!pctl->desc->a133_deep_context ||
+	    !of_machine_is_compatible("trimui,brick"))
+		return -ENODEV;
+
+	first_pin = pctl->desc->pins[0].pin.number - pctl->desc->pin_base;
+	last_pin = pctl->desc->pins[pctl->desc->npins - 1].pin.number -
+		   pctl->desc->pin_base;
+	deep->first_bank = first_pin / PINS_PER_BANK;
+	deep->nbanks = last_pin / PINS_PER_BANK - deep->first_bank + 1;
+	deep->bank_words = pctl->bank_mem_size / sizeof(u32);
+	count = deep->nbanks * deep->bank_words;
+	deep->bank_regs = devm_kcalloc(&pdev->dev, count,
+				       sizeof(*deep->bank_regs), GFP_KERNEL);
+	deep->irq_cfg = devm_kcalloc(&pdev->dev,
+				     pctl->desc->irq_banks * 4,
+				     sizeof(*deep->irq_cfg), GFP_KERNEL);
+	deep->irq_ctrl = devm_kcalloc(&pdev->dev, pctl->desc->irq_banks,
+				      sizeof(*deep->irq_ctrl), GFP_KERNEL);
+	deep->irq_debounce = devm_kcalloc(&pdev->dev, pctl->desc->irq_banks,
+					  sizeof(*deep->irq_debounce), GFP_KERNEL);
+	if (!deep->bank_regs || !deep->irq_cfg || !deep->irq_ctrl ||
+	    !deep->irq_debounce)
+		return -ENOMEM;
+
+	deep->enabled = true;
+	return 0;
+}
+
+static int sunxi_pinctrl_deep_prepare(struct device *dev)
+{
+	struct sunxi_pinctrl *pctl = dev_get_drvdata(dev);
+
+	if (!pctl->deep.enabled || pm_suspend_target_state != PM_SUSPEND_MEM)
+		return 0;
+	if (pctl->deep.fault || pctl->deep.saved)
+		return pctl->deep.fault ? -EIO : -EBUSY;
+	return sun50i_a133_ccu_deep_ready();
+}
+
+static int sunxi_pinctrl_deep_suspend_noirq(struct device *dev)
+{
+	struct sunxi_pinctrl *pctl = dev_get_drvdata(dev);
+	struct sunxi_pinctrl_deep_context *deep = &pctl->deep;
+	unsigned long flags;
+	unsigned int bank, word;
+	int ret;
+
+	if (!deep->enabled || pm_suspend_target_state != PM_SUSPEND_MEM)
+		return 0;
+	if (deep->fault || deep->saved)
+		return deep->fault ? -EIO : -EBUSY;
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		return ret;
+
+	raw_spin_lock_irqsave(&pctl->lock, flags);
+	for (bank = 0; bank < deep->nbanks; bank++) {
+		u32 offset = (deep->first_bank + bank) * pctl->bank_mem_size;
+		unsigned int data_word = DATA_REGS_OFFSET / sizeof(u32);
+
+		for (word = 0; word < deep->bank_words; word++) {
+			u32 value;
+
+			/* Input reads expose line levels, not the output latch. */
+			if (word == data_word)
+				value = pctl->dat_shadow[deep->first_bank + bank];
+			else
+				value = readl(pctl->membase + offset +
+					      word * sizeof(u32));
+			deep->bank_regs[bank * deep->bank_words + word] = value;
+		}
+	}
+	for (bank = 0; bank < pctl->desc->irq_banks; bank++) {
+		u32 offset = sunxi_irq_cfg_reg(pctl->desc,
+					       bank * IRQ_PER_BANK);
+
+		for (word = 0; word < 4; word++)
+			deep->irq_cfg[bank * 4 + word] =
+				readl(pctl->membase + offset + word * sizeof(u32));
+		deep->irq_ctrl[bank] = readl(pctl->membase +
+				sunxi_irq_ctrl_reg_from_bank(pctl->desc, bank));
+		deep->irq_debounce[bank] = readl(pctl->membase +
+				sunxi_irq_debounce_reg_from_bank(pctl->desc, bank));
+	}
+	deep->pow_mode_sel = readl(pctl->membase + pctl->pow_mod_sel_offset);
+	deep->pow_mode_ctl = readl(pctl->membase + pctl->pow_mod_sel_offset +
+				    PIO_POW_MOD_CTL_OFS);
+	if (pctl->desc->pf_voltage_selector)
+		deep->pf_voltage_sel = readl(pctl->membase + 0x350);
+	deep->saved = true;
+	raw_spin_unlock_irqrestore(&pctl->lock, flags);
+
+	return 0;
+}
+
+static int sunxi_pinctrl_write_verify(struct sunxi_pinctrl *pctl,
+				      u32 offset, u32 value)
+{
+	writel(value, pctl->membase + offset);
+	return readl(pctl->membase + offset) == value ? 0 : -EIO;
+}
+
+static int sunxi_pinctrl_restore_bank(struct sunxi_pinctrl *pctl,
+				      unsigned int bank)
+{
+	struct sunxi_pinctrl_deep_context *deep = &pctl->deep;
+	u32 offset = (deep->first_bank + bank) * pctl->bank_mem_size;
+	u32 *saved = &deep->bank_regs[bank * deep->bank_words];
+	unsigned int data_word = DATA_REGS_OFFSET / sizeof(u32);
+	unsigned int word;
+	int ret;
+
+	/* Restore the output latch before any mux can make the pin drive it. */
+	writel(saved[data_word], pctl->membase + offset + DATA_REGS_OFFSET);
+	pctl->dat_shadow[deep->first_bank + bank] = saved[data_word];
+
+	/* Restore drive and pulls before muxing pins back to active functions. */
+	for (word = data_word + 1; word < deep->bank_words; word++) {
+		ret = sunxi_pinctrl_write_verify(pctl,
+						 offset + word * sizeof(u32),
+						 saved[word]);
+		if (ret)
+			return ret;
+	}
+	for (word = 0; word < data_word; word++) {
+		ret = sunxi_pinctrl_write_verify(pctl,
+						 offset + word * sizeof(u32),
+						 saved[word]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static void sunxi_pinctrl_deep_fault(struct sunxi_pinctrl *pctl, int error)
+{
+	unsigned int bank;
+
+	WRITE_ONCE(pctl->deep.fault, true);
+	for (bank = 0; bank < pctl->desc->irq_banks; bank++)
+		disable_irq_nosync(pctl->irq[bank]);
+	dev_err(pctl->dev, "A133 PIO deep context restore failed: %d\n", error);
+}
+
+static int sunxi_pinctrl_deep_resume_noirq(struct device *dev)
+{
+	struct sunxi_pinctrl *pctl = dev_get_drvdata(dev);
+	struct sunxi_pinctrl_deep_context *deep = &pctl->deep;
+	unsigned long flags;
+	unsigned int bank, word;
+	u32 offset;
+	int ret;
+
+	if (!deep->saved)
+		return 0;
+	if (deep->fault)
+		return -EIO;
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		goto fault;
+
+	raw_spin_lock_irqsave(&pctl->lock, flags);
+	/* Voltage mode must be valid before any pin is allowed to drive. */
+	ret = sunxi_pinctrl_write_verify(pctl, pctl->pow_mod_sel_offset,
+					 deep->pow_mode_sel);
+	offset = pctl->pow_mod_sel_offset + PIO_POW_MOD_CTL_OFS;
+	if (!ret)
+		ret = sunxi_pinctrl_write_verify(pctl, offset,
+						 deep->pow_mode_ctl);
+	if (!ret && pctl->desc->pf_voltage_selector)
+		ret = sunxi_pinctrl_write_verify(pctl, 0x350,
+						 deep->pf_voltage_sel);
+	for (bank = 0; !ret && bank < deep->nbanks; bank++)
+		ret = sunxi_pinctrl_restore_bank(pctl, bank);
+	for (bank = 0; !ret && bank < pctl->desc->irq_banks; bank++) {
+		u32 debounce = deep->irq_debounce[bank];
+
+		offset = sunxi_irq_cfg_reg(pctl->desc, bank * IRQ_PER_BANK);
+
+		for (word = 0; !ret && word < 4; word++) {
+			u32 reg = offset + word * sizeof(u32);
+			u32 value = deep->irq_cfg[bank * 4 + word];
+
+			ret = sunxi_pinctrl_write_verify(pctl, reg, value);
+		}
+		offset = sunxi_irq_debounce_reg_from_bank(pctl->desc, bank);
+		if (!ret)
+			ret = sunxi_pinctrl_write_verify(pctl, offset, debounce);
+	}
+	/* Restore enables last, after type and debounce configuration. */
+	for (bank = 0; !ret && bank < pctl->desc->irq_banks; bank++) {
+		offset = sunxi_irq_ctrl_reg_from_bank(pctl->desc, bank);
+		ret = sunxi_pinctrl_write_verify(pctl, offset,
+						 deep->irq_ctrl[bank]);
+	}
+	if (!ret)
+		deep->saved = false;
+	raw_spin_unlock_irqrestore(&pctl->lock, flags);
+	if (!ret)
+		return 0;
+
+fault:
+	sunxi_pinctrl_deep_fault(pctl, ret);
+	return ret;
+}
+
+const struct dev_pm_ops sunxi_pinctrl_pm_ops = {
+	.prepare = sunxi_pinctrl_deep_prepare,
+	.suspend_noirq = sunxi_pinctrl_deep_suspend_noirq,
+	.resume_noirq = sunxi_pinctrl_deep_resume_noirq,
+};
+EXPORT_SYMBOL_GPL(sunxi_pinctrl_pm_ops);
+
 int sunxi_pinctrl_init_with_flags(struct platform_device *pdev,
 				  const struct sunxi_pinctrl_desc *desc,
 				  unsigned long flags)
@@ -1807,6 +2100,7 @@ int sunxi_pinctrl_init_with_flags(struct platform_device *pdev,
 	last_pin = pctl->desc->pins[pctl->desc->npins - 1].pin.number;
 	nbanks = DIV_ROUND_UP(last_pin + 1 - pctl->desc->pin_base,
 			      PINS_PER_BANK);
+	pctl->nbanks = nbanks;
 	pctl->dat_shadow = devm_kcalloc(&pdev->dev, nbanks,
 					sizeof(*pctl->dat_shadow), GFP_KERNEL);
 	if (!pctl->dat_shadow)
@@ -1818,6 +2112,10 @@ int sunxi_pinctrl_init_with_flags(struct platform_device *pdev,
 		sunxi_data_reg(pctl, i * PINS_PER_BANK, &reg, &shift, &mask);
 		pctl->dat_shadow[i] = readl(pctl->membase + reg);
 	}
+
+	ret = sunxi_pinctrl_deep_init(pdev, pctl);
+	if (ret)
+		return ret;
 
 	ret = sunxi_pinctrl_build_state(pdev);
 	if (ret) {
