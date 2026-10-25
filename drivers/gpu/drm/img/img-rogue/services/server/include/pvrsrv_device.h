@@ -315,6 +315,8 @@ struct _PVRSRV_DEVICE_CONFIG_
 	 */
 	PVRSRV_ERROR (*pfnSystemSleep)(IMG_HANDLE hSysData, IMG_BOOL suspend,
 		IMG_BOOL complete, PVRSRV_ERROR result);
+	/* Optional checked fixed-rail clock target. No policy/registration implied. */
+	PVRSRV_ERROR (*pfnSetFixedRailClock)(IMG_HANDLE hSysData, IMG_UINT32 rate);
 	PFN_SYS_PRE_POWER pfnPrePowerState;
 	PFN_SYS_POST_POWER pfnPostPowerState;
 	PFN_SYS_GET_POWER  pfnGpuDomainPower;

@@ -55,6 +55,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/suspend.h>
 #include <linux/sun50i-a133-gpu.h>
 #include "pvrsrv_device.h"
+#include "power.h"
 #include "syscommon.h"
 #include "allocmem.h"
 #include "physheap.h"
@@ -290,10 +291,10 @@ static PHYS_HEAP_FUNCTIONS heap_funcs = {
 static bool sunxi_apm_wake_valid(bool was_off, unsigned int reset,
 	unsigned int gate, unsigned int isolation, unsigned int status,
 	unsigned int control, unsigned int irqmask, unsigned long rate,
-	unsigned int dfs)
+	unsigned int dfs, unsigned int expected_dfs)
 {
 	if (!(reset & 1) || !(gate & 1) || (control & 3) != 2 ||
-	    (irqmask & 1) || rate != A133_GPU_FIXED_RATE || dfs != 1)
+	    (irqmask & 1) || rate != A133_GPU_FIXED_RATE || !expected_dfs || dfs != expected_dfs)
 		return false;
 	return ((status & 3) == 0 && (isolation & 3) == 0) ||
 	       (was_off && (status & 3) == 1 && (isolation & 3) == 2);
@@ -363,6 +364,65 @@ static PVRSRV_ERROR sunxi_system_sleep(IMG_HANDLE handle, IMG_BOOL suspend,
 	return result;
 }
 
+struct sunxi_clock_change {
+	struct sunxi_gpu *gpu;
+	IMG_UINT32 rate;
+};
+
+static PVRSRV_ERROR sunxi_clock_prepare(IMG_HANDLE data)
+{
+	struct sunxi_clock_change *change = data;
+	struct sunxi_gpu *gpu = change->gpu;
+
+	if (READ_ONCE(gpu->sleep_phase) != SUNXI_AWAKE || sunxi_power_fault(gpu))
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	return PVRSRV_OK;
+}
+
+static PVRSRV_ERROR sunxi_clock_apply(IMG_HANDLE data)
+{
+	struct sunxi_clock_change *change = data;
+	struct sunxi_gpu *gpu = change->gpu;
+
+	if (a133_gpu_set_dfs(gpu->dev, change->rate))
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	/* Confirmed powered readback or owned OFF target, before FW correlation. */
+	gpu->timing.ui32CoreClockSpeed = change->rate;
+	return PVRSRV_OK;
+}
+
+static void sunxi_clock_fault(IMG_HANDLE data, PVRSRV_ERROR error)
+{
+	struct sunxi_clock_change *change = data;
+	struct sunxi_gpu *gpu = change->gpu;
+
+	/* Called with the DDK mutex held, before work can resume. */
+	sunxi_latch_fault(gpu, -EIO);
+	mutex_lock(&gpu->irq_lock);
+	if (gpu->irq_owner.state.phase == IRQ_ACTIVE) {
+		disable_irq(gpu->irq_owner.state.irq);
+		gpu->irq_owner.state.phase = IRQ_QUIESCED;
+		gpu->irq_owner.state.stop_sequence = 0;
+	}
+	mutex_unlock(&gpu->irq_lock);
+	dev_err(gpu->dev, "GPU clock transaction failed: %u\n", error);
+}
+
+static PVRSRV_ERROR sunxi_set_fixed_rail_clock(IMG_HANDLE data, IMG_UINT32 rate)
+{
+	struct sunxi_gpu *gpu = data;
+	struct sunxi_clock_change change = { .gpu = gpu, .rate = rate };
+	unsigned int shift;
+
+	for (shift = 0; shift < 4; shift++)
+		if (rate == (A133_GPU_FIXED_RATE / 16) * (16 - shift))
+			break;
+	if (shift == 4 || !gpu->config.psDevNode)
+		return PVRSRV_ERROR_INVALID_PARAMS;
+	return PVRSRVDeviceClockSpeedChangeChecked(gpu->config.psDevNode,
+		sunxi_clock_prepare, sunxi_clock_apply, sunxi_clock_fault, &change);
+}
+
 static bool sunxi_sleep_retained(struct sunxi_gpu *gpu)
 {
 	bool quiesced;
@@ -399,7 +459,7 @@ static PVRSRV_ERROR sunxi_pre_power(IMG_HANDLE handle,
 	     readl(gpu->ppu + SUNXI_PPU_RSTN), readl(gpu->ppu + SUNXI_PPU_GATE),
 	     readl(gpu->ppu + SUNXI_PPU_ISOLATION), readl(gpu->ppu + SUNXI_PPU_STATUS),
 	     readl(gpu->ppu + SUNXI_PPU_CONTROL), readl(gpu->ppu + SUNXI_PPU_IRQ_MASK),
-	     clk_get_rate(gpu->core), readl(gpu->dfs))) {
+	     clk_get_rate(gpu->core), readl(gpu->dfs), a133_gpu_dfs_code(gpu->dev))) {
 			sunxi_latch_fault(gpu, -EIO);
 			dev_err(gpu->dev, "Unsupported GPU wake PPU/clock state\n");
 			return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
@@ -617,6 +677,7 @@ PVRSRV_ERROR SysDevInit(void *osdev, PVRSRV_DEVICE_CONFIG **result)
 	gpu->config.pfnStopEvidence = sunxi_stop_evidence;
 	gpu->config.pfnGpuPowerFault = sunxi_power_fault;
 	gpu->config.pfnSystemSleep = sunxi_system_sleep;
+	gpu->config.pfnSetFixedRailClock = sunxi_set_fixed_rail_clock;
 	gpu->config.pfnPrePowerState = sunxi_pre_power;
 	gpu->config.pfnPostPowerState = sunxi_post_power;
 	gpu->config.pfnSysDevFeatureDepInit = feature_init;

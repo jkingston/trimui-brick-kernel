@@ -29,6 +29,7 @@ struct a133_gpu_domain {
 	struct reset_control *gpu_reset, *ppu_reset;
 	struct mutex handoff_lock;
 	enum a133_handoff_state handoff_state;
+	u32 dfs_code, applied_dfs;
 	const char *failure_stage;
 	bool attempted;
 	bool boot_ready;
@@ -124,6 +125,8 @@ static int a133_gpu_power_on(struct generic_pm_domain *genpd)
 		goto failed;
 	}
 	p->handoff_state = A133_HW;
+	p->dfs_code = 1;
+	p->applied_dfs = 1;
 	WRITE_ONCE(p->result, 0);
 	/* Publish completed boot initialization to transition callers. */
 	smp_store_release(&p->boot_ready, true);
@@ -165,10 +168,10 @@ static struct a133_snapshot a133_snapshot(struct a133_gpu_domain *p)
 }
 
 static bool a133_handoff_valid(const struct a133_snapshot *s, u32 mode,
-	bool host_only)
+	bool host_only, u32 expected_dfs)
 {
 	if (!(s->reset & 1) || !(s->gate & 1) || (s->control & 3) != mode ||
-	    (s->irqmask & 1) || s->dfs != 1 || s->rate != A133_GPU_FIXED_RATE)
+	    (s->irqmask & 1) || s->dfs != expected_dfs || s->rate != A133_GPU_FIXED_RATE)
 		return false;
 	return ((s->status & 3) == 1 && (s->isolation & 3) == 2) ||
 	       (!host_only && !(s->status & 3) && !(s->isolation & 3));
@@ -241,7 +244,7 @@ int a133_gpu_internal_off(struct device *consumer)
 		goto out;
 	}
 	s = a133_snapshot(p);
-	if (!a133_handoff_valid(&s, 1, true)) {
+	if (!a133_handoff_valid(&s, 1, true, p->dfs_code)) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -279,8 +282,16 @@ static int a133_internal_restore(struct a133_gpu_domain *p)
 	 * establish accessibility before the separate DFS read.
 	 */
 	s = a133_snapshot(p);
-	if (s.dfs != 1 || s.rate != A133_GPU_FIXED_RATE)
+	if (s.rate != A133_GPU_FIXED_RATE ||
+	    (s.dfs != 1 && s.dfs != p->applied_dfs))
 		return a133_fault(p, "restore-clock", -EIO);
+	/* Reset may restore DFS1; otherwise only our last applied code is valid. */
+	if (s.dfs != p->dfs_code) {
+		writel(p->dfs_code, p->dfs);
+		if (readl(p->dfs) != p->dfs_code)
+			return a133_fault(p, "restore-dfs", -EIO);
+	}
+	p->applied_dfs = p->dfs_code;
 	writel((control & ~3U) | 2, p->ppu + 0x24);
 	ret = readl_poll_timeout(p->ppu + 0x24, value, (value & 3) == 2, 1, 1000);
 	s = a133_ppu_snapshot(p);
@@ -328,7 +339,7 @@ int a133_gpu_apm_handoff(struct device *consumer, bool wake, bool forced)
 	}
 	before = a133_snapshot(p);
 	if (p->handoff_state == A133_HW) {
-		if (!a133_handoff_valid(&before, 2, false))
+		if (!a133_handoff_valid(&before, 2, false, p->dfs_code))
 			goto fault;
 		if (wake)
 			goto out;
@@ -344,7 +355,7 @@ int a133_gpu_apm_handoff(struct device *consumer, bool wake, bool forced)
 		}
 		target = 1;
 	} else if (p->handoff_state == A133_SW_HOST) {
-		if (!a133_handoff_valid(&before, 1, true))
+		if (!a133_handoff_valid(&before, 1, true, p->dfs_code))
 			goto fault;
 		if (!wake)
 			goto out;
@@ -359,7 +370,7 @@ int a133_gpu_apm_handoff(struct device *consumer, bool wake, bool forced)
 	ret = readl_poll_timeout(p->ppu + 0x24, value,
 				(value & 3) == target, 1, 1000);
 	after = a133_snapshot(p);
-	if (ret || !a133_handoff_valid(&after, target, true) ||
+	if (ret || !a133_handoff_valid(&after, target, true, p->dfs_code) ||
 	    (after.control & ~3U) != (before.control & ~3U)) {
 		reason = "control handoff readback mismatch";
 		goto fault;
@@ -415,7 +426,7 @@ int a133_gpu_s2idle_retained(struct device *consumer)
 	} else if (p->handoff_state == A133_HW || p->handoff_state == A133_SW_HOST) {
 		s = a133_snapshot(p);
 		if (!a133_handoff_valid(&s, p->handoff_state == A133_HW ? 2 : 1,
-				       p->handoff_state == A133_SW_HOST))
+				       p->handoff_state == A133_SW_HOST, p->dfs_code))
 			ret = a133_fault(p, "s2idle-retention", -EIO);
 	} else {
 		ret = -EIO;
@@ -425,6 +436,70 @@ int a133_gpu_s2idle_retained(struct device *consumer)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(a133_gpu_s2idle_retained);
+
+u32 a133_gpu_dfs_code(struct device *consumer)
+{
+	/* Pair with provider publication after boot resource setup. */
+	struct a133_gpu_domain *p = smp_load_acquire(&a133_provider);
+
+	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
+		return 0;
+	/* Pair with boot_ready publication of initialized DFS ownership. */
+	if (!smp_load_acquire(&p->boot_ready) || READ_ONCE(p->result))
+		return 0;
+	return READ_ONCE(p->dfs_code);
+}
+EXPORT_SYMBOL_GPL(a133_gpu_dfs_code);
+
+int a133_gpu_set_dfs(struct device *consumer, unsigned long rate)
+{
+	/* Pair with provider publication after boot resource setup. */
+	struct a133_gpu_domain *p = smp_load_acquire(&a133_provider);
+	struct a133_snapshot s;
+	u32 code;
+	int shift, ret = 0;
+
+	/* Vendor-supported numerators13..16; parent and supplies never change. */
+	for (shift = 0; shift < 4; shift++)
+		if (rate == (A133_GPU_FIXED_RATE / 16) * (16 - shift))
+			break;
+	if (shift == 4)
+		return -EINVAL;
+	code = BIT(shift);
+	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
+		return -ENODEV;
+	mutex_lock(&p->handoff_lock);
+	/* Pair with boot_ready publication of initialized DFS ownership. */
+	if (!smp_load_acquire(&p->boot_ready) || READ_ONCE(p->result)) {
+		ret = READ_ONCE(p->result) ?: -EIO;
+		goto out;
+	}
+	if (p->handoff_state == A133_INTERNAL_OFF) {
+		s = a133_ppu_snapshot(p);
+		if (!a133_internal_tuple(&s, true))
+			goto invalid;
+		/* No DFS/GPU MMIO while OFF: wake applies this owned target. */
+	} else if (p->handoff_state == A133_HW || p->handoff_state == A133_SW_HOST) {
+		s = a133_snapshot(p);
+		if (!a133_handoff_valid(&s, p->handoff_state == A133_HW ? 2 : 1,
+				       p->handoff_state == A133_SW_HOST, p->dfs_code))
+			goto invalid;
+		writel(code, p->dfs);
+		if (readl(p->dfs) != code)
+			goto invalid;
+		p->applied_dfs = code;
+	} else {
+		goto invalid;
+	}
+	WRITE_ONCE(p->dfs_code, code);
+	goto out;
+invalid:
+	ret = a133_fault(p, "dfs-change", -EIO);
+out:
+	mutex_unlock(&p->handoff_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(a133_gpu_set_dfs);
 
 static int a133_gpu_power_off(struct generic_pm_domain *genpd)
 {
