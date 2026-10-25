@@ -459,8 +459,11 @@ static PVRSRV_ERROR sunxi_post_power(IMG_HANDLE handle,
 		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 
 	if (next == PVRSRV_SYS_POWER_STATE_OFF) {
-		int barrier = sunxi_irq_quiesce(gpu, eligible,
-	     !!(flags & PVRSRV_POWER_FLAGS_FORCED));
+		/* Forced initialization also stops firmware. Drain its IRQ while
+		 * that stop evidence is current, before a later OFF-to-OFF request
+		 * replaces it. Forced transitions still cannot cut internal power.
+		 */
+		int barrier = sunxi_irq_quiesce(gpu, eligible, false);
 		int cut;
 
 		if (barrier < 0) {
