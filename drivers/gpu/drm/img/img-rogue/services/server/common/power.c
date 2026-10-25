@@ -1145,6 +1145,10 @@ PVRSRV_ERROR PVRSRVDeviceClockSpeedChangeChecked(PPVRSRV_DEVICE_NODE node,
 	error = PVRSRVPowerLock(node);
 	if (error != PVRSRV_OK)
 		return error;
+	/* Admission is fixed here. A pending sleep may change its phase while
+	 * idle retries drop this lock; actual system power changes still serialize
+	 * on it, and reacquisition must find system ON. Peer faults are rechecked.
+	 */
 	error = prepare(data);
 	if (error != PVRSRV_OK)
 		goto unlock;
@@ -1153,8 +1157,15 @@ PVRSRV_ERROR PVRSRVDeviceClockSpeedChangeChecked(PPVRSRV_DEVICE_NODE node,
 		error = PVRSRVDeviceIdleRequestKM(node, NULL, IMG_TRUE);
 		if (error == PVRSRV_ERROR_PWLOCK_RELEASED_REACQ_FAILED)
 			return error;
-		if (error != PVRSRV_OK)
+		if (error == PVRSRV_ERROR_DEVICE_IDLE_REQUEST_DENIED)
 			goto unlock;
+		if (error != PVRSRV_OK)
+			goto failed;
+	}
+	/* A peer fault during an idle retry forbids even timing-register reads. */
+	if (PVRSRVGpuPowerFault(node->psDevConfig)) {
+		error = PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+		goto failed;
 	}
 	/* Idle retries may drop the mutex and permit APM to reach OFF. */
 	state = OSAtomicRead(&power->eCurrentPowerState);
