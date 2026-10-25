@@ -544,6 +544,8 @@ v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
  * @m2m_dev: opaque pointer to the internal data to handle M2M context
  *
  * Usually called from driver's ``remove()`` function.
+ * All contexts and job producers must have been quiesced. This function sleeps
+ * while draining scheduler work; do not hold locks needed by device_run().
  */
 void v4l2_m2m_release(struct v4l2_m2m_dev *m2m_dev);
 

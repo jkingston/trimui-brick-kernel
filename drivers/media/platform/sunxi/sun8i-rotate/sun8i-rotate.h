@@ -131,6 +131,7 @@ struct rotate_dev {
 	void __iomem		*top;
 	bool a133;
 	bool removing;
+	bool resume_failed;
 	struct kref ref;
 	int irq;
 	struct clk *mbus_clk;

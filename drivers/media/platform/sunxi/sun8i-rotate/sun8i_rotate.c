@@ -578,6 +578,13 @@ static void rotate_queue_cleanup(struct vb2_queue *vq, u32 state)
 
 static int rotate_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
+	struct rotate_ctx *owner = vb2_get_drv_priv(vq);
+
+	if (owner->dev->resume_failed) {
+		rotate_queue_cleanup(vq, VB2_BUF_STATE_QUEUED);
+		return -EIO;
+	}
+
 	if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
 		struct rotate_ctx *ctx = vb2_get_drv_priv(vq);
 		struct device *dev = ctx->dev->dev;
@@ -815,7 +822,7 @@ static int rotate_release(struct file *file)
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_fh_exit(&ctx->fh);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
-	if (dev->a133 && !dev->removing)
+	if (dev->a133 && !dev->removing && !dev->resume_failed)
 		v4l2_m2m_resume(dev->m2m_dev);
 
 	kfree(ctx);
@@ -1096,8 +1103,12 @@ static int rotate_resume(struct device *device)
 
 	if (!dev->a133)
 		return 0;
+	if (dev->resume_failed)
+		return -EIO;
 	ret = pm_runtime_force_resume(device);
-	if (!ret)
+	if (ret)
+		dev->resume_failed = true;
+	else
 		v4l2_m2m_resume(dev->m2m_dev);
 	return ret;
 }
