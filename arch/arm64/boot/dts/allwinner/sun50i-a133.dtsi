@@ -184,3 +184,7 @@
 		status = "disabled";
 	};
 };
+
+&mmc2 {
+	compatible = "allwinner,sun50i-a133-emmc";
+};
