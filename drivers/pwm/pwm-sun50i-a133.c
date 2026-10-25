@@ -29,7 +29,7 @@ struct brick_pwm {
 	struct clk *bus, *osc;
 	struct reset_control *rst;
 	struct mutex lock;
-	bool suspended, retention_fault;
+	bool suspended, retention_fault, bus_owned, sleep_deep, restore_pending;
 	u32 sleep_pair, sleep_ctl, sleep_period;
 };
 static u32 rd(struct brick_pwm *p, unsigned int reg)
@@ -95,6 +95,8 @@ static int brick_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (ret) {
 		wr(p, PER, rd(p, PER) & ~BIT(0));
 		wr(p, PCGR, rd(p, PCGR) & ~BIT(0));
+	} else {
+		p->restore_pending = false;
 	}
 out:
 	mutex_unlock(&p->lock);
@@ -105,7 +107,7 @@ static int brick_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 {
 	struct brick_pwm *p = pwmchip_get_drvdata(chip);
 	unsigned long long period, duty;
-	u32 ctl;
+	u32 pair, ctl, period_reg;
 	int ret;
 
 	mutex_lock(&p->lock);
@@ -115,8 +117,11 @@ static int brick_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	}
 	ret = brick_guard(p);
 	if (ret) goto out;
-	ctl = rd(p, PCR);
-	if (brick_pwm_decode(rd(p, PCCR), ctl, rd(p, PPR), &period, &duty)) {
+	/* A disabled deep-resume waveform is rebuilt by the next enable. */
+	pair = p->restore_pending ? p->sleep_pair : rd(p, PCCR);
+	ctl = p->restore_pending ? p->sleep_ctl : rd(p, PCR);
+	period_reg = p->restore_pending ? p->sleep_period : rd(p, PPR);
+	if (brick_pwm_decode(pair, ctl, period_reg, &period, &duty)) {
 		ret = -EOPNOTSUPP;
 		goto out;
 	}
@@ -147,14 +152,20 @@ static int brick_bus_is_on(void *ctx)
 static int brick_bus_enable(void *ctx)
 {
 	struct brick_pwm *p = ctx;
+	int ret = clk_prepare_enable(p->bus);
 
-	return clk_prepare_enable(p->bus);
+	if (!ret)
+		p->bus_owned = true;
+	return ret;
 }
 static void brick_bus_disable(void *ctx)
 {
 	struct brick_pwm *p = ctx;
 
-	clk_disable_unprepare(p->bus);
+	if (p->bus_owned) {
+		clk_disable_unprepare(p->bus);
+		p->bus_owned = false;
+	}
 }
 static int brick_reset_deassert(void *ctx)
 {
@@ -221,9 +232,14 @@ static void brick_shutdown(struct platform_device *pdev)
 	struct brick_pwm *p = pwmchip_get_drvdata(chip);
 
 	mutex_lock(&p->lock);
+	/* Failed resume may leave the bus inaccessible. */
+	if (!p->bus_owned || reset_control_status(p->rst) != 0 ||
+	    !__clk_is_enabled(p->bus))
+		goto out;
 	/* No pair/controller reset, and no writes to unrelated bits. */
 	wr(p, PER, rd(p, PER) & ~BIT(0));
 	wr(p, PCGR, rd(p, PCGR) & ~BIT(0));
+out:
 	mutex_unlock(&p->lock);
 }
 static void brick_remove(struct platform_device *pdev)
@@ -238,12 +254,11 @@ static const struct of_device_id brick_match[] = {
 	{ .compatible = "allwinner,sun50i-a133-pwm" }, { }
 };
 MODULE_DEVICE_TABLE(of, brick_match);
-/* s2idle retains this driver's bus clock, oscillator and reset ownership.
- * Deep suspend and hibernation need a separate restore contract.
- */
+/* Hibernation is not a supported firmware or controller lifecycle. */
 static int brick_pm_prepare(struct device *dev)
 {
-	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
+	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ||
+	       pm_suspend_target_state == PM_SUSPEND_MEM ? 0 : -EBUSY;
 }
 static int brick_pm_suspend(struct device *dev)
 {
@@ -254,6 +269,11 @@ static int brick_pm_suspend(struct device *dev)
 	mutex_lock(&p->lock);
 	if (p->retention_fault || p->suspended) {
 		ret = p->retention_fault ? -EIO : -EBUSY;
+		goto out;
+	}
+	if (!p->bus_owned || reset_control_status(p->rst) != 0 ||
+	    !__clk_is_enabled(p->bus) || clk_get_rate(p->osc) != 24000000) {
+		ret = -EIO;
 		goto out;
 	}
 	ret = brick_guard(p);
@@ -267,10 +287,15 @@ static int brick_pm_suspend(struct device *dev)
 		ret = -EBUSY;
 		goto out;
 	}
-	p->sleep_pair = rd(p, PCCR);
-	p->sleep_ctl = rd(p, PCR);
-	p->sleep_period = rd(p, PPR);
+	if (!p->restore_pending) {
+		p->sleep_pair = rd(p, PCCR);
+		p->sleep_ctl = rd(p, PCR);
+		p->sleep_period = rd(p, PPR);
+	}
+	p->sleep_deep = pm_suspend_target_state == PM_SUSPEND_MEM;
 	p->suspended = true;
+	if (p->sleep_deep)
+		brick_bus_disable(p);
 out:
 	mutex_unlock(&p->lock);
 	return ret;
@@ -282,8 +307,17 @@ static int brick_pm_resume(struct device *dev)
 	int ret = 0;
 
 	mutex_lock(&p->lock);
+	if (p->retention_fault) {
+		ret = -EIO;
+		goto out;
+	}
 	if (!p->suspended)
 		goto out;
+	if (p->sleep_deep) {
+		ret = brick_bus_enable(p);
+		if (ret)
+			goto fault;
+	}
 	/* Check accessibility before MMIO; do not guess a lost-clock/reset
 	 * recovery sequence. A fault blocks future applies until reprobe.
 	 */
@@ -293,9 +327,24 @@ static int brick_pm_resume(struct device *dev)
 		goto fault;
 	}
 	ret = brick_guard(p);
-	if (ret || rd(p, PCCR) != p->sleep_pair ||
-	    rd(p, PCR) != p->sleep_ctl || rd(p, PPR) != p->sleep_period ||
-	    ((rd(p, PER) | rd(p, PCGR)) & BIT(0))) {
+	if (ret || ((rd(p, PER) | rd(p, PCGR)) & BIT(0)) ||
+	    (rd(p, PCR) & PERIOD_BUSY)) {
+		ret = -EIO;
+		goto fault;
+	}
+	if (p->sleep_deep) {
+		/* Stock cycles the bus then replays each channel's cached state.
+		 * Keep this disabled consumer off until its normal apply programs
+		 * PCCR/PCR/PPR and enables it after the panel. Writing PPR here can
+		 * leave PERIOD_BUSY pending on an idle channel. Never pulse output
+		 * merely to complete restoration. CCU/reset restoration must precede
+		 * this callback; no shared reset or radio clock is touched here.
+		 */
+		p->restore_pending = true;
+	} else if (!p->restore_pending &&
+		   (rd(p, PCCR) != p->sleep_pair ||
+		    rd(p, PCR) != p->sleep_ctl ||
+		    rd(p, PPR) != p->sleep_period)) {
 		ret = -EIO;
 		goto fault;
 	}
@@ -303,7 +352,7 @@ static int brick_pm_resume(struct device *dev)
 	goto out;
 fault:
 	p->retention_fault = true;
-	dev_err(dev, "PWM s2idle retention lost; output remains unavailable\n");
+	dev_err(dev, "PWM resume failed; output remains unavailable\n");
 out:
 	mutex_unlock(&p->lock);
 	return ret;
