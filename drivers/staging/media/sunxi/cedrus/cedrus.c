@@ -647,7 +647,8 @@ static const struct cedrus_variant sun50i_h5_cedrus_variant = {
  * Other codecs and linear output formats need separate qualification.
  */
 static const struct cedrus_variant sun50i_a133_cedrus_variant = {
-	.capabilities	= CEDRUS_CAPABILITY_MPEG2_DEC,
+	.capabilities	= CEDRUS_CAPABILITY_MPEG2_DEC |
+			  CEDRUS_CAPABILITY_H264_DEC,
 	.mod_rate	= 432000000,
 	.requires_iommu	= true,
 };
