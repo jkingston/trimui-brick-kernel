@@ -21,6 +21,7 @@
 #include <linux/reset.h>
 #include <linux/slab.h>
 #include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_encoder.h>
@@ -30,6 +31,7 @@
 #include <drm/drm_probe_helper.h>
 
 #include "sun4i_crtc.h"
+#include "sun4i_drv.h"
 #include "sun4i_tcon.h"
 #include "sun6i_mipi_dsi.h"
 
@@ -879,6 +881,7 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 	u16 delay;
 	int ret, cleanup;
 
+	dsi->enable_error = 0;
 	ret = sun6i_dsi_brick_stop(dsi);
 	if (ret) goto failed;
 	ret = regulator_enable(dsi->regulator);
@@ -964,6 +967,7 @@ static void sun6i_dsi_brick_enable(struct drm_encoder *encoder)
 	dsi->panel_enabled = true;
 	return;
 failed:
+	dsi->enable_error = ret;
 	cleanup = sun6i_dsi_brick_stop(dsi);
 	dev_err(dsi->dev, "experimental enable failed: %d, cleanup: %d\n",
 		ret, cleanup);
@@ -982,6 +986,7 @@ static void sun6i_dsi_encoder_enable(struct drm_encoder *encoder)
 	dsi->mode_rejected = !sun4i_tcon_mode_ready(
 		drm_crtc_to_sun4i_crtc(encoder->crtc)->tcon);
 	if (dsi->mode_rejected) {
+		dsi->enable_error = -EIO;
 		dev_err(dsi->dev, "TCON rejected mode; leaving DSI and panel untouched\n");
 		return;
 	}
@@ -1362,6 +1367,34 @@ static const struct regmap_config sun6i_dsi_regmap_config = {
 	.name		= "mipi-dsi",
 };
 
+static int sun6i_dsi_pm_suspend_late(struct device *dev);
+
+static int sun6i_dsi_deep_restore(struct device *dev)
+{
+	struct sun6i_dsi *dsi = dev_get_drvdata(dev);
+
+	/* An inactive saved CRTC need not run encoder_enable at all. */
+	dsi->enable_error = 0;
+	return 0;
+}
+
+static int sun6i_dsi_deep_result(struct device *dev)
+{
+	struct sun6i_dsi *dsi = dev_get_drvdata(dev);
+
+	if (dsi->enable_error)
+		return dsi->enable_error;
+	if (!dsi->encoder.crtc || !dsi->encoder.crtc->state->active)
+		return sun6i_dsi_pm_suspend_late(dev);
+	if (!dsi->supply_on || !dsi->reset_deasserted || !dsi->clock_on ||
+	    !dsi->phy_initialized || !dsi->phy_on || !dsi->panel_prepared ||
+	    !dsi->panel_enabled || !dsi->tcon_on || !dsi->irq_live ||
+	    !dsi->irq_bus_on || dsi->hsc_pending || !dsi->panel ||
+	    !dsi->panel->prepared || !dsi->panel->enabled)
+		return -EIO;
+	return 0;
+}
+
 static int sun6i_dsi_bind(struct device *dev, struct device *master,
 			 void *data)
 {
@@ -1408,6 +1441,15 @@ static int sun6i_dsi_bind(struct device *dev, struct device *master,
 		scrtc->external_vblank = sun6i_dsi_brick_set_vblank;
 	}
 	dsi->drm = drm;
+	if (dsi->variant->brick_experimental && of_machine_is_compatible("trimui,brick")) {
+		struct sun4i_drv *drv = drm->dev_private;
+
+		drv->sleep[SUN4I_SLEEP_OUTPUT] = (struct sun4i_sleep_client) {
+			.dev = dev, .check = sun6i_dsi_pm_suspend_late,
+			.restore = sun6i_dsi_deep_restore,
+			.result = sun6i_dsi_deep_result,
+		};
+	}
 
 	return 0;
 
@@ -1420,7 +1462,10 @@ static void sun6i_dsi_unbind(struct device *dev, struct device *master,
 			    void *data)
 {
 	struct sun6i_dsi *dsi = dev_get_drvdata(dev);
+	struct sun4i_drv *drv = dsi->drm->dev_private;
 
+	if (drv->sleep[SUN4I_SLEEP_OUTPUT].dev == dev)
+		drv->sleep[SUN4I_SLEEP_OUTPUT] = (struct sun4i_sleep_client) { };
 	dsi->drm = NULL;
 }
 
@@ -1600,8 +1645,12 @@ static int sun6i_dsi_pm_prepare(struct device *dev)
 
 	if (!dsi->variant->brick_experimental)
 		return 0;
-	/* Deep sleep also needs DE/TCON and CCU restoration. */
-	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
+	if (pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
+		return 0;
+	if (pm_suspend_target_state != PM_SUSPEND_MEM || !dsi->drm)
+		return -EOPNOTSUPP;
+	/* The master separately requires every reconstruction participant. */
+	return sun50i_a133_ccu_deep_ready();
 }
 
 static int sun6i_dsi_pm_suspend_late(struct device *dev)

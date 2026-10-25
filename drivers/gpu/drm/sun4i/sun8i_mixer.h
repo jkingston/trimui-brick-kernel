@@ -206,6 +206,7 @@ struct sun8i_mixer_cfg {
 };
 
 struct sun8i_mixer {
+	struct sun4i_drv *drv;
 	struct sunxi_engine		engine;
 
 	const struct sun8i_mixer_cfg	*cfg;

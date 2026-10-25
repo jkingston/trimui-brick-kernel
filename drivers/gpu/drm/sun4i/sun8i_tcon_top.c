@@ -13,6 +13,9 @@
 
 #include <dt-bindings/clock/sun8i-tcon-top.h>
 
+#include <drm/drm_device.h>
+
+#include "sun4i_drv.h"
 #include "sun8i_tcon_top.h"
 
 struct sun8i_tcon_top_quirks {
@@ -311,19 +314,78 @@ static void sun8i_tcon_top_fini(struct device *dev)
 	reset_control_assert(tcon_top->rst);
 }
 
+static int sun8i_tcon_top_sleep_save(struct device *dev)
+{
+	struct sun8i_tcon_top *top = dev_get_drvdata(dev);
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&top->reg_lock, flags);
+	if (readl(top->regs + TCON_TOP_GATE_SRC_REG) & BIT(TCON_TOP_TCON_DSI_GATE))
+		ret = -EBUSY;
+	top->sleep_route = readl(top->regs + TCON_TOP_PORT_SEL_REG) &
+			   TCON_TOP_PORT_DE0_MSK;
+	spin_unlock_irqrestore(&top->reg_lock, flags);
+	return ret;
+}
+
+static int sun8i_tcon_top_deep_restore(struct device *dev)
+{
+	struct sun8i_tcon_top *top = dev_get_drvdata(dev);
+	unsigned long flags;
+	u32 val;
+	int ret;
+
+	ret = reset_control_status(top->rst);
+	if (ret)
+		return ret < 0 ? ret : -EIO;
+	if (!__clk_is_enabled(top->bus))
+		return -EIO;
+	spin_lock_irqsave(&top->reg_lock, flags);
+	/* DSI has dropped its gate reference; do not revive scanout here. */
+	val = readl(top->regs + TCON_TOP_GATE_SRC_REG);
+	writel(val & ~BIT(TCON_TOP_TCON_DSI_GATE), top->regs + TCON_TOP_GATE_SRC_REG);
+	val = readl(top->regs + TCON_TOP_PORT_SEL_REG);
+	writel((val & ~TCON_TOP_PORT_DE0_MSK) | top->sleep_route,
+	       top->regs + TCON_TOP_PORT_SEL_REG);
+	ret = ((readl(top->regs + TCON_TOP_PORT_SEL_REG) & TCON_TOP_PORT_DE0_MSK) !=
+	       top->sleep_route ||
+	       (readl(top->regs + TCON_TOP_GATE_SRC_REG) & BIT(TCON_TOP_TCON_DSI_GATE))) ?
+	      -EIO : 0;
+	spin_unlock_irqrestore(&top->reg_lock, flags);
+	return ret;
+}
+
 static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
 			       void *data)
 {
 	const struct sun8i_tcon_top_quirks *quirks = of_device_get_match_data(dev);
+	struct sun4i_drv *drv = ((struct drm_device *)data)->dev_private;
+	int ret = quirks->early_clock_provider ? 0 : sun8i_tcon_top_init(dev);
 
-	return quirks->early_clock_provider ? 0 : sun8i_tcon_top_init(dev);
+	if (!ret) {
+		struct sun8i_tcon_top *top = dev_get_drvdata(dev);
+
+		top->drv = drv;
+	}
+	if (!ret && of_machine_is_compatible("trimui,brick") &&
+	    of_device_is_compatible(dev->of_node, "allwinner,sun50i-a133-tcon-top"))
+		drv->sleep[SUN4I_SLEEP_TOP] = (struct sun4i_sleep_client) {
+			.dev = dev, .save = sun8i_tcon_top_sleep_save,
+			.restore = sun8i_tcon_top_deep_restore,
+		};
+	return ret;
 }
 
 static void sun8i_tcon_top_unbind(struct device *dev, struct device *master,
 				  void *data)
 {
 	const struct sun8i_tcon_top_quirks *quirks = of_device_get_match_data(dev);
+	struct sun8i_tcon_top *top = dev_get_drvdata(dev);
+	struct sun4i_drv *drv = top->drv;
 
+	if (drv->sleep[SUN4I_SLEEP_TOP].dev == dev)
+		drv->sleep[SUN4I_SLEEP_TOP] = (struct sun4i_sleep_client) { };
 	if (!quirks->early_clock_provider)
 		sun8i_tcon_top_fini(dev);
 }

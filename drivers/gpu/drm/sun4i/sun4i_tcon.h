@@ -255,6 +255,9 @@ struct sun4i_tcon_quirks {
 
 struct sun4i_tcon {
 	bool a133_mode_valid;
+	bool sleep_irq_disabled;
+	int irq;
+	u32 sleep_dclk, sleep_phase;
 	struct device			*dev;
 	struct drm_device		*drm;
 	struct regmap			*regs;

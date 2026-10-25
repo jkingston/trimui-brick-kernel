@@ -6,6 +6,9 @@
  * Maxime Ripard <maxime.ripard@free-electrons.com>
  */
 
+#include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
+
 #include <linux/aperture.h>
 #include <linux/component.h>
 #include <linux/dma-mapping.h>
@@ -16,6 +19,7 @@
 #include <linux/platform_device.h>
 
 #include <drm/clients/drm_client_setup.h>
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_dma.h>
@@ -139,6 +143,10 @@ static void sun4i_drv_unbind(struct device *dev)
 	drm_dev_unregister(drm);
 	drm_kms_helper_poll_fini(drm);
 	drm_atomic_helper_shutdown(drm);
+	if (drm->mode_config.suspend_state) {
+		drm_atomic_commit_put(drm->mode_config.suspend_state);
+		drm->mode_config.suspend_state = NULL;
+	}
 	drm_mode_config_cleanup(drm);
 
 	component_unbind_all(dev, NULL);
@@ -346,22 +354,141 @@ static int sun4i_drv_add_endpoints(struct device *dev,
 }
 
 #ifdef CONFIG_PM_SLEEP
+static int sun4i_drv_drm_prepare(struct device *dev)
+{
+	struct drm_device *drm = dev_get_drvdata(dev);
+	struct sun4i_drv *drv = drm->dev_private;
+	unsigned int i;
+
+	if (drv->deep_suspended || READ_ONCE(drv->sleep_error))
+		return -EBUSY;
+	if (!of_machine_is_compatible("trimui,brick") ||
+	    pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
+		return 0;
+	if (pm_suspend_target_state != PM_SUSPEND_MEM)
+		return -EOPNOTSUPP;
+	/* An incomplete component graph must not silently admit deep sleep. */
+	for (i = 0; i < SUN4I_SLEEP_STAGES; i++)
+		if (!drv->sleep[i].dev || !drv->sleep[i].restore)
+			return -EOPNOTSUPP;
+	return sun50i_a133_ccu_deep_ready();
+}
+
+static int sun4i_drv_sleep_check(struct sun4i_drv *drv)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < SUN4I_SLEEP_STAGES; i++) {
+		if (!drv->sleep[i].check)
+			continue;
+		ret = drv->sleep[i].check(drv->sleep[i].dev);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 static int sun4i_drv_drm_sys_suspend(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
+	struct sun4i_drv *drv = drm->dev_private;
+	unsigned int i;
+	int ret, err;
 
-	return drm_mode_config_helper_suspend(drm);
+	ret = drm_mode_config_helper_suspend(drm);
+	if (ret || !of_machine_is_compatible("trimui,brick") ||
+	    pm_suspend_target_state != PM_SUSPEND_MEM)
+		return ret;
+	ret = sun4i_drv_sleep_check(drv);
+	for (i = 0; !ret && i < SUN4I_SLEEP_STAGES; i++)
+		if (drv->sleep[i].save)
+			ret = drv->sleep[i].save(drv->sleep[i].dev);
+	if (ret) {
+		/* The PM core will not resume a device whose suspend failed.
+		 * OUTPUT.restore only clears the previous enable result; no
+		 * register reconstruction is needed before an aborted suspend.
+		 */
+		struct sun4i_sleep_client *output = &drv->sleep[SUN4I_SLEEP_OUTPUT];
+
+		err = output->restore(output->dev);
+		if (!err)
+			err = drm_mode_config_helper_resume(drm);
+		for (i = 0; !err && i < SUN4I_SLEEP_STAGES; i++)
+			if (drv->sleep[i].result)
+				err = drv->sleep[i].result(drv->sleep[i].dev);
+		if (err) {
+			dev_err(dev, "display suspend rollback failed: %d\n", err);
+			WRITE_ONCE(drv->sleep_error, err);
+			for (i = 0; i < SUN4I_SLEEP_STAGES; i++)
+				if (drv->sleep[i].suspend)
+					drv->sleep[i].suspend(drv->sleep[i].dev);
+		}
+		return ret;
+	}
+	for (i = 0; i < SUN4I_SLEEP_STAGES; i++)
+		if (drv->sleep[i].suspend)
+			drv->sleep[i].suspend(drv->sleep[i].dev);
+	drv->deep_suspended = true;
+	return 0;
 }
 
 static int sun4i_drv_drm_sys_resume(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
+	struct sun4i_drv *drv = drm->dev_private;
+	unsigned int i;
+	int ret, err;
 
-	return drm_mode_config_helper_resume(drm);
+	if (!drv->deep_suspended)
+		return drm_mode_config_helper_resume(drm);
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		goto fault;
+	ret = sun4i_drv_sleep_check(drv);
+	if (ret)
+		goto fault;
+	/* Also runs for a blank display, and after a late suspend abort. */
+	for (i = 0; i < SUN4I_SLEEP_STAGES; i++) {
+		ret = drv->sleep[i].restore(drv->sleep[i].dev);
+		if (ret)
+			goto fault;
+	}
+	ret = drm_mode_config_helper_resume(drm);
+	if (!ret) {
+		for (i = 0; i < SUN4I_SLEEP_STAGES; i++) {
+			if (!drv->sleep[i].result)
+				continue;
+			ret = drv->sleep[i].result(drv->sleep[i].dev);
+			if (ret)
+				break;
+		}
+	}
+	if (ret) {
+		/* Stop scanout if an encoder failed after atomic state restore. */
+		err = drm_mode_config_helper_suspend(drm);
+		if (err)
+			dev_err(dev, "display resume cleanup failed: %d\n", err);
+		goto fault;
+	}
+	drv->deep_suspended = false;
+	return 0;
+fault:
+	/* PM errors do not prevent thawed userspace issuing fresh DRM ioctls.
+	 * Keep the failed device isolated until reboot.
+	 */
+	WRITE_ONCE(drv->sleep_error, ret);
+	for (i = 0; i < SUN4I_SLEEP_STAGES; i++)
+		if (drv->sleep[i].suspend)
+			drv->sleep[i].suspend(drv->sleep[i].dev);
+	return ret;
 }
 #endif
 
 static const struct dev_pm_ops sun4i_drv_drm_pm_ops = {
+#ifdef CONFIG_PM_SLEEP
+	.prepare = sun4i_drv_drm_prepare,
+#endif
 	SET_SYSTEM_SLEEP_PM_OPS(sun4i_drv_drm_sys_suspend,
 				sun4i_drv_drm_sys_resume)
 };

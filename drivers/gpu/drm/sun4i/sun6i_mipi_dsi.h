@@ -41,6 +41,7 @@ struct sun6i_dsi {
 
 	/* Paired disable must not release resources when enable was skipped. */
 	bool			mode_rejected;
+	int enable_error;
 	bool supply_on, reset_deasserted, clock_on, phy_initialized, phy_on;
 	bool panel_prepared, panel_enabled;
 	bool tcon_on, hsc_pending;

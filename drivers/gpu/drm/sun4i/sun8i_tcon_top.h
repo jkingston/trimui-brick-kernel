@@ -28,12 +28,14 @@
 #define CLK_NUM					3
 
 struct sun8i_tcon_top {
+	struct sun4i_drv *drv;
 	struct clk			*bus;
 	struct clk_hw_onecell_data	*clk_data;
 	void __iomem			*regs;
 	struct reset_control		*rst;
 
 	unsigned int			tcon_map;
+	u32 sleep_route;
 
 	/*
 	 * spinlock is used to synchronize access to same

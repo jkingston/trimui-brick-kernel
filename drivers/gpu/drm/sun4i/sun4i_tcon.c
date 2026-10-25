@@ -6,6 +6,7 @@
  * Maxime Ripard <maxime.ripard@free-electrons.com>
  */
 
+#include <linux/clk-provider.h>
 #include <linux/component.h>
 #include <linux/ioport.h>
 #include <linux/media-bus-format.h>
@@ -955,6 +956,7 @@ static int sun4i_tcon_init_irq(struct device *dev,
 	if (irq < 0)
 		return irq;
 
+	tcon->irq = irq;
 	ret = devm_request_irq(dev, irq, sun4i_tcon_handler, 0,
 			       dev_name(dev), tcon);
 	if (ret) {
@@ -1243,6 +1245,109 @@ static struct sunxi_engine *sun4i_tcon_find_engine(struct sun4i_drv *drv,
 	return sun4i_tcon_find_engine_traverse(drv, node, 0);
 }
 
+static int sun4i_tcon_sleep_save(struct device *dev)
+{
+	struct sun4i_tcon *tcon = dev_get_drvdata(dev);
+	u32 val;
+	int ret;
+
+	ret = regmap_read(tcon->regs, SUN4I_TCON0_DCLK_REG, &val);
+	if (ret)
+		return ret;
+	if (val & GENMASK(31, 28))
+		return -EBUSY;
+	tcon->sleep_dclk = val & GENMASK(6, 0);
+	ret = regmap_read(tcon->regs, SUN4I_TCON0_IO_POL_REG, &val);
+	if (ret)
+		return ret;
+	tcon->sleep_phase = val & GENMASK(29, 28);
+	return 0;
+}
+
+static void sun4i_tcon_deep_suspend(struct device *dev)
+{
+	struct sun4i_tcon *tcon = dev_get_drvdata(dev);
+
+	/* A pending IRQ must not touch registers before CCU reconstruction. */
+	if (!tcon->sleep_irq_disabled) {
+		disable_irq(tcon->irq);
+		tcon->sleep_irq_disabled = true;
+	}
+}
+
+static int sun4i_tcon_deep_restore(struct device *dev)
+{
+	struct sun4i_tcon *tcon = dev_get_drvdata(dev);
+	static const struct reg_sequence init[] = {
+		{ SUN4I_TCON_GCTL_REG, 0 }, { SUN4I_TCON_GINT0_REG, 0 },
+		{ SUN4I_TCON_GINT1_REG, 0 }, { SUN4I_TCON0_CTL_REG, 0 },
+		{ SUN4I_TCON1_CTL_REG, 0 }, { SUN4I_TCON0_IO_TRI_REG, ~0U },
+		{ SUN4I_TCON1_IO_TRI_REG, ~0U },
+	};
+	u32 val;
+	int ret;
+
+	ret = reset_control_status(tcon->lcd_rst);
+	if (ret)
+		return ret < 0 ? ret : -EIO;
+	if (!__clk_is_enabled(tcon->clk) || !__clk_is_enabled(tcon->sclk0))
+		return -EIO;
+	tcon->a133_mode_valid = false;
+	ret = regmap_multi_reg_write(tcon->regs, init, ARRAY_SIZE(init));
+	if (ret)
+		return ret;
+	/* clk_set_rate can elide a same-rate write after hardware context loss.
+	 * Restore only the local provider's saved divider/phase, with gates off.
+	 */
+	ret = regmap_update_bits(tcon->regs, SUN4I_TCON0_DCLK_REG,
+				 GENMASK(31, 28) | GENMASK(6, 0), tcon->sleep_dclk);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(tcon->regs, SUN4I_TCON0_IO_POL_REG,
+				 GENMASK(29, 28), tcon->sleep_phase);
+	if (ret)
+		return ret;
+	ret = regmap_read(tcon->regs, SUN4I_TCON0_DCLK_REG, &val);
+	if (ret)
+		return ret;
+	if ((val & (GENMASK(31, 28) | GENMASK(6, 0))) != tcon->sleep_dclk)
+		return -EIO;
+	ret = regmap_read(tcon->regs, SUN4I_TCON0_IO_POL_REG, &val);
+	if (ret)
+		return ret;
+	if ((val & GENMASK(29, 28)) != tcon->sleep_phase)
+		return -EIO;
+	if (tcon->sleep_irq_disabled) {
+		tcon->sleep_irq_disabled = false;
+		enable_irq(tcon->irq);
+	}
+	return 0;
+}
+
+static int sun4i_tcon_deep_result(struct device *dev)
+{
+	struct sun4i_tcon *tcon = dev_get_drvdata(dev);
+	bool active = tcon->crtc->crtc.state->active;
+	u32 global, channel, dclk;
+	int ret;
+
+	/* set_status is void; qualify its physical clocks/enables as well. */
+	ret = regmap_read(tcon->regs, SUN4I_TCON_GCTL_REG, &global);
+	if (ret)
+		return ret;
+	ret = regmap_read(tcon->regs, SUN4I_TCON0_CTL_REG, &channel);
+	if (ret)
+		return ret;
+	ret = regmap_read(tcon->regs, SUN4I_TCON0_DCLK_REG, &dclk);
+	if (ret)
+		return ret;
+	if (!!(global & SUN4I_TCON_GCTL_TCON_ENABLE) != active ||
+	    !!(channel & SUN4I_TCON0_CTL_TCON_ENABLE) != active ||
+	    (dclk & GENMASK(31, 28)) != (active ? GENMASK(31, 28) : 0))
+		return -EIO;
+	return active && !tcon->a133_mode_valid ? -EIO : 0;
+}
+
 static int sun4i_tcon_bind(struct device *dev, struct device *master,
 			   void *data)
 {
@@ -1422,6 +1527,13 @@ static int sun4i_tcon_bind(struct device *dev, struct device *master,
 	}
 
 	list_add_tail(&tcon->list, &drv->tcon_list);
+	if (tcon->quirks->a133_dsi_timing && of_machine_is_compatible("trimui,brick"))
+		drv->sleep[SUN4I_SLEEP_TCON] = (struct sun4i_sleep_client) {
+			.dev = dev, .save = sun4i_tcon_sleep_save,
+			.suspend = sun4i_tcon_deep_suspend,
+			.restore = sun4i_tcon_deep_restore,
+			.result = sun4i_tcon_deep_result,
+		};
 
 	return 0;
 
@@ -1437,7 +1549,10 @@ static void sun4i_tcon_unbind(struct device *dev, struct device *master,
 			      void *data)
 {
 	struct sun4i_tcon *tcon = dev_get_drvdata(dev);
+	struct sun4i_drv *drv = tcon->drm->dev_private;
 
+	if (drv->sleep[SUN4I_SLEEP_TCON].dev == dev)
+		drv->sleep[SUN4I_SLEEP_TCON] = (struct sun4i_sleep_client) { };
 	list_del(&tcon->list);
 	if (tcon->quirks->has_channel_0)
 		sun4i_dclk_free(tcon);

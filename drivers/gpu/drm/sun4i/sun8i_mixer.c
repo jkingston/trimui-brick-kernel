@@ -7,6 +7,7 @@
  *   Copyright (C) 2015 NextThing Co
  */
 
+#include <linux/clk-provider.h>
 #include <linux/component.h>
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
@@ -468,11 +469,11 @@ static int sun8i_mixer_of_get_id(struct device_node *node)
 	return of_ep.id;
 }
 
-static void sun8i_mixer_init(struct sun8i_mixer *mixer)
+static int sun8i_mixer_init(struct sun8i_mixer *mixer)
 {
 	struct regmap *top_regs, *disp_regs;
 	unsigned int base = sun8i_blender_base(mixer);
-	int plane_cnt, i;
+	int plane_cnt, i, ret;
 
 	if (mixer->cfg->de_type == SUN8I_MIXER_DE33) {
 		top_regs = mixer->top_regs;
@@ -483,33 +484,50 @@ static void sun8i_mixer_init(struct sun8i_mixer *mixer)
 	}
 
 	/* Enable the mixer */
-	regmap_write(top_regs, SUN8I_MIXER_GLOBAL_CTL,
-		     SUN8I_MIXER_GLOBAL_CTL_RT_EN);
+	ret = regmap_write(top_regs, SUN8I_MIXER_GLOBAL_CTL,
+			   SUN8I_MIXER_GLOBAL_CTL_RT_EN);
+	if (ret)
+		return ret;
 
-	if (mixer->cfg->de_type == SUN8I_MIXER_DE33)
-		regmap_write(top_regs, SUN50I_MIXER_GLOBAL_CLK, 1);
+	if (mixer->cfg->de_type == SUN8I_MIXER_DE33) {
+		ret = regmap_write(top_regs, SUN50I_MIXER_GLOBAL_CLK, 1);
+		if (ret)
+			return ret;
+	}
 
 	/* Set background color to black */
-	regmap_write(disp_regs, SUN8I_MIXER_BLEND_BKCOLOR(base),
-		     SUN8I_MIXER_BLEND_COLOR_BLACK);
+	ret = regmap_write(disp_regs, SUN8I_MIXER_BLEND_BKCOLOR(base),
+			   SUN8I_MIXER_BLEND_COLOR_BLACK);
+	if (ret)
+		return ret;
 
 	/*
 	 * Set fill color of bottom plane to black. Generally not needed
 	 * except when VI plane is at bottom (zpos = 0) and enabled.
 	 */
-	regmap_write(disp_regs, SUN8I_MIXER_BLEND_PIPE_CTL(base),
-		     SUN8I_MIXER_BLEND_PIPE_CTL_FC_EN(0));
-	regmap_write(disp_regs, SUN8I_MIXER_BLEND_ATTR_FCOLOR(base, 0),
-		     SUN8I_MIXER_BLEND_COLOR_BLACK);
+	ret = regmap_write(disp_regs, SUN8I_MIXER_BLEND_PIPE_CTL(base),
+			   SUN8I_MIXER_BLEND_PIPE_CTL_FC_EN(0));
+	if (ret)
+		return ret;
+	ret = regmap_write(disp_regs, SUN8I_MIXER_BLEND_ATTR_FCOLOR(base, 0),
+			   SUN8I_MIXER_BLEND_COLOR_BLACK);
+	if (ret)
+		return ret;
 
 	plane_cnt = mixer->cfg->vi_num + mixer->cfg->ui_num;
-	for (i = 0; i < plane_cnt; i++)
-		regmap_write(disp_regs,
-			     SUN8I_MIXER_BLEND_MODE(base, i),
-			     SUN8I_MIXER_BLEND_MODE_DEF);
+	for (i = 0; i < plane_cnt; i++) {
+		ret = regmap_write(disp_regs,
+				   SUN8I_MIXER_BLEND_MODE(base, i),
+				   SUN8I_MIXER_BLEND_MODE_DEF);
+		if (ret)
+			return ret;
+	}
 
-	regmap_update_bits(disp_regs, SUN8I_MIXER_BLEND_PIPE_CTL(base),
-			   SUN8I_MIXER_BLEND_PIPE_CTL_EN_MSK, 0);
+	ret = regmap_update_bits(disp_regs, SUN8I_MIXER_BLEND_PIPE_CTL(base),
+				 SUN8I_MIXER_BLEND_PIPE_CTL_EN_MSK, 0);
+	if (ret)
+		return ret;
+	return 0;
 }
 
 /* The Brick maps SRAM C to DE and enables the DE-local
@@ -557,6 +575,40 @@ out:
 	return ret;
 }
 
+static int sun8i_mixer_deep_restore(struct device *dev)
+{
+	struct sun8i_mixer *mixer = dev_get_drvdata(dev);
+	static const struct reg_sequence disable[] = {
+		{ SUN8I_MIXER_FCE_EN, 0 }, { SUN8I_MIXER_BWS_EN, 0 },
+		{ SUN8I_MIXER_LTI_EN, 0 }, { SUN8I_MIXER_PEAK_EN, 0 },
+		{ SUN8I_MIXER_ASE_EN, 0 }, { SUN8I_MIXER_FCC_EN, 0 },
+		{ SUN8I_MIXER_DCSC_EN, 0 },
+	};
+	unsigned int i;
+	int ret;
+
+	ret = reset_control_status(mixer->reset);
+	if (ret)
+		return ret < 0 ? ret : -EIO;
+	if (!__clk_is_enabled(mixer->bus_clk) ||
+	    !__clk_is_enabled(mixer->mod_clk))
+		return -EIO;
+	ret = sun8i_mixer_brick_de_init(dev);
+	if (ret)
+		return ret;
+	/* Same DE2 defaults as bind; atomic restore reapplies planes/scalers. */
+	for (i = 0; i < DE2_MIXER_UNIT_SIZE; i += 4) {
+		ret = regmap_write(mixer->engine.regs, i, 0);
+		if (ret)
+			return ret;
+	}
+	ret = regmap_multi_reg_write(mixer->engine.regs, disable,
+				     ARRAY_SIZE(disable));
+	if (ret)
+		return ret;
+	return sun8i_mixer_init(mixer);
+}
+
 static int sun8i_mixer_bind(struct device *dev, struct device *master,
 			      void *data)
 {
@@ -584,6 +636,7 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 	if (!mixer)
 		return -ENOMEM;
 	dev_set_drvdata(dev, mixer);
+	mixer->drv = drv;
 	mixer->engine.ops = &sun8i_engine_ops;
 	mixer->engine.node = dev->of_node;
 
@@ -702,7 +755,6 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 		goto err_disable_bus_clk;
 	}
 
-	list_add_tail(&mixer->engine.list, &drv->engine_list);
 
 	/* Reset registers and disable unused sub-engines */
 	if (mixer->cfg->de_type == SUN8I_MIXER_DE3) {
@@ -732,7 +784,17 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 		regmap_write(mixer->engine.regs, SUN8I_MIXER_DCSC_EN, 0);
 	}
 
-	sun8i_mixer_init(mixer);
+	ret = sun8i_mixer_init(mixer);
+	if (ret) {
+		clk_disable_unprepare(mixer->mod_clk);
+		goto err_disable_bus_clk;
+	}
+	list_add_tail(&mixer->engine.list, &drv->engine_list);
+	if (of_machine_is_compatible("trimui,brick") &&
+	    of_device_is_compatible(dev->of_node, "allwinner,sun50i-a133-de2-mixer-0"))
+		drv->sleep[SUN4I_SLEEP_ENGINE] = (struct sun4i_sleep_client) {
+			.dev = dev, .restore = sun8i_mixer_deep_restore,
+		};
 
 	return 0;
 
@@ -747,7 +809,10 @@ static void sun8i_mixer_unbind(struct device *dev, struct device *master,
 				 void *data)
 {
 	struct sun8i_mixer *mixer = dev_get_drvdata(dev);
+	struct sun4i_drv *drv = mixer->drv;
 
+	if (drv->sleep[SUN4I_SLEEP_ENGINE].dev == dev)
+		drv->sleep[SUN4I_SLEEP_ENGINE] = (struct sun4i_sleep_client) { };
 	list_del(&mixer->engine.list);
 
 	clk_disable_unprepare(mixer->mod_clk);

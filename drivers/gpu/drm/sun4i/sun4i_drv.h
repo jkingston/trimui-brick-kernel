@@ -13,7 +13,12 @@
 #include <linux/list.h>
 #include <linux/regmap.h>
 
+#include "sun4i_sleep.h"
+
 struct sun4i_drv {
+	struct sun4i_sleep_client sleep[SUN4I_SLEEP_STAGES];
+	bool deep_suspended;
+	int sleep_error;
 	struct list_head	engine_list;
 	struct list_head	frontend_list;
 	struct list_head	tcon_list;

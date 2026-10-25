@@ -14,9 +14,26 @@
 #include "sun4i_drv.h"
 #include "sun4i_framebuffer.h"
 
+static int sun4i_atomic_check(struct drm_device *drm, struct drm_atomic_commit *state)
+{
+	struct sun4i_drv *drv = drm->dev_private;
+	int ret = READ_ONCE(drv->sleep_error);
+
+	return ret ?: drm_atomic_helper_check(drm, state);
+}
+
+static int sun4i_atomic_commit(struct drm_device *drm,
+			       struct drm_atomic_commit *state, bool nonblock)
+{
+	struct sun4i_drv *drv = drm->dev_private;
+	int ret = READ_ONCE(drv->sleep_error);
+
+	return ret ?: drm_atomic_helper_commit(drm, state, nonblock);
+}
+
 static const struct drm_mode_config_funcs sun4i_de_mode_config_funcs = {
-	.atomic_check		= drm_atomic_helper_check,
-	.atomic_commit		= drm_atomic_helper_commit,
+	.atomic_check		= sun4i_atomic_check,
+	.atomic_commit		= sun4i_atomic_commit,
 	.fb_create		= drm_gem_fb_create,
 };
 

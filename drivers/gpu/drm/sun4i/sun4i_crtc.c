@@ -168,6 +168,10 @@ static const struct drm_crtc_helper_funcs sun4i_crtc_helper_funcs = {
 static int sun4i_crtc_enable_vblank(struct drm_crtc *crtc)
 {
 	struct sun4i_crtc *scrtc = drm_crtc_to_sun4i_crtc(crtc);
+	struct sun4i_drv *drv = crtc->dev->dev_private;
+
+	if (READ_ONCE(drv->sleep_error))
+		return -EIO;
 
 	DRM_DEBUG_DRIVER("Enabling VBLANK on crtc %p\n", crtc);
 
@@ -184,6 +188,10 @@ static int sun4i_crtc_enable_vblank(struct drm_crtc *crtc)
 static void sun4i_crtc_disable_vblank(struct drm_crtc *crtc)
 {
 	struct sun4i_crtc *scrtc = drm_crtc_to_sun4i_crtc(crtc);
+	struct sun4i_drv *drv = crtc->dev->dev_private;
+
+	if (READ_ONCE(drv->sleep_error))
+		return;
 
 	DRM_DEBUG_DRIVER("Disabling VBLANK on crtc %p\n", crtc);
 
