@@ -350,6 +350,9 @@ int PVRSRVDeviceInit(PVRSRV_DEVICE_NODE *psDeviceNode)
 */ /***************************************************************************/
 void PVRSRVDeviceDeinit(PVRSRV_DEVICE_NODE *psDeviceNode)
 {
+	if (psDeviceNode->psDevConfig->pfnClockPolicy)
+		psDeviceNode->psDevConfig->pfnClockPolicy(
+			psDeviceNode->psDevConfig->hSysData, IMG_FALSE);
 #if defined(SUPPORT_RGX)
 	PVRGpuTraceDeInitDevice(psDeviceNode);
 #endif
@@ -381,6 +384,10 @@ void PVRSRVDeviceShutdown(struct drm_device *psDev)
 {
 	struct pvr_drm_private *psDevPriv = psDev->dev_private;
 	PVRSRV_DEVICE_NODE *psDeviceNode = psDevPriv->dev_node;
+
+	if (psDeviceNode->psDevConfig->pfnClockPolicy)
+		psDeviceNode->psDevConfig->pfnClockPolicy(
+			psDeviceNode->psDevConfig->hSysData, IMG_FALSE);
 
 	/* Since this is a shutdown request ignore the returned error and try to
 	 * to power off the device. This is done because there is no way of

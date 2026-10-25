@@ -47,6 +47,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/clk.h>
+#include <linux/devfreq.h>
+#include <linux/pm_opp.h>
+#include "pvr_drv.h"
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/of.h>
@@ -166,6 +169,13 @@ enum sunxi_sleep_phase { SUNXI_AWAKE, SUNXI_SUSPENDING, SUNXI_ASLEEP,
 	SUNXI_RESUMING, SUNXI_SLEEP_FAULT };
 struct sunxi_gpu {
 	struct mutex irq_lock;
+	struct mutex policy_lock;
+	struct devfreq *devfreq;
+	struct devfreq_dev_profile profile;
+	unsigned int policy_opps;
+	bool policy_stopping;
+	bool policy_suspended;
+	bool policy_broken;
 	struct sunxi_irq_owner irq_owner;
 	struct stop_evidence stop;
 	bool transition_fault;
@@ -325,12 +335,16 @@ static IMG_BOOL sunxi_power_fault(IMG_HANDLE handle)
  * Failed stop/start is not reversible by replaying a platform callback: retain
  * blocked clients and the existing sticky GPU-access gate until reboot.
  */
+static int sunxi_policy_sleep(struct sunxi_gpu *gpu, bool suspend);
+
 static PVRSRV_ERROR sunxi_system_sleep(IMG_HANDLE handle, IMG_BOOL suspend,
 	IMG_BOOL complete, PVRSRV_ERROR result)
 {
 	struct sunxi_gpu *gpu = handle;
 	bool fault = false;
 
+	if (!complete && suspend && sunxi_policy_sleep(gpu, true))
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 	mutex_lock(&gpu->irq_lock);
 	if (!complete) {
 		if (sunxi_power_fault(gpu) ||
@@ -361,6 +375,12 @@ static PVRSRV_ERROR sunxi_system_sleep(IMG_HANDLE handle, IMG_BOOL suspend,
 		}
 		mutex_unlock(&gpu->irq_lock);
 	}
+	/* Failed admission leaves the original awake policy usable. */
+	if ((!complete && suspend && result != PVRSRV_OK &&
+	     READ_ONCE(gpu->sleep_phase) == SUNXI_AWAKE) ||
+	    (complete && !suspend && result == PVRSRV_OK))
+		if (sunxi_policy_sleep(gpu, false))
+			return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 	return result;
 }
 
@@ -421,6 +441,158 @@ static PVRSRV_ERROR sunxi_set_fixed_rail_clock(IMG_HANDLE data, IMG_UINT32 rate)
 		return PVRSRV_ERROR_INVALID_PARAMS;
 	return PVRSRVDeviceClockSpeedChangeChecked(gpu->config.psDevNode,
 		sunxi_clock_prepare, sunxi_clock_apply, sunxi_clock_fault, &change);
+}
+
+/* Fixed rails: these are DFS divisors, not voltage OPPs. Rates are exact Hz. */
+static unsigned long sunxi_policy_rates[] = {
+	570375000, 614250000, 658125000, 702000000,
+};
+
+static struct sunxi_gpu *sunxi_policy_gpu(struct device *dev)
+{
+	struct drm_device *drm = dev_get_drvdata(dev);
+	struct pvr_drm_private *priv = drm->dev_private;
+
+	return priv->dev_node->psDevConfig->hSysData;
+}
+
+static int sunxi_policy_target(struct device *dev, unsigned long *rate, u32 flags)
+{
+	struct sunxi_gpu *gpu = sunxi_policy_gpu(dev);
+	unsigned int i;
+	int ret = 0;
+
+	/* Match devfreq's ceil/floor convention without constructing voltage OPPs. */
+	if (flags & DEVFREQ_FLAG_LEAST_UPPER_BOUND) {
+		for (i = ARRAY_SIZE(sunxi_policy_rates) - 1; i > 0; i--)
+			if (sunxi_policy_rates[i] <= *rate)
+				break;
+	} else {
+		for (i = 0; i < ARRAY_SIZE(sunxi_policy_rates) - 1; i++)
+			if (sunxi_policy_rates[i] >= *rate)
+				break;
+	}
+	mutex_lock(&gpu->policy_lock);
+	if (gpu->policy_stopping || gpu->policy_suspended)
+		ret = -EBUSY;
+	else if (sunxi_power_fault(gpu))
+		ret = -EIO;
+	else if (READ_ONCE(gpu->sleep_phase) != SUNXI_AWAKE)
+		ret = -EBUSY;
+	else if (READ_ONCE(gpu->timing.ui32CoreClockSpeed) != sunxi_policy_rates[i] &&
+		 gpu->config.pfnSetFixedRailClock(gpu, sunxi_policy_rates[i]) != PVRSRV_OK)
+		ret = sunxi_power_fault(gpu) ? -EIO : -EBUSY;
+	if (!ret)
+		*rate = READ_ONCE(gpu->timing.ui32CoreClockSpeed);
+	mutex_unlock(&gpu->policy_lock);
+	return ret;
+}
+
+static int sunxi_policy_current(struct device *dev, unsigned long *rate)
+{
+	struct sunxi_gpu *gpu = sunxi_policy_gpu(dev);
+	int ret = 0;
+
+	mutex_lock(&gpu->policy_lock);
+	if (gpu->policy_stopping || sunxi_power_fault(gpu))
+		ret = -EIO;
+	else
+		*rate = READ_ONCE(gpu->timing.ui32CoreClockSpeed);
+	mutex_unlock(&gpu->policy_lock);
+	return ret;
+}
+
+static int sunxi_policy_status(struct device *dev, struct devfreq_dev_status *status)
+{
+	/* No validated utilization counter: do not fabricate ondemand load. */
+	return -EOPNOTSUPP;
+}
+
+static int sunxi_policy_sleep(struct sunxi_gpu *gpu, bool suspend)
+{
+	int ret;
+
+	if (!gpu->devfreq)
+		return 0;
+	mutex_lock(&gpu->policy_lock);
+	if (gpu->policy_broken) {
+		mutex_unlock(&gpu->policy_lock);
+		return -EIO;
+	}
+	if (gpu->policy_suspended == suspend) {
+		mutex_unlock(&gpu->policy_lock);
+		return 0;
+	}
+	gpu->policy_suspended = suspend;
+	mutex_unlock(&gpu->policy_lock);
+	/* No policy lock held: devfreq takes its lock before target(). */
+	ret = suspend ? devfreq_suspend_device(gpu->devfreq) :
+		devfreq_resume_device(gpu->devfreq);
+	if (ret) {
+		mutex_lock(&gpu->policy_lock);
+		gpu->policy_suspended = true;
+		gpu->policy_broken = true;
+		mutex_unlock(&gpu->policy_lock);
+		/* Governor failure has no reliable restart contract. */
+		sunxi_latch_fault(gpu, ret);
+	}
+	return ret;
+}
+
+static void sunxi_clock_policy(IMG_HANDLE data, IMG_BOOL start)
+{
+	struct sunxi_gpu *gpu = data;
+	unsigned int i;
+	int ret;
+
+	if (!start) {
+		mutex_lock(&gpu->policy_lock);
+		gpu->policy_stopping = true;
+		mutex_unlock(&gpu->policy_lock);
+		if (gpu->devfreq) {
+			devfreq_remove_device(gpu->devfreq);
+			gpu->devfreq = NULL;
+		}
+		while (gpu->policy_opps)
+			dev_pm_opp_remove(gpu->dev,
+				sunxi_policy_rates[--gpu->policy_opps]);
+		return;
+	}
+	if (gpu->devfreq || gpu->policy_stopping)
+		return;
+	/* Never adopt and subsequently remove another provider's OPP entries. */
+	if (dev_pm_opp_get_opp_count(gpu->dev) > 0) {
+		dev_warn(gpu->dev, "fixed-rail policy requires an unowned OPP table\n");
+		return;
+	}
+	/* The core needs OPP frequency bounds even with a supplied table.
+	 * Zero voltage is metadata only: this policy never calls opp_set_rate.
+	 */
+	for (i = 0; i < ARRAY_SIZE(sunxi_policy_rates); i++) {
+		ret = dev_pm_opp_add(gpu->dev, sunxi_policy_rates[i], 0);
+		if (ret)
+			goto remove_opps;
+		gpu->policy_opps++;
+	}
+	gpu->profile.initial_freq = READ_ONCE(gpu->timing.ui32CoreClockSpeed);
+	gpu->profile.target = sunxi_policy_target;
+	gpu->profile.get_cur_freq = sunxi_policy_current;
+	gpu->profile.get_dev_status = sunxi_policy_status;
+	gpu->profile.freq_table = sunxi_policy_rates;
+	gpu->profile.max_state = ARRAY_SIZE(sunxi_policy_rates);
+	gpu->devfreq = devfreq_add_device(gpu->dev, &gpu->profile,
+					 "performance", NULL);
+	if (IS_ERR(gpu->devfreq)) {
+		dev_warn(gpu->dev, "fixed-rail clock policy unavailable: %ld\n",
+			 PTR_ERR(gpu->devfreq));
+		gpu->devfreq = NULL;
+		goto remove_opps;
+	}
+	return;
+remove_opps:
+	while (gpu->policy_opps)
+		dev_pm_opp_remove(gpu->dev,
+			sunxi_policy_rates[--gpu->policy_opps]);
 }
 
 static bool sunxi_sleep_retained(struct sunxi_gpu *gpu)
@@ -613,6 +785,7 @@ PVRSRV_ERROR SysDevInit(void *osdev, PVRSRV_DEVICE_CONFIG **result)
 		return PVRSRV_ERROR_OUT_OF_MEMORY;
 	gpu->dev = dev;
 	mutex_init(&gpu->irq_lock);
+	mutex_init(&gpu->policy_lock);
 	gpu->irq_owner.gpu = gpu;
 	gpu->core = of_clk_get_by_name(dev->of_node, "core");
 	if (IS_ERR(gpu->core))
@@ -678,6 +851,7 @@ PVRSRV_ERROR SysDevInit(void *osdev, PVRSRV_DEVICE_CONFIG **result)
 	gpu->config.pfnGpuPowerFault = sunxi_power_fault;
 	gpu->config.pfnSystemSleep = sunxi_system_sleep;
 	gpu->config.pfnSetFixedRailClock = sunxi_set_fixed_rail_clock;
+	gpu->config.pfnClockPolicy = sunxi_clock_policy;
 	gpu->config.pfnPrePowerState = sunxi_pre_power;
 	gpu->config.pfnPostPowerState = sunxi_post_power;
 	gpu->config.pfnSysDevFeatureDepInit = feature_init;

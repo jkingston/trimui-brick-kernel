@@ -3,6 +3,8 @@ config DRM_IMG_ROGUE
 	tristate "PowerVR GE8300 vendor driver for Allwinner A133"
 	depends on DRM && ARM64 && ARCH_SUNXI
 	select FW_LOADER
+	select PM_DEVFREQ
+	select DEVFREQ_GOV_PERFORMANCE
 	help
 	  Vendor DDK 1.19 driver for the GE8300 (BVNC 22.102.54.38).
 	  Requires matching firmware and userspace libraries.

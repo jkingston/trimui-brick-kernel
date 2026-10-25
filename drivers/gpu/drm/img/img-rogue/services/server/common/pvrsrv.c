@@ -2279,6 +2279,9 @@ PVRSRV_ERROR PVRSRVCommonDeviceDestroy(PVRSRV_DEVICE_NODE *psDeviceNode)
 
 	MULTI_DEVICE_BRINGUP_DPF("PVRSRVCommonDeviceDestroy: DevId %d", psDeviceNode->sDevId.i32KernelDeviceID);
 
+	if (psDeviceNode->psDevConfig->pfnClockPolicy)
+		psDeviceNode->psDevConfig->pfnClockPolicy(
+			psDeviceNode->psDevConfig->hSysData, IMG_FALSE);
 	psDeviceNode->eDevState = PVRSRV_DEVICE_STATE_DEINIT;
 
 #if defined(SUPPORT_LINUX_DVFS) && !defined(NO_HARDWARE)
@@ -2587,6 +2590,9 @@ PVRSRV_ERROR PVRSRVDeviceFinalise(PVRSRV_DEVICE_NODE *psDeviceNode,
 #endif /* defined(SUPPORT_RGX) */
 		/* Now that the device(s) are fully initialised set them as active */
 		psDeviceNode->eDevState = PVRSRV_DEVICE_STATE_ACTIVE;
+		if (psDeviceNode->psDevConfig->pfnClockPolicy)
+			psDeviceNode->psDevConfig->pfnClockPolicy(
+				psDeviceNode->psDevConfig->hSysData, IMG_TRUE);
 		eError = PVRSRV_OK;
 	}
 	else
