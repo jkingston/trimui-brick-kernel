@@ -474,7 +474,7 @@ struct ce_hash_request {
 	struct ahash_request fallback;
 };
 
-static struct ahash_request *ce_hash_fallback(struct ahash_request *req)
+static struct ahash_request *ce_hash_fallback(struct ahash_request *req, bool input)
 {
 	struct ce_hash_tfm *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(req));
 	struct ce_hash_request *rctx = ahash_request_ctx(req);
@@ -483,7 +483,12 @@ static struct ahash_request *ce_hash_fallback(struct ahash_request *req)
 	ahash_request_set_tfm(fb, ctx->fallback);
 	ahash_request_set_callback(fb, req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP,
 				   NULL, NULL);
-	ahash_request_set_crypt(fb, req->src, rctx->digest, req->nbytes);
+	if (!input)
+		ahash_request_set_crypt(fb, NULL, rctx->digest, 0);
+	else if (ahash_request_isvirt(req))
+		ahash_request_set_virt(fb, req->svirt, rctx->digest, req->nbytes);
+	else
+		ahash_request_set_crypt(fb, req->src, rctx->digest, req->nbytes);
 	return fb;
 }
 
@@ -499,32 +504,32 @@ static int ce_hash_commit(struct ahash_request *req, int ret)
 
 static int ce_hash_init(struct ahash_request *req)
 {
-	return crypto_ahash_init(ce_hash_fallback(req));
+	return crypto_ahash_init(ce_hash_fallback(req, false));
 }
 
 static int ce_hash_update(struct ahash_request *req)
 {
-	return crypto_ahash_update(ce_hash_fallback(req));
+	return crypto_ahash_update(ce_hash_fallback(req, true));
 }
 
 static int ce_hash_final(struct ahash_request *req)
 {
-	return ce_hash_commit(req, crypto_ahash_final(ce_hash_fallback(req)));
+	return ce_hash_commit(req, crypto_ahash_final(ce_hash_fallback(req, false)));
 }
 
 static int ce_hash_finup(struct ahash_request *req)
 {
-	return ce_hash_commit(req, crypto_ahash_finup(ce_hash_fallback(req)));
+	return ce_hash_commit(req, crypto_ahash_finup(ce_hash_fallback(req, true)));
 }
 
 static int ce_hash_export(struct ahash_request *req, void *out)
 {
-	return crypto_ahash_export(ce_hash_fallback(req), out);
+	return crypto_ahash_export(ce_hash_fallback(req, false), out);
 }
 
 static int ce_hash_import(struct ahash_request *req, const void *in)
 {
-	return crypto_ahash_import(ce_hash_fallback(req), in);
+	return crypto_ahash_import(ce_hash_fallback(req, false), in);
 }
 
 static void ce_hash_work(struct work_struct *work)
@@ -543,10 +548,14 @@ static void ce_hash_work(struct work_struct *work)
 		goto unlock;
 	}
 	prepared = true;
-	if (req->nbytes && sg_copy_to_buffer(req->src, sg_nents(req->src),
-					  s->input, req->nbytes) != req->nbytes) {
-		ret = -EINVAL;
-		goto unlock;
+	if (req->nbytes) {
+		if (ahash_request_isvirt(req)) {
+			memcpy(s->input, req->svirt, req->nbytes);
+		} else if (sg_copy_to_buffer(req->src, sg_nents(req->src),
+					     s->input, req->nbytes) != req->nbytes) {
+			ret = -EINVAL;
+			goto unlock;
+		}
 	}
 	ret = ce_encode_sha256(s, flow->dma, flow->index, req->nbytes);
 	if (!ret)
@@ -575,11 +584,12 @@ static int ce_hash_digest(struct ahash_request *req)
 	unsigned int flow;
 	int ret = -EINPROGRESS;
 
-	if (req->nbytes && sg_nents_for_len(req->src, req->nbytes) < 0)
+	if (req->nbytes && !ahash_request_isvirt(req) &&
+	    sg_nents_for_len(req->src, req->nbytes) < 0)
 		return -EINVAL;
 	/* This fallback cannot submit DMA or asynchronously retain the request. */
 	if (req->nbytes > 65408)
-		return ce_hash_commit(req, crypto_ahash_digest(ce_hash_fallback(req)));
+		return ce_hash_commit(req, crypto_ahash_digest(ce_hash_fallback(req, true)));
 	spin_lock_irqsave(&ce->irq_lock, flags);
 	if (ce->stopping || READ_ONCE(ce->recovery.dead)) {
 		ret = -ENODEV;
@@ -637,7 +647,8 @@ static struct ahash_alg hash_algorithm = {
 		.base = {
 			.cra_name = "sha256", .cra_driver_name = "sha256-a133-ce",
 			.cra_priority = 300,
-			.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK,
+			.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK |
+				     CRYPTO_ALG_REQ_VIRT,
 			.cra_blocksize = SHA256_BLOCK_SIZE,
 			.cra_ctxsize = sizeof(struct ce_hash_tfm),
 			.cra_module = THIS_MODULE,
