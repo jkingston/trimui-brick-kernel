@@ -35,7 +35,7 @@ static void rotate_a133_release(struct kref *ref)
 	kfree(dev);
 }
 
-static void rotate_a133_put(void *data)
+void rotate_a133_put(void *data)
 {
 	struct rotate_dev *dev = data;
 
@@ -219,16 +219,11 @@ static void rotate_a133_enable(struct rotate_dev *dev)
 	writel(BIT(1), dev->top + 8);
 }
 
-static void rotate_a133_work(struct work_struct *work)
+void rotate_a133_begin(struct rotate_dev *dev, bool mixer)
 {
-	struct rotate_dev *dev = container_of(work, struct rotate_dev, work);
-	struct rotate_ctx *ctx = dev->job;
-	struct vb2_v4l2_buffer *src, *dst;
-	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
-
 	/* Drain the previous ISR before changing the engine it may access. */
 	disable_irq(dev->irq);
-	dev->mixer_job = rotate_uses_mixer(ctx);
+	dev->mixer_job = mixer;
 	/* Shared block, serialized jobs: clear stale state in both sub-engines. */
 	writel(0, dev->top + 8);
 	writel(dev->mixer_job ? BIT(0) : BIT(1), dev->top);
@@ -240,7 +235,10 @@ static void rotate_a133_work(struct work_struct *work)
 	else
 		rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
 	enable_irq(dev->irq);
-	rotate_program(ctx);
+}
+
+enum vb2_buffer_state rotate_a133_wait(struct rotate_dev *dev)
+{
 	if (!wait_for_completion_timeout(&dev->complete, msecs_to_jiffies(500))) {
 		/* Never return DMA buffers until reset has contained a timed-out job. */
 		disable_irq(dev->irq);
@@ -249,10 +247,25 @@ static void rotate_a133_work(struct work_struct *work)
 		if (reset_control_deassert(dev->rstc))
 			panic("A133 G2D: cannot recover reset");
 		rotate_a133_enable(dev);
+		dev->mixer_job = false;
 		rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
 		enable_irq(dev->irq);
-		state = VB2_BUF_STATE_ERROR;
+		return VB2_BUF_STATE_ERROR;
 	}
+
+	return VB2_BUF_STATE_DONE;
+}
+
+static void rotate_a133_work(struct work_struct *work)
+{
+	struct rotate_dev *dev = container_of(work, struct rotate_dev, work);
+	struct rotate_ctx *ctx = dev->job;
+	struct vb2_v4l2_buffer *src, *dst;
+	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
+
+	rotate_a133_begin(dev, rotate_uses_mixer(ctx));
+	rotate_program(ctx);
+	state = rotate_a133_wait(dev);
 
 	src = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
 	dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
@@ -677,6 +690,9 @@ static int rotate_start_streaming(struct vb2_queue *vq, unsigned int count)
 	struct rotate_ctx *owner = vb2_get_drv_priv(vq);
 	int error = owner->dev->resume_failed ? -EIO : rotate_check_csc(owner);
 
+	if (owner->dev->compose_active)
+		error = -EBUSY;
+
 	if (error) {
 		rotate_queue_cleanup(vq, VB2_BUF_STATE_QUEUED);
 		return error;
@@ -854,7 +870,7 @@ static int rotate_open(struct file *file)
 	if (mutex_lock_interruptible(&dev->dev_mutex))
 		return -ERESTARTSYS;
 
-	if (dev->removing) {
+	if (dev->removing || (dev->a133 && !dev->ready)) {
 		mutex_unlock(&dev->dev_mutex);
 		return -ENODEV;
 	}
@@ -923,7 +939,7 @@ static int rotate_release(struct file *file)
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_fh_exit(&ctx->fh);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
-	if (dev->a133 && !dev->removing && !dev->resume_failed)
+	if (dev->a133 && !dev->removing && !dev->resume_failed && !dev->compose_active)
 		v4l2_m2m_resume(dev->m2m_dev);
 
 	kfree(ctx);
@@ -1068,8 +1084,20 @@ static int rotate_probe(struct platform_device *pdev)
 	if (dev->a133)
 		kref_get(&dev->ref);
 	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
-	if (!ret)
-		return 0;
+	if (!ret) {
+		if (!dev->a133)
+			return 0;
+		ret = sun50i_g2d_comp_register(dev);
+		if (!ret) {
+			mutex_lock(&dev->dev_mutex);
+			dev->ready = true;
+			mutex_unlock(&dev->dev_mutex);
+			return 0;
+		}
+		video_unregister_device(vfd);
+		pm_runtime_disable(dev->dev);
+		goto err_v4l2;
+	}
 
 	pm_runtime_disable(dev->dev);
 	if (dev->a133)
@@ -1089,6 +1117,7 @@ static void rotate_remove(struct platform_device *pdev)
 	if (dev->a133) {
 		mutex_lock(&dev->dev_mutex);
 		dev->removing = true;
+		sun50i_g2d_comp_unregister(dev);
 		video_unregister_device(&dev->vfd);
 		v4l2_m2m_suspend(dev->m2m_dev);
 		flush_work(&dev->work);
@@ -1140,6 +1169,7 @@ static int rotate_runtime_resume(struct device *device)
 
 	if (dev->a133) {
 		rotate_a133_enable(dev);
+		dev->mixer_job = false;
 		rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
 		enable_irq(dev->irq);
 	}
@@ -1191,9 +1221,13 @@ static int rotate_suspend(struct device *device)
 	if (!dev->a133)
 		return 0;
 	v4l2_m2m_suspend(dev->m2m_dev);
+	sun50i_g2d_comp_pause(dev, true);
 	ret = pm_runtime_force_suspend(device);
-	if (ret)
-		v4l2_m2m_resume(dev->m2m_dev);
+	if (ret) {
+		sun50i_g2d_comp_pause(dev, false);
+		if (!dev->compose_active)
+			v4l2_m2m_resume(dev->m2m_dev);
+	}
 	return ret;
 }
 
@@ -1209,8 +1243,11 @@ static int rotate_resume(struct device *device)
 	ret = pm_runtime_force_resume(device);
 	if (ret)
 		dev->resume_failed = true;
-	else
-		v4l2_m2m_resume(dev->m2m_dev);
+	else {
+		sun50i_g2d_comp_pause(dev, false);
+		if (!dev->compose_active)
+			v4l2_m2m_resume(dev->m2m_dev);
+	}
 	return ret;
 }
 
@@ -1221,6 +1258,7 @@ static void rotate_shutdown(struct platform_device *pdev)
 	if (dev->a133) {
 		v4l2_m2m_suspend(dev->m2m_dev);
 		flush_work(&dev->work);
+		sun50i_g2d_comp_pause(dev, true);
 		if (pm_runtime_force_suspend(&pdev->dev))
 			panic("A133 G2D: cannot quiesce shutdown");
 	}

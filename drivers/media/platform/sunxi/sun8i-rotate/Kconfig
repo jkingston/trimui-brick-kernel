@@ -9,9 +9,13 @@ config VIDEO_SUN8I_ROTATE
 	depends on PM
 	select VIDEOBUF2_DMA_CONTIG
 	select V4L2_MEM2MEM_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
 	help
 	   Support for the Allwinner DE2 and A133 G2D rotation units.
 	   A133 also supports RGB/YUV scaling and format conversion, with
 	   BT.601/709 limited-range YUV to/from full-range RGB conversion.
-	   Multi-source blending and raster operations are not implemented.
+	   A133 exposes a two-input RGB source-over compositor with MMAP
+	   queues. DMA-BUF sharing, color keying and general raster operations
+	   are not implemented.
 	   To compile this driver as a module choose m here.
