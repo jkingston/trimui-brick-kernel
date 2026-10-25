@@ -420,12 +420,29 @@ int PVRSRVDeviceSuspend(struct drm_device *psDev)
 	psDeviceNode->bAutoVzFwIsUp = IMG_FALSE;
 #endif
 
-	if (PVRSRVSetDeviceSystemPowerState(psDeviceNode,
-										PVRSRV_SYS_POWER_STATE_OFF,
-										PVRSRV_POWER_FLAGS_SUSPEND_REQ) != PVRSRV_OK)
+	if (psDeviceNode->psDevConfig->pfnSystemSleep)
 	{
-		/* Ignore return error as we're already returning an error here. */
-		(void) LinuxBridgeUnblockClientsAccess(psDevPriv);
+		eError = psDeviceNode->psDevConfig->pfnSystemSleep(
+			psDeviceNode->psDevConfig->hSysData, IMG_TRUE, IMG_FALSE, PVRSRV_OK);
+		if (eError != PVRSRV_OK)
+		{
+			if (!psDeviceNode->psDevConfig->pfnGpuPowerFault ||
+			    !psDeviceNode->psDevConfig->pfnGpuPowerFault(
+				psDeviceNode->psDevConfig->hSysData))
+				(void) LinuxBridgeUnblockClientsAccess(psDevPriv);
+			return -EINVAL;
+		}
+	}
+	eError = PVRSRVSetDeviceSystemPowerState(psDeviceNode,
+		PVRSRV_SYS_POWER_STATE_OFF, PVRSRV_POWER_FLAGS_SUSPEND_REQ);
+	if (psDeviceNode->psDevConfig->pfnSystemSleep)
+		eError = psDeviceNode->psDevConfig->pfnSystemSleep(
+			psDeviceNode->psDevConfig->hSysData, IMG_TRUE, IMG_TRUE, eError);
+	if (eError != PVRSRV_OK)
+	{
+		/* Platform retention failures retain their client/physical fail gate. */
+		if (!psDeviceNode->psDevConfig->pfnSystemSleep)
+			(void) LinuxBridgeUnblockClientsAccess(psDevPriv);
 		return -EINVAL;
 	}
 
@@ -444,12 +461,22 @@ int PVRSRVDeviceResume(struct drm_device *psDev)
 	struct pvr_drm_private *psDevPriv = psDev->dev_private;
 	PVRSRV_DEVICE_NODE *psDeviceNode = psDevPriv->dev_node;
 
-	if (PVRSRVSetDeviceSystemPowerState(psDeviceNode,
-										PVRSRV_SYS_POWER_STATE_ON,
-										PVRSRV_POWER_FLAGS_RESUME_REQ) != PVRSRV_OK)
+	PVRSRV_ERROR eError;
+
+	if (psDeviceNode->psDevConfig->pfnSystemSleep)
 	{
-		return -EINVAL;
+		eError = psDeviceNode->psDevConfig->pfnSystemSleep(
+			psDeviceNode->psDevConfig->hSysData, IMG_FALSE, IMG_FALSE, PVRSRV_OK);
+		if (eError != PVRSRV_OK)
+			return -EINVAL;
 	}
+	eError = PVRSRVSetDeviceSystemPowerState(psDeviceNode,
+		PVRSRV_SYS_POWER_STATE_ON, PVRSRV_POWER_FLAGS_RESUME_REQ);
+	if (psDeviceNode->psDevConfig->pfnSystemSleep)
+		eError = psDeviceNode->psDevConfig->pfnSystemSleep(
+			psDeviceNode->psDevConfig->hSysData, IMG_FALSE, IMG_TRUE, eError);
+	if (eError != PVRSRV_OK)
+		return -EINVAL;
 
 	/* Ignore return error. We should proceed even if this fails. */
 	(void) LinuxBridgeUnblockClientsAccess(psDevPriv);

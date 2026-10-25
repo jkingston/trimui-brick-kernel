@@ -15,6 +15,8 @@ int a133_gpu_apm_handoff(struct device *consumer, bool wake, bool forced);
 int a133_gpu_internal_off(struct device *consumer);
 /* Persist a negative consumer error until reboot, without hardware access. */
 int a133_gpu_latch_fault(struct device *consumer, int error);
+/* Validate retained ownership without waking or changing external resources. */
+int a133_gpu_s2idle_retained(struct device *consumer);
 /* RAM-only sticky fault query; false is not an accessibility guarantee. */
 bool a133_gpu_power_fault(struct device *consumer);
 #endif

@@ -52,6 +52,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
 #include <linux/sun50i-a133-gpu.h>
 #include "pvrsrv_device.h"
 #include "syscommon.h"
@@ -160,11 +161,15 @@ struct sunxi_irq_owner {
 	struct sunxi_gpu *gpu;
 	struct irq_lifecycle state;
 };
+enum sunxi_sleep_phase { SUNXI_AWAKE, SUNXI_SUSPENDING, SUNXI_ASLEEP,
+	SUNXI_RESUMING, SUNXI_SLEEP_FAULT };
 struct sunxi_gpu {
 	struct mutex irq_lock;
 	struct sunxi_irq_owner irq_owner;
 	struct stop_evidence stop;
 	bool transition_fault;
+	enum sunxi_sleep_phase sleep_phase;
+	bool sleep_verified;
 	struct device *dev;
 	struct clk *core, *bus, *ppu_clock;
 	void __iomem *ppu, *dfs;
@@ -275,7 +280,8 @@ static PHYS_HEAP_FUNCTIONS heap_funcs = {
 
 /* External clocks and reset-controller resources remain enabled. The provider
  * owns internal PPU power removal and restores it before this wake validation.
- * System suspend remains unsupported. In hardware mode, firmware idle leaves
+ * s2idle retains these resources; deep sleep remains unsupported.
+ * In hardware mode, firmware idle leaves
  * the PPU in HOST (status 1), with 3D isolation and the host interface clocked.
  * Accept HOST only when waking from OFF; RGXDoStart restarts the firmware.
  * ALLOFF is valid only while owned by the provider, never at this boundary.
@@ -314,16 +320,77 @@ static IMG_BOOL sunxi_power_fault(IMG_HANDLE handle)
 	return (READ_ONCE(gpu->transition_fault) || a133_gpu_power_fault(gpu->dev)) ?
 		IMG_TRUE : IMG_FALSE;
 }
+/* Commit only after the complete DDK transition, including firmware restart.
+ * Failed stop/start is not reversible by replaying a platform callback: retain
+ * blocked clients and the existing sticky GPU-access gate until reboot.
+ */
+static PVRSRV_ERROR sunxi_system_sleep(IMG_HANDLE handle, IMG_BOOL suspend,
+	IMG_BOOL complete, PVRSRV_ERROR result)
+{
+	struct sunxi_gpu *gpu = handle;
+	bool fault = false;
+
+	mutex_lock(&gpu->irq_lock);
+	if (!complete) {
+		if (sunxi_power_fault(gpu) ||
+		    (suspend && pm_suspend_target_state != PM_SUSPEND_TO_IDLE) ||
+		    gpu->sleep_phase != (suspend ? SUNXI_AWAKE : SUNXI_ASLEEP)) {
+			result = PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+		} else {
+			gpu->sleep_phase = suspend ? SUNXI_SUSPENDING : SUNXI_RESUMING;
+			gpu->sleep_verified = false;
+		}
+	} else if (result != PVRSRV_OK || !gpu->sleep_verified ||
+		   gpu->sleep_phase != (suspend ? SUNXI_SUSPENDING : SUNXI_RESUMING)) {
+		fault = true;
+		gpu->sleep_phase = SUNXI_SLEEP_FAULT;
+		if (result == PVRSRV_OK)
+			result = PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	} else {
+		gpu->sleep_phase = suspend ? SUNXI_ASLEEP : SUNXI_AWAKE;
+	}
+	mutex_unlock(&gpu->irq_lock);
+	if (fault) {
+		sunxi_latch_fault(gpu, -EIO);
+		mutex_lock(&gpu->irq_lock);
+		if (gpu->irq_owner.state.phase == IRQ_ACTIVE) {
+			disable_irq(gpu->irq_owner.state.irq);
+			gpu->irq_owner.state.phase = IRQ_QUIESCED;
+			gpu->irq_owner.state.stop_sequence = 0;
+		}
+		mutex_unlock(&gpu->irq_lock);
+	}
+	return result;
+}
+
+static bool sunxi_sleep_retained(struct sunxi_gpu *gpu)
+{
+	bool quiesced;
+
+	if (a133_gpu_s2idle_retained(gpu->dev))
+		return false;
+	mutex_lock(&gpu->irq_lock);
+	quiesced = gpu->irq_owner.state.phase == IRQ_QUIESCED;
+	mutex_unlock(&gpu->irq_lock);
+	return quiesced;
+}
+
 static PVRSRV_ERROR sunxi_pre_power(IMG_HANDLE handle,
 	PVRSRV_SYS_POWER_STATE next, PVRSRV_SYS_POWER_STATE old_state,
 	PVRSRV_POWER_FLAGS flags)
 {
 	struct sunxi_gpu *gpu = handle;
 
-	if (flags & PVRSRV_POWER_FLAGS_SUSPEND_REQ) {
-		dev_err(gpu->dev, "A133 GPU suspend has not been validated\n");
+	if ((flags & PVRSRV_POWER_FLAGS_SUSPEND_REQ) &&
+	    (READ_ONCE(gpu->sleep_phase) != SUNXI_SUSPENDING ||
+	     next != PVRSRV_SYS_POWER_STATE_OFF))
+		goto sleep_fault;
+	if ((flags & PVRSRV_POWER_FLAGS_RESUME_REQ) &&
+	    READ_ONCE(gpu->sleep_phase) != SUNXI_RESUMING)
+		goto sleep_fault;
+	if (!(flags & PVRSRV_POWER_FLAGS_RESUME_REQ) &&
+	    READ_ONCE(gpu->sleep_phase) == SUNXI_ASLEEP)
 		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
-	}
 	if (next == PVRSRV_SYS_POWER_STATE_ON) {
 		if (a133_gpu_apm_handoff(gpu->dev, true,
 	     !!(flags & PVRSRV_POWER_FLAGS_FORCED)))
@@ -352,6 +419,9 @@ static PVRSRV_ERROR sunxi_pre_power(IMG_HANDLE handle,
 		}
 	}
 	return PVRSRV_OK;
+sleep_fault:
+	sunxi_latch_fault(gpu, -EIO);
+	return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 }
 static PVRSRV_ERROR sunxi_post_power(IMG_HANDLE handle,
 	PVRSRV_SYS_POWER_STATE next, PVRSRV_SYS_POWER_STATE old_state,
@@ -359,6 +429,27 @@ static PVRSRV_ERROR sunxi_post_power(IMG_HANDLE handle,
 {
 	struct sunxi_gpu *gpu = handle;
 	bool eligible = false;
+
+	/* OS requests may repeat device OFF (APM's default). Do not hand an
+	 * already internally-OFF domain to the ordinary OFF transition again.
+	 */
+	if (flags & (PVRSRV_POWER_FLAGS_SUSPEND_REQ | PVRSRV_POWER_FLAGS_RESUME_REQ)) {
+		if (next == PVRSRV_SYS_POWER_STATE_OFF) {
+			eligible = stop_consume(&gpu->stop, next, old_state, flags);
+			if (old_state != PVRSRV_SYS_POWER_STATE_OFF) {
+				if (!eligible || a133_gpu_apm_handoff(gpu->dev, false, true) ||
+				    sunxi_irq_quiesce(gpu, true, false) != 1)
+					goto sleep_fault;
+			}
+			/* Fresh forced OFF may retain 3D/HOST. No unproven forced
+			 * internal cut: only existing APM-owned OFF is preserved.
+			 */
+			if (!sunxi_sleep_retained(gpu))
+				goto sleep_fault;
+		}
+		WRITE_ONCE(gpu->sleep_verified, true);
+		return PVRSRV_OK;
+	}
 
 	if (next == PVRSRV_SYS_POWER_STATE_OFF)
 		eligible = stop_consume(&gpu->stop, next, old_state, flags);
@@ -386,6 +477,9 @@ static PVRSRV_ERROR sunxi_post_power(IMG_HANDLE handle,
 		}
 	}
 	return PVRSRV_OK;
+sleep_fault:
+	sunxi_latch_fault(gpu, -EIO);
+	return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 }
 static void feature_init(PVRSRV_DEVICE_CONFIG *config, IMG_UINT64 features)
 {
@@ -519,11 +613,12 @@ PVRSRV_ERROR SysDevInit(void *osdev, PVRSRV_DEVICE_CONFIG **result)
 	gpu->config.ui32PhysHeapCount = 2;
 	gpu->config.pfnStopEvidence = sunxi_stop_evidence;
 	gpu->config.pfnGpuPowerFault = sunxi_power_fault;
+	gpu->config.pfnSystemSleep = sunxi_system_sleep;
 	gpu->config.pfnPrePowerState = sunxi_pre_power;
 	gpu->config.pfnPostPowerState = sunxi_post_power;
 	gpu->config.pfnSysDevFeatureDepInit = feature_init;
  *result = &gpu->config;
-	dev_info(dev, "A133 GPU fixed inherited clock%uHz DFS%#x; suspend unsupported\n",
+	dev_info(dev, "A133 GPU fixed inherited clock%uHz DFS%#x; s2idle retention\n",
 		gpu->timing.ui32CoreClockSpeed, dfs);
 	return PVRSRV_OK;
 fail:

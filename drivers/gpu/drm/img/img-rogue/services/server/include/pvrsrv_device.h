@@ -309,6 +309,12 @@ struct _PVRSRV_DEVICE_CONFIG_
 	 * this query must never clear the fault or attempt recovery.
 	 */
 	IMG_BOOL (*pfnGpuPowerFault)(IMG_HANDLE hSysData);
+	/* Optional Linux sleep transaction boundary, outside the power mutex.
+	 * Begin is after client blocking. Complete follows the entire DDK
+	 * transition, including firmware restart; errors must keep clients blocked.
+	 */
+	PVRSRV_ERROR (*pfnSystemSleep)(IMG_HANDLE hSysData, IMG_BOOL suspend,
+		IMG_BOOL complete, PVRSRV_ERROR result);
 	PFN_SYS_PRE_POWER pfnPrePowerState;
 	PFN_SYS_POST_POWER pfnPostPowerState;
 	PFN_SYS_GET_POWER  pfnGpuDomainPower;

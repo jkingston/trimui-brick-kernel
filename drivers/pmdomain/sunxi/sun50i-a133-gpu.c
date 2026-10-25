@@ -11,6 +11,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/reset.h>
+#include <linux/suspend.h>
 
 #include "sun50i-a133-gpu-sequence.h"
 #include "sun50i-a133-gpu-off.h"
@@ -391,6 +392,40 @@ bool a133_gpu_power_fault(struct device *consumer)
 }
 EXPORT_SYMBOL_GPL(a133_gpu_power_fault);
 
+/* No DFS/GPU register access while internally OFF. The outer resources stay
+ * owned throughout s2idle, exactly as during ordinary internal APM.
+ */
+int a133_gpu_s2idle_retained(struct device *consumer)
+{
+	struct a133_gpu_domain *p = smp_load_acquire(&a133_provider);
+	struct a133_snapshot s;
+	int ret = 0;
+
+	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
+		return -ENODEV;
+	mutex_lock(&p->handoff_lock);
+	if (!smp_load_acquire(&p->boot_ready) || READ_ONCE(p->result)) {
+		ret = READ_ONCE(p->result) ?: -EIO;
+		goto out;
+	}
+	if (p->handoff_state == A133_INTERNAL_OFF) {
+		s = a133_ppu_snapshot(p);
+		if (!a133_internal_tuple(&s, true))
+			ret = a133_fault(p, "s2idle-off-retention", -EIO);
+	} else if (p->handoff_state == A133_HW || p->handoff_state == A133_SW_HOST) {
+		s = a133_snapshot(p);
+		if (!a133_handoff_valid(&s, p->handoff_state == A133_HW ? 2 : 1,
+				       p->handoff_state == A133_SW_HOST))
+			ret = a133_fault(p, "s2idle-retention", -EIO);
+	} else {
+		ret = -EIO;
+	}
+ out:
+	mutex_unlock(&p->handoff_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(a133_gpu_s2idle_retained);
+
 static int a133_gpu_power_off(struct generic_pm_domain *genpd)
 {
 	return -EBUSY;
@@ -471,7 +506,7 @@ static int a133_gpu_probe(struct platform_device *pdev)
 
 static int a133_gpu_suspend_prepare(struct device *dev)
 {
-	return -EBUSY;
+	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
 }
 
 static const struct dev_pm_ops a133_gpu_pm_ops = {
