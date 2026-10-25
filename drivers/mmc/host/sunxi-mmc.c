@@ -250,6 +250,9 @@ struct sunxi_mmc_cfg {
 	/* does the IP block support autocalibration? */
 	bool can_calibrate;
 
+	/* A133 eMMC uses the shipped v4p6x initialization contract. */
+	bool a133_emmc;
+
 	/* Does DATA0 needs to be masked while the clock is updated */
 	bool mask_data0;
 
@@ -302,14 +305,38 @@ struct sunxi_mmc_host {
 	/* timings */
 	bool		use_new_timings;
 	bool module_clk_enabled;
+	bool a133_emmc_irq_blocked;
 	u32 a133_drive, a133_phase, a133_tuned_rate, a133_tuned_timing;
 	struct mmc_host_ops a133_ops;
 };
+
+static int sunxi_mmc_module_enable(struct sunxi_mmc_host *host)
+{
+	int ret;
+
+	if (host->module_clk_enabled)
+		return 0;
+	ret = clk_prepare_enable(host->clk_mmc);
+	if (!ret)
+		host->module_clk_enabled = true;
+	return ret;
+}
+
+static void sunxi_mmc_module_disable(struct sunxi_mmc_host *host)
+{
+	if (!host->module_clk_enabled)
+		return;
+	clk_disable_unprepare(host->clk_mmc);
+	host->module_clk_enabled = false;
+}
 
 static int sunxi_mmc_reset_host(struct sunxi_mmc_host *host)
 {
 	unsigned long expire = jiffies + msecs_to_jiffies(250);
 	u32 rval;
+
+	if (!host->module_clk_enabled)
+		return -EIO;
 
 	mmc_writel(host, REG_GCTRL, SDXC_HARDWARE_RESET);
 	do {
@@ -579,6 +606,9 @@ static irqreturn_t sunxi_mmc_irq(int irq, void *dev_id)
 	bool sdio_int = false;
 	irqreturn_t ret = IRQ_HANDLED;
 
+	if (!READ_ONCE(host->module_clk_enabled))
+		return IRQ_NONE;
+
 	spin_lock(&host->lock);
 
 	idma_int  = mmc_readl(host, REG_IDST);
@@ -705,27 +735,6 @@ static int sunxi_mmc_oclk_onoff(struct sunxi_mmc_host *host, u32 oclk_en)
 	return 0;
 }
 
-/* Track module clock votes across phase-switch failures and teardown. */
-static int sunxi_mmc_module_enable(struct sunxi_mmc_host *host)
-{
-	int ret;
-
-	if (host->module_clk_enabled)
-		return 0;
-	ret = clk_prepare_enable(host->clk_mmc);
-	if (!ret)
-		host->module_clk_enabled = true;
-	return ret;
-}
-
-static void sunxi_mmc_module_disable(struct sunxi_mmc_host *host)
-{
-	if (!host->module_clk_enabled)
-		return;
-	clk_disable_unprepare(host->clk_mmc);
-	host->module_clk_enabled = false;
-}
-
 /* Four coarse sample selectors are exercised by the shipped A133 driver. */
 static int sunxi_mmc_a133_phase(struct sunxi_mmc_host *host, u32 drive,
 			       unsigned int phase)
@@ -837,6 +846,50 @@ fail:
 	return ret;
 }
 
+static u32 sunxi_mmc_a133_dma_shift(u32 version)
+{
+	return version == 0x40502 || version >= 0x50300 ? 2 : 0;
+}
+
+/* Stock DDR52 initialization; unrelated register bits are preserved. */
+static int sunxi_mmc_a133_set_timing(struct sunxi_mmc_host *host)
+{
+	u32 val;
+	int ret;
+
+	if (!host->module_clk_enabled)
+		return -EIO;
+
+	val = readl(host->reg_base + SDXC_REG_SD_NTSR);
+	writel(val & ~BIT(31), host->reg_base + SDXC_REG_SD_NTSR);
+	val = readl(host->reg_base + 0x10c);
+	writel(val & ~BIT(31), host->reg_base + 0x10c);
+	val = readl(host->reg_base + 0x54);
+	writel((val & ~GENMASK(3, 0)) | 3, host->reg_base + 0x54);
+	/* The shipped binary uses command 180 and data 90 degrees. */
+	val = readl(host->reg_base + SDXC_REG_DRV_DL);
+	if (!host->a133_emmc_irq_blocked) {
+		disable_irq(host->irq);
+		host->a133_emmc_irq_blocked = true;
+	}
+	sunxi_mmc_module_disable(host);
+	writel((val & ~BIT(17)) | BIT(16),
+	       host->reg_base + SDXC_REG_DRV_DL);
+	ret = sunxi_mmc_module_enable(host);
+	if (ret)
+		return ret;
+	val = readl(host->reg_base + SDXC_REG_SAMP_DL_REG);
+	writel((val & ~GENMASK(5, 0)) | BIT(7),
+	       host->reg_base + SDXC_REG_SAMP_DL_REG);
+	val = readl(host->reg_base + 0x148);
+	writel((val & ~GENMASK(5, 0)) | BIT(7), host->reg_base + 0x148);
+
+	/* Release only our vote, preserving runtime-PM IRQ nesting. */
+	host->a133_emmc_irq_blocked = false;
+	enable_irq(host->irq);
+	return ret;
+}
+
 static int sunxi_mmc_calibrate(struct sunxi_mmc_host *host, int reg_off)
 {
 	if (!host->cfg->can_calibrate)
@@ -921,6 +974,7 @@ static int sunxi_mmc_clk_set_rate(struct sunxi_mmc_host *host,
 	ret = sunxi_mmc_module_enable(host);
 	if (ret)
 		return ret;
+
 	ret = sunxi_mmc_oclk_onoff(host, 0);
 	if (ret)
 		return ret;
@@ -987,7 +1041,7 @@ static int sunxi_mmc_clk_set_rate(struct sunxi_mmc_host *host,
 	 * the eMMC controller on the A64, this register does not exist,
 	 * and any writes to it are ignored.
 	 */
-	if (host->use_new_timings) {
+	if (host->use_new_timings && !host->cfg->a133_emmc) {
 		/* Don't touch the delay bits */
 		rval = mmc_readl(host, REG_SD_NTSR);
 		rval |= SDXC_2X_TIMING_MODE;
@@ -999,9 +1053,15 @@ static int sunxi_mmc_clk_set_rate(struct sunxi_mmc_host *host,
 	if (ret)
 		return ret;
 
-	ret = sunxi_mmc_calibrate(host, SDXC_REG_SAMP_DL_REG);
-	if (ret)
-		return ret;
+	if (host->cfg->a133_emmc) {
+		ret = sunxi_mmc_a133_set_timing(host);
+		if (ret)
+			return ret;
+	} else {
+		ret = sunxi_mmc_calibrate(host, SDXC_REG_SAMP_DL_REG);
+		if (ret)
+			return ret;
+	}
 
 	/*
 	 * FIXME:
@@ -1040,6 +1100,10 @@ static void sunxi_mmc_set_bus_width(struct sunxi_mmc_host *host,
 static void sunxi_mmc_set_clk(struct sunxi_mmc_host *host, struct mmc_ios *ios)
 {
 	u32 rval;
+
+	host->ferror = sunxi_mmc_module_enable(host);
+	if (host->ferror)
+		return;
 
 	/* set ddr mode */
 	rval = mmc_readl(host, REG_GCTRL);
@@ -1105,7 +1169,20 @@ static void sunxi_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct sunxi_mmc_host *host = mmc_priv(mmc);
 
-	sunxi_mmc_card_power(host, ios);
+	if (ios->power_mode == MMC_POWER_OFF) {
+		sunxi_mmc_card_power(host, ios);
+		if (!host->module_clk_enabled)
+			return;
+	}
+
+	host->ferror = sunxi_mmc_module_enable(host);
+	if (host->ferror)
+		return;
+
+	if (ios->power_mode != MMC_POWER_OFF)
+		sunxi_mmc_card_power(host, ios);
+	if (host->ferror)
+		return;
 	sunxi_mmc_set_bus_width(host, ios->bus_width);
 	sunxi_mmc_set_clk(host, ios);
 }
@@ -1156,6 +1233,11 @@ static void sunxi_mmc_enable_sdio_irq(struct mmc_host *mmc, int enable)
 static void sunxi_mmc_hw_reset(struct mmc_host *mmc)
 {
 	struct sunxi_mmc_host *host = mmc_priv(mmc);
+
+	if (!host->module_clk_enabled) {
+		host->ferror = -EIO;
+		return;
+	}
 	mmc_writel(host, REG_HWRST, 0);
 	udelay(10);
 	mmc_writel(host, REG_HWRST, 1);
@@ -1174,8 +1256,8 @@ static void sunxi_mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	int ret;
 
 	/* Check for set_ios errors (should never happen) */
-	if (host->ferror) {
-		mrq->cmd->error = host->ferror;
+	if (host->ferror || !host->module_clk_enabled) {
+		mrq->cmd->error = host->ferror ?: -EIO;
 		mmc_request_done(mmc, mrq);
 		return;
 	}
@@ -1261,6 +1343,9 @@ static void sunxi_mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 static int sunxi_mmc_card_busy(struct mmc_host *mmc)
 {
 	struct sunxi_mmc_host *host = mmc_priv(mmc);
+
+	if (!host->module_clk_enabled)
+		return 1;
 
 	return !!(mmc_readl(host, REG_STAS) & SDXC_CARD_DATA_BUSY);
 }
@@ -1372,6 +1457,12 @@ static const struct sunxi_mmc_cfg sun50i_a133_sd_cfg = {
 	.a133_coarse_tuning = true,
 };
 
+static const struct sunxi_mmc_cfg sun50i_a133_emmc_cfg = {
+	.idma_des_size_bits = 12,
+	.a133_emmc = true,
+	.needs_new_timings = true,
+};
+
 static const struct of_device_id sunxi_mmc_of_match[] = {
 	{ .compatible = "allwinner,sun50i-a133-mmc", .data = &sun50i_a133_sd_cfg },
 	{ .compatible = "allwinner,sun4i-a10-mmc", .data = &sun4i_a10_cfg },
@@ -1383,6 +1474,7 @@ static const struct of_device_id sunxi_mmc_of_match[] = {
 	{ .compatible = "allwinner,sun50i-a64-mmc", .data = &sun50i_a64_cfg },
 	{ .compatible = "allwinner,sun50i-a64-emmc", .data = &sun50i_a64_emmc_cfg },
 	{ .compatible = "allwinner,sun50i-a100-mmc", .data = &sun20i_d1_cfg },
+	{ .compatible = "allwinner,sun50i-a133-emmc", .data = &sun50i_a133_emmc_cfg },
 	{ .compatible = "allwinner,sun50i-a100-emmc", .data = &sun50i_a100_emmc_cfg },
 	{ .compatible = "allwinner,sun50i-h616-mmc", .data = &sun50i_h616_cfg },
 	{ /* sentinel */ }
@@ -1508,12 +1600,27 @@ static int sunxi_mmc_resource_request(struct sunxi_mmc_host *host,
 
 	host->reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								"ahb");
-	if (PTR_ERR(host->reset) == -EPROBE_DEFER)
+	if (IS_ERR(host->reset))
 		return PTR_ERR(host->reset);
 
 	ret = sunxi_mmc_enable(host);
 	if (ret)
 		return ret;
+
+	if (host->cfg->a133_emmc) {
+		struct sunxi_mmc_cfg *cfg;
+		u32 version = readl(host->reg_base + 0x300);
+
+		cfg = devm_kmemdup(&pdev->dev, host->cfg, sizeof(*cfg), GFP_KERNEL);
+		if (!cfg) {
+			ret = -ENOMEM;
+			goto error_disable_mmc;
+		}
+		cfg->idma_des_shift = sunxi_mmc_a133_dma_shift(version);
+		host->cfg = cfg;
+		dev_info(&pdev->dev, "eMMC revision %#x, DMA address shift %u\n",
+			 version, cfg->idma_des_shift);
+	}
 
 	host->irq = platform_get_irq(pdev, 0);
 	if (host->irq < 0) {
@@ -1521,8 +1628,12 @@ static int sunxi_mmc_resource_request(struct sunxi_mmc_host *host,
 		goto error_disable_mmc;
 	}
 
-	return devm_request_threaded_irq(&pdev->dev, host->irq, sunxi_mmc_irq,
+	ret = devm_request_threaded_irq(&pdev->dev, host->irq, sunxi_mmc_irq,
 			sunxi_mmc_handle_manual_stop, 0, "sunxi-mmc", host);
+	if (ret)
+		goto error_disable_mmc;
+
+	return 0;
 
 error_disable_mmc:
 	sunxi_mmc_disable(host);
@@ -1552,9 +1663,11 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 
 	host->sg_cpu = dma_alloc_coherent(&pdev->dev, PAGE_SIZE,
 					  &host->sg_dma, GFP_KERNEL);
-	if (!host->sg_cpu)
-		return dev_err_probe(&pdev->dev, -ENOMEM,
-				     "Failed to allocate DMA descriptor mem\n");
+	if (!host->sg_cpu) {
+		ret = dev_err_probe(&pdev->dev, -ENOMEM,
+				    "Failed to allocate DMA descriptor mem\n");
+		goto error_disable_host;
+	}
 
 	if (host->cfg->ccu_has_timings_switch) {
 		/*
@@ -1625,6 +1738,10 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 		mmc->caps2 &= ~MMC_CAP2_HS200;
 	}
 
+	/* A133 eMMC currently implements only legacy, high-speed and DDR52. */
+	if (host->cfg->a133_emmc)
+		mmc->caps2 &= ~MMC_CAP2_HS200;
+
 	/* TODO: This driver doesn't support HS400 mode yet */
 	mmc->caps2 &= ~MMC_CAP2_HS400;
 
@@ -1632,14 +1749,21 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 	if (ret)
 		goto error_free_dma;
 
-	pm_runtime_set_active(&pdev->dev);
+	ret = pm_runtime_set_active(&pdev->dev);
+	if (ret)
+		goto error_free_dma;
+	/* Hold the controller active through host registration and its unwind. */
+	pm_runtime_get_noresume(&pdev->dev);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, 50);
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
 	ret = mmc_add_host(mmc);
 	if (ret)
-		goto error_free_dma;
+		goto error_disable_pm;
+
+	pm_runtime_mark_last_busy(&pdev->dev);
+	pm_runtime_put_autosuspend(&pdev->dev);
 
 	dev_info(&pdev->dev, "initialized, max. request size: %u KB%s\n",
 		 mmc->max_req_size >> 10,
@@ -1647,8 +1771,18 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 
 	return 0;
 
+error_disable_pm:
+	pm_runtime_disable(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
 error_free_dma:
+	disable_irq(host->irq);
+	sunxi_mmc_disable(host);
 	dma_free_coherent(&pdev->dev, PAGE_SIZE, host->sg_cpu, host->sg_dma);
+	return ret;
+
+error_disable_host:
+	disable_irq(host->irq);
+	sunxi_mmc_disable(host);
 	return ret;
 }
 
@@ -1676,12 +1810,21 @@ static int sunxi_mmc_runtime_resume(struct device *dev)
 	if (ret)
 		return ret;
 
-	sunxi_mmc_init_host(host);
+	ret = sunxi_mmc_init_host(host);
+	if (ret)
+		goto error_disable;
 	sunxi_mmc_set_bus_width(host, mmc->ios.bus_width);
 	sunxi_mmc_set_clk(host, &mmc->ios);
+	ret = host->ferror;
+	if (ret)
+		goto error_disable;
 	enable_irq(host->irq);
 
 	return 0;
+
+error_disable:
+	sunxi_mmc_disable(host);
+	return ret;
 }
 
 static int sunxi_mmc_runtime_suspend(struct device *dev)
