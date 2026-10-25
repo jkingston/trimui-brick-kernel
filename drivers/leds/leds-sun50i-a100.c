@@ -13,6 +13,7 @@
 #include <linux/dmaengine.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/leds.h>
 #include <linux/module.h>
@@ -85,6 +86,10 @@ struct sun50i_a100_ledc {
 	spinlock_t lock;
 	unsigned int next_length;
 	bool xfer_active;
+	bool suspended;
+	bool powered;
+	bool irq_disabled;
+	int irq;
 
 	u32 format;
 	struct sun50i_a100_ledc_timing timing;
@@ -180,34 +185,25 @@ static void sun50i_a100_ledc_start_xfer(struct sun50i_a100_ledc *priv, unsigned 
 static irqreturn_t sun50i_a100_ledc_irq(int irq, void *data)
 {
 	struct sun50i_a100_ledc *priv = data;
+	unsigned int next_length = 0;
 	u32 status;
 
+	spin_lock(&priv->lock);
 	status = readl(priv->base + LEDC_INT_STS_REG);
-
+	/* Acknowledge this transfer before a subsequent transfer can start. */
+	writel(status, priv->base + LEDC_INT_STS_REG);
 	if (status & LEDC_INT_STS_REG_TRANS_FINISH_INT) {
-		unsigned int next_length;
-
-		spin_lock(&priv->lock);
-
-		/* If another transfer is queued, dequeue and start it. */
 		next_length = priv->next_length;
-		if (next_length)
-			priv->next_length = 0;
-		else
-			priv->xfer_active = false;
-
-		spin_unlock(&priv->lock);
-
+		priv->next_length = 0;
 		if (next_length)
 			sun50i_a100_ledc_start_xfer(priv, next_length);
+		else
+			priv->xfer_active = false;
 	} else if (status & LEDC_INT_STS_REG_FIFO_CPUREQ_INT) {
-		/* Continue the current transfer. */
-		sun50i_a100_ledc_pio_xfer(priv, FIELD_GET(LEDC_INT_STS_REG_FIFO_WLW, status));
+		sun50i_a100_ledc_pio_xfer(priv,
+					  FIELD_GET(LEDC_INT_STS_REG_FIFO_WLW, status));
 	}
-
-	/* Clear the W1C status bits. */
-	writel(status, priv->base + LEDC_INT_STS_REG);
-
+	spin_unlock(&priv->lock);
 	return IRQ_HANDLED;
 }
 
@@ -219,28 +215,23 @@ static void sun50i_a100_ledc_brightness_set(struct led_classdev *cdev,
 	struct sun50i_a100_ledc_led *led = to_ledc_led(mc_cdev);
 	unsigned int next_length;
 	unsigned long flags;
-	bool xfer_active;
 
 	led_mc_calc_color_components(mc_cdev, brightness);
-
-	priv->buffer[led->addr] = led->subled_info[0].brightness << 16 |
-				  led->subled_info[1].brightness <<  8 |
-				  led->subled_info[2].brightness;
-
 	spin_lock_irqsave(&priv->lock, flags);
-
-	/* Start, enqueue, or extend an enqueued transfer, as appropriate. */
+	priv->buffer[led->addr] = led->subled_info[0].brightness << 16 |
+				  led->subled_info[1].brightness << 8 |
+				  led->subled_info[2].brightness;
+	if (priv->suspended)
+		goto out;
 	next_length = max(priv->next_length, led->addr + 1);
-	xfer_active = priv->xfer_active;
-	if (xfer_active)
+	if (priv->xfer_active) {
 		priv->next_length = next_length;
-	else
+	} else {
 		priv->xfer_active = true;
-
-	spin_unlock_irqrestore(&priv->lock, flags);
-
-	if (!xfer_active)
 		sun50i_a100_ledc_start_xfer(priv, next_length);
+	}
+out:
+	spin_unlock_irqrestore(&priv->lock, flags);
 }
 
 static const char *const sun50i_a100_ledc_formats[] = {
@@ -322,7 +313,11 @@ static void sun50i_a100_ledc_set_timing(struct sun50i_a100_ledc *priv)
 static int sun50i_a100_ledc_resume(struct device *dev)
 {
 	struct sun50i_a100_ledc *priv = dev_get_drvdata(dev);
+	unsigned long flags;
 	int ret;
+
+	if (priv->powered)
+		return priv->suspended ? -EBUSY : 0;
 
 	ret = reset_control_deassert(priv->reset);
 	if (ret)
@@ -336,12 +331,26 @@ static int sun50i_a100_ledc_resume(struct device *dev)
 	if (ret)
 		goto err_disable_bus_clk;
 
+	priv->powered = true;
 	sun50i_a100_ledc_set_format(priv);
 	sun50i_a100_ledc_set_timing(priv);
 
+	/* Clear stale status before replay, while the IRQ is still disabled. */
+	writel(readl(priv->base + LEDC_INT_STS_REG),
+	       priv->base + LEDC_INT_STS_REG);
 	writel(LEDC_INT_CTRL_REG_GLOBAL_INT_EN | LEDC_INT_CTRL_REG_TRANS_FINISH_INT_EN,
 	       priv->base + LEDC_INT_CTRL_REG);
 
+	spin_lock_irqsave(&priv->lock, flags);
+	priv->suspended = false;
+	priv->next_length = 0;
+	priv->xfer_active = true;
+	sun50i_a100_ledc_start_xfer(priv, priv->max_addr + 1);
+	spin_unlock_irqrestore(&priv->lock, flags);
+	if (priv->irq_disabled) {
+		priv->irq_disabled = false;
+		enable_irq(priv->irq);
+	}
 	return 0;
 
 err_disable_bus_clk:
@@ -352,29 +361,106 @@ err_assert_reset:
 	return ret;
 }
 
+static bool sun50i_a100_ledc_busy(struct sun50i_a100_ledc *priv)
+{
+	unsigned long flags;
+	bool busy;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	busy = priv->xfer_active;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	return busy;
+}
+
 static int sun50i_a100_ledc_suspend(struct device *dev)
 {
 	struct sun50i_a100_ledc *priv = dev_get_drvdata(dev);
+	unsigned long flags;
+	bool busy;
+	int ret;
 
-	/* Wait for all transfers to complete. */
-	for (;;) {
-		unsigned long flags;
-		bool xfer_active;
+	if (!priv->powered)
+		return 0;
 
+	spin_lock_irqsave(&priv->lock, flags);
+	priv->suspended = true;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	ret = read_poll_timeout(sun50i_a100_ledc_busy, busy, !busy,
+				1000, 1000000, false, priv);
+	if (ret) {
+		/* Failed suspend leaves the controller powered and owned. */
 		spin_lock_irqsave(&priv->lock, flags);
-		xfer_active = priv->xfer_active;
+		priv->suspended = false;
+		/* Include all updates buffered while submissions were gated. */
+		if (priv->xfer_active) {
+			priv->next_length = priv->max_addr + 1;
+		} else {
+			priv->next_length = 0;
+			priv->xfer_active = true;
+			sun50i_a100_ledc_start_xfer(priv, priv->max_addr + 1);
+		}
 		spin_unlock_irqrestore(&priv->lock, flags);
-		if (!xfer_active)
-			break;
-
-		usleep_range(1000, 1100);
+		return ret;
 	}
-
+	disable_irq(priv->irq);
+	priv->irq_disabled = true;
+	writel(0, priv->base + LEDC_INT_CTRL_REG);
+	readl(priv->base + LEDC_INT_CTRL_REG);
 	clk_disable_unprepare(priv->mod_clk);
 	clk_disable_unprepare(priv->bus_clk);
 	reset_control_assert(priv->reset);
-
+	priv->powered = false;
 	return 0;
+}
+
+/* Caller has excluded DMA; quiesce PIO even if completion was lost. */
+static void sun50i_a100_ledc_force_pio_stop(struct sun50i_a100_ledc *priv)
+{
+	unsigned long flags;
+	u32 control;
+	int ret;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	priv->suspended = true;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	if (!priv->powered)
+		return;
+
+	if (!priv->irq_disabled) {
+		disable_irq(priv->irq);
+		priv->irq_disabled = true;
+	}
+	writel(0, priv->base + LEDC_INT_CTRL_REG);
+	readl(priv->base + LEDC_INT_CTRL_REG);
+	control = readl(priv->base + LEDC_CTRL_REG);
+	writel(control & ~LEDC_CTRL_REG_LEDC_EN, priv->base + LEDC_CTRL_REG);
+	readl(priv->base + LEDC_CTRL_REG);
+	ret = reset_control_assert(priv->reset);
+	if (ret)
+		dev_warn(priv->dev, "PIO stopped without reset: %d\n", ret);
+	/* PIO has no bus master; masked/synchronized IRQs cannot touch memory. */
+	clk_disable_unprepare(priv->mod_clk);
+	clk_disable_unprepare(priv->bus_clk);
+	priv->powered = false;
+	spin_lock_irqsave(&priv->lock, flags);
+	priv->xfer_active = false;
+	priv->next_length = 0;
+	spin_unlock_irqrestore(&priv->lock, flags);
+}
+
+static void sun50i_a100_ledc_stop(struct device *dev)
+{
+	struct sun50i_a100_ledc *priv = dev_get_drvdata(dev);
+
+	while (sun50i_a100_ledc_suspend(dev)) {
+		if (!priv->dma_chan) {
+			/* No DMA or callbacks remain once the PIO IRQ is quiesced. */
+			sun50i_a100_ledc_force_pio_stop(priv);
+			return;
+		}
+		/* Preserve the original DMA drain policy until its stop is proven. */
+		usleep_range(1000, 1100);
+	}
 }
 
 static void sun50i_a100_ledc_dma_cleanup(void *data)
@@ -424,6 +510,8 @@ static int sun50i_a100_ledc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	priv->dev = dev;
+	priv->suspended = true;
+	priv->irq_disabled = true;
 	priv->max_addr = max_addr;
 	priv->num_leds = num_leds;
 	spin_lock_init(&priv->lock);
@@ -487,7 +575,8 @@ static int sun50i_a100_ledc_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
-	ret = devm_request_irq(dev, irq, sun50i_a100_ledc_irq, 0, dev_name(dev), priv);
+	priv->irq = irq;
+	ret = devm_request_irq(dev, irq, sun50i_a100_ledc_irq, IRQF_NO_AUTOEN, dev_name(dev), priv);
 	if (ret)
 		return ret;
 
@@ -523,7 +612,7 @@ static int sun50i_a100_ledc_probe(struct platform_device *pdev)
 			dev_err_probe(dev, ret, "Failed to register multicolor LED %u", led->addr);
 			while (led-- > priv->leds)
 				led_classdev_multicolor_unregister(&led->mc_cdev);
-			sun50i_a100_ledc_suspend(&pdev->dev);
+			sun50i_a100_ledc_stop(&pdev->dev);
 
 			return ret;
 		}
@@ -542,7 +631,7 @@ static void sun50i_a100_ledc_remove(struct platform_device *pdev)
 
 	for (u32 i = 0; i < priv->num_leds; i++)
 		led_classdev_multicolor_unregister(&priv->leds[i].mc_cdev);
-	sun50i_a100_ledc_suspend(&pdev->dev);
+	sun50i_a100_ledc_stop(&pdev->dev);
 }
 
 static const struct of_device_id sun50i_a100_ledc_of_match[] = {
