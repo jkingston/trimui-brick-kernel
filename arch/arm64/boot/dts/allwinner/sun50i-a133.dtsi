@@ -13,6 +13,15 @@
 };
 
 &{/soc} {
+	iommu: iommu@30f0000 {
+		compatible = "allwinner,sun50i-a133-iommu";
+		reg = <0x030f0000 0x1000>;
+		interrupts = <GIC_SPI 66 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&ccu CLK_BUS_IOMMU>;
+		#iommu-cells = <1>;
+		status = "disabled";
+	};
+
 	crypto: crypto@1904000 {
 		compatible = "allwinner,sun50i-a133-crypto";
 		reg = <0x01904000 0xa0>;
