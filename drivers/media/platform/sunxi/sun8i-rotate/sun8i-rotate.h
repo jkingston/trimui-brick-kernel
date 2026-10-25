@@ -15,6 +15,8 @@
 #include <media/videobuf2-dma-contig.h>
 
 #include <linux/platform_device.h>
+#include <linux/completion.h>
+#include <linux/workqueue.h>
 
 #define ROTATE_NAME		"sun8i-rotate"
 
@@ -125,6 +127,13 @@ struct rotate_dev {
 	struct mutex		dev_mutex;
 
 	void __iomem		*base;
+	void __iomem		*top;
+	bool a133;
+	int irq;
+	struct clk *mbus_clk;
+	struct completion complete;
+	struct work_struct work;
+	struct rotate_ctx *job;
 
 	struct clk		*bus_clk;
 	struct clk		*mod_clk;

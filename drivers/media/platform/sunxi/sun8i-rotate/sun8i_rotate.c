@@ -6,6 +6,8 @@
  */
 
 #include <linux/clk.h>
+#include <linux/iommu.h>
+#include <linux/of.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -57,14 +59,14 @@ static void rotate_calc_addr_pitch(dma_addr_t buffer,
 	}
 }
 
-static void rotate_device_run(void *priv)
+static void rotate_program(void *priv)
 {
 	struct rotate_ctx *ctx = priv;
 	struct rotate_dev *dev = ctx->dev;
 	struct vb2_v4l2_buffer *src, *dst;
 	const struct rotate_format *fmt;
-	dma_addr_t addr[3];
-	u32 val, pitch[3];
+	dma_addr_t addr[3] = {};
+	u32 val, pitch[3] = {};
 
 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
@@ -77,10 +79,13 @@ static void rotate_device_run(void *priv)
 	if (ctx->vflip)
 		val |= ROTATE_GLB_CTL_VFLIP;
 	val |= ROTATE_GLB_CTL_ROTATION(ctx->rotate / 90);
-	if (ctx->rotate != 90 && ctx->rotate != 270)
-		val |= ROTATE_GLB_CTL_BURST_LEN(ROTATE_BURST_64);
-	else
-		val |= ROTATE_GLB_CTL_BURST_LEN(ROTATE_BURST_8);
+	/* Stock G2D leaves burst-length fields clear. */
+	if (!dev->a133) {
+		if (ctx->rotate != 90 && ctx->rotate != 270)
+			val |= ROTATE_GLB_CTL_BURST_LEN(ROTATE_BURST_64);
+		else
+			val |= ROTATE_GLB_CTL_BURST_LEN(ROTATE_BURST_8);
+	}
 	rotate_write(dev, ROTATE_GLB_CTL, val);
 
 	fmt = rotate_find_format(ctx->src_fmt.pixelformat);
@@ -135,12 +140,72 @@ static void rotate_device_run(void *priv)
 	rotate_set_bits(dev, ROTATE_GLB_CTL, ROTATE_GLB_CTL_START);
 }
 
+/* A133 G2D owns both internal engines; the mixer remains held in reset. */
+static void rotate_a133_enable(struct rotate_dev *dev)
+{
+	writel(BIT(1), dev->top);
+	writel(BIT(1), dev->top + 4);
+	writel(BIT(1), dev->top + 8);
+}
+
+static void rotate_a133_work(struct work_struct *work)
+{
+	struct rotate_dev *dev = container_of(work, struct rotate_dev, work);
+	struct rotate_ctx *ctx = dev->job;
+	struct vb2_v4l2_buffer *src, *dst;
+	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
+
+	reinit_completion(&dev->complete);
+	rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
+	rotate_program(ctx);
+	if (!wait_for_completion_timeout(&dev->complete, msecs_to_jiffies(500))) {
+		/* Never return DMA buffers until reset has contained a timed-out job. */
+		disable_irq(dev->irq);
+		if (reset_control_assert(dev->rstc))
+			panic("A133 G2D: cannot contain timed-out DMA");
+		if (reset_control_deassert(dev->rstc))
+			panic("A133 G2D: cannot recover reset");
+		rotate_a133_enable(dev);
+		rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
+		enable_irq(dev->irq);
+		state = VB2_BUF_STATE_ERROR;
+	}
+
+	src = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
+	dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
+	v4l2_m2m_buf_done(src, state);
+	v4l2_m2m_buf_done(dst, state);
+	dev->job = NULL;
+	v4l2_m2m_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx);
+}
+
+static void rotate_device_run(void *priv)
+{
+	struct rotate_ctx *ctx = priv;
+
+	if (!ctx->dev->a133) {
+		rotate_program(priv);
+		return;
+	}
+	ctx->dev->job = ctx;
+	schedule_work(&ctx->dev->work);
+}
+
 static irqreturn_t rotate_irq(int irq, void *data)
 {
 	struct vb2_v4l2_buffer *buffer;
 	struct rotate_dev *dev = data;
 	struct rotate_ctx *ctx;
 	unsigned int val;
+
+	if (dev->a133) {
+		val = rotate_read(dev, ROTATE_INT);
+		if (!(val & ROTATE_INT_FINISH_IRQ))
+			return IRQ_NONE;
+		rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
+		complete(&dev->complete);
+		return IRQ_HANDLED;
+	}
 
 	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
 	if (!ctx) {
@@ -497,6 +562,7 @@ static int rotate_start_streaming(struct vb2_queue *vq, unsigned int count)
 		if (ret < 0) {
 			dev_err(dev, "Failed to enable module\n");
 
+			rotate_queue_cleanup(vq, VB2_BUF_STATE_QUEUED);
 			return ret;
 		}
 	}
@@ -740,13 +806,28 @@ static int rotate_probe(struct platform_device *pdev)
 
 	dev->vfd = rotate_video_device;
 	dev->dev = &pdev->dev;
+	dev->a133 = of_device_is_compatible(pdev->dev.of_node,
+					  "allwinner,sun50i-a133-g2d");
+	if (dev->a133) {
+		struct iommu_domain *domain = iommu_get_domain_for_dev(dev->dev);
+
+		if (!domain || !(domain->type & __IOMMU_DOMAIN_PAGING))
+			return dev_err_probe(dev->dev, -EINVAL,
+					     "G2D requires a translated DMA domain\n");
+		ret = dma_set_mask_and_coherent(dev->dev, DMA_BIT_MASK(32));
+		if (ret)
+			return ret;
+		init_completion(&dev->complete);
+		INIT_WORK(&dev->work, rotate_a133_work);
+	}
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq <= 0)
 		return irq;
 
+	dev->irq = irq;
 	ret = devm_request_irq(dev->dev, irq, rotate_irq,
-			       0, dev_name(dev->dev), dev);
+			       dev->a133 ? IRQF_NO_AUTOEN : 0, dev_name(dev->dev), dev);
 	if (ret) {
 		dev_err(dev->dev, "Failed to request IRQ\n");
 
@@ -756,6 +837,17 @@ static int rotate_probe(struct platform_device *pdev)
 	dev->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(dev->base))
 		return PTR_ERR(dev->base);
+
+	if (dev->a133) {
+		if (resource_size(platform_get_resource(pdev, IORESOURCE_MEM, 0)) <
+		    0x280b8)
+			return -EINVAL;
+		dev->top = dev->base;
+		dev->base += 0x28000;
+		dev->mbus_clk = devm_clk_get(dev->dev, "ram");
+		if (IS_ERR(dev->mbus_clk))
+			return PTR_ERR(dev->mbus_clk);
+	}
 
 	dev->bus_clk = devm_clk_get(dev->dev, "bus");
 	if (IS_ERR(dev->bus_clk)) {
@@ -795,33 +887,19 @@ static int rotate_probe(struct platform_device *pdev)
 		 rotate_video_device.name);
 	video_set_drvdata(vfd, dev);
 
-	ret = video_register_device(vfd, VFL_TYPE_VIDEO, 0);
-	if (ret) {
-		v4l2_err(&dev->v4l2_dev, "Failed to register video device\n");
-
-		goto err_v4l2;
-	}
-
-	v4l2_info(&dev->v4l2_dev,
-		  "Device registered as /dev/video%d\n", vfd->num);
-
 	dev->m2m_dev = v4l2_m2m_init(&rotate_m2m_ops);
 	if (IS_ERR(dev->m2m_dev)) {
-		v4l2_err(&dev->v4l2_dev,
-			 "Failed to initialize V4L2 M2M device\n");
 		ret = PTR_ERR(dev->m2m_dev);
-
-		goto err_video;
+		goto err_v4l2;
 	}
-
 	platform_set_drvdata(pdev, dev);
-
 	pm_runtime_enable(dev->dev);
+	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
+	if (!ret)
+		return 0;
 
-	return 0;
-
-err_video:
-	video_unregister_device(&dev->vfd);
+	pm_runtime_disable(dev->dev);
+	v4l2_m2m_release(dev->m2m_dev);
 err_v4l2:
 	v4l2_device_unregister(&dev->v4l2_dev);
 
@@ -832,11 +910,14 @@ static void rotate_remove(struct platform_device *pdev)
 {
 	struct rotate_dev *dev = platform_get_drvdata(pdev);
 
+	if (dev->a133)
+		flush_work(&dev->work);
 	v4l2_m2m_release(dev->m2m_dev);
 	video_unregister_device(&dev->vfd);
 	v4l2_device_unregister(&dev->v4l2_dev);
 
 	pm_runtime_force_suspend(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
 }
 
 static int rotate_runtime_resume(struct device *device)
@@ -858,15 +939,26 @@ static int rotate_runtime_resume(struct device *device)
 		goto err_bus_clk;
 	}
 
+	ret = clk_prepare_enable(dev->mbus_clk);
+	if (ret)
+		goto err_mod_clk;
+
 	ret = reset_control_deassert(dev->rstc);
 	if (ret) {
 		dev_err(dev->dev, "Failed to apply reset\n");
 
-		goto err_mod_clk;
+		goto err_mbus_clk;
 	}
 
+	if (dev->a133) {
+		rotate_a133_enable(dev);
+		rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
+		enable_irq(dev->irq);
+	}
 	return 0;
 
+err_mbus_clk:
+	clk_disable_unprepare(dev->mbus_clk);
 err_mod_clk:
 	clk_disable_unprepare(dev->mod_clk);
 err_bus_clk:
@@ -879,8 +971,17 @@ static int rotate_runtime_suspend(struct device *device)
 {
 	struct rotate_dev *dev = dev_get_drvdata(device);
 
-	reset_control_assert(dev->rstc);
+	int ret;
 
+	if (dev->a133)
+		disable_irq(dev->irq);
+	ret = reset_control_assert(dev->rstc);
+	if (ret && dev->a133) {
+		enable_irq(dev->irq);
+		return ret;
+	}
+
+	clk_disable_unprepare(dev->mbus_clk);
 	clk_disable_unprepare(dev->mod_clk);
 	clk_disable_unprepare(dev->bus_clk);
 
@@ -889,11 +990,51 @@ static int rotate_runtime_suspend(struct device *device)
 
 static const struct of_device_id rotate_dt_match[] = {
 	{ .compatible = "allwinner,sun8i-a83t-de2-rotate" },
+	{ .compatible = "allwinner,sun50i-a133-g2d" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, rotate_dt_match);
 
+static int rotate_suspend(struct device *device)
+{
+	struct rotate_dev *dev = dev_get_drvdata(device);
+	int ret;
+
+	if (!dev->a133)
+		return 0;
+	v4l2_m2m_suspend(dev->m2m_dev);
+	ret = pm_runtime_force_suspend(device);
+	if (ret)
+		v4l2_m2m_resume(dev->m2m_dev);
+	return ret;
+}
+
+static int rotate_resume(struct device *device)
+{
+	struct rotate_dev *dev = dev_get_drvdata(device);
+	int ret;
+
+	if (!dev->a133)
+		return 0;
+	ret = pm_runtime_force_resume(device);
+	if (!ret)
+		v4l2_m2m_resume(dev->m2m_dev);
+	return ret;
+}
+
+static void rotate_shutdown(struct platform_device *pdev)
+{
+	struct rotate_dev *dev = platform_get_drvdata(pdev);
+
+	if (dev->a133) {
+		v4l2_m2m_suspend(dev->m2m_dev);
+		flush_work(&dev->work);
+		pm_runtime_force_suspend(&pdev->dev);
+	}
+}
+
 static const struct dev_pm_ops rotate_pm_ops = {
+	SYSTEM_SLEEP_PM_OPS(rotate_suspend, rotate_resume)
 	.runtime_resume		= rotate_runtime_resume,
 	.runtime_suspend	= rotate_runtime_suspend,
 };
@@ -901,10 +1042,12 @@ static const struct dev_pm_ops rotate_pm_ops = {
 static struct platform_driver rotate_driver = {
 	.probe		= rotate_probe,
 	.remove		= rotate_remove,
+	.shutdown	= rotate_shutdown,
 	.driver		= {
 		.name		= ROTATE_NAME,
 		.of_match_table	= rotate_dt_match,
 		.pm		= &rotate_pm_ops,
+		.suppress_bind_attrs = true,
 	},
 };
 module_platform_driver(rotate_driver);

@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/allwinner,sun50i-a133-g2d.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Allwinner A133 G2D image processor
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description: |
+  The G2D block contains mixer and rotation engines sharing clocks, reset,
+  interrupt and IOMMU master. One driver must own the whole block.
+
+properties:
+  compatible:
+    const: allwinner,sun50i-a133-g2d
+  reg:
+    maxItems: 1
+  interrupts:
+    maxItems: 1
+  clocks:
+    items:
+      - description: Bus interface clock
+      - description: Module clock
+      - description: Memory bus clock
+  clock-names:
+    items:
+      - const: bus
+      - const: mod
+      - const: ram
+  resets:
+    maxItems: 1
+  iommus:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - iommus
+
+additionalProperties: false

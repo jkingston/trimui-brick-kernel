@@ -10,5 +10,6 @@ config VIDEO_SUN8I_ROTATE
 	select VIDEOBUF2_DMA_CONTIG
 	select V4L2_MEM2MEM_DEV
 	help
-	   Support for the Allwinner DE2 rotation unit.
+	   Support for the Allwinner DE2 and A133 G2D rotation units.
+	   A133 mixer scaling and blending are not implemented.
 	   To compile this driver as a module choose m here.

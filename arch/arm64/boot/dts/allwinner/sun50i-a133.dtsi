@@ -13,6 +13,20 @@
 };
 
 &{/soc} {
+	g2d: g2d@6480000 {
+		compatible = "allwinner,sun50i-a133-g2d";
+		reg = <0x06480000 0x40000>;
+		interrupts = <GIC_SPI 91 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&ccu CLK_BUS_G2D>, <&ccu CLK_G2D>, <&ccu CLK_MBUS_G2D>;
+		clock-names = "bus", "mod", "ram";
+		resets = <&ccu RST_BUS_G2D>;
+		assigned-clocks = <&ccu CLK_G2D>;
+		assigned-clock-parents = <&ccu CLK_PLL_PERIPH0_2X>;
+		assigned-clock-rates = <300000000>;
+		iommus = <&iommu 5>;
+		status = "disabled";
+	};
+
 	ve: video-codec@1c0e000 {
 		compatible = "allwinner,sun50i-a133-video-engine";
 		reg = <0x01c0e000 0x1000>;
