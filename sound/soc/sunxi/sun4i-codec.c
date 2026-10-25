@@ -11,6 +11,8 @@
  */
 
 #include <linux/init.h>
+#include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
@@ -20,6 +22,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/regulator/consumer.h>
@@ -351,6 +354,14 @@
 
 #define SUNIV_CODEC_ADC_DBG		(0x4c)
 
+/* Shipped saved controls, excluding FIFO status, counters and HMIC W1C. */
+static const unsigned int a133_sleep_regs[] = {
+	0x000, 0x004, 0x010, 0x028, 0x030, 0x034, 0x04c, 0x0f0,
+	0x0f8, 0x300, 0x304, 0x310, 0x318, 0x320, 0x324, 0x328,
+	/* Preserve hw_params-selected capture HPF across default DSP init. */
+	SUN50I_A133_ADC_HPF_H, SUN50I_A133_ADC_HPF_L,
+};
+
 struct a133_stream_clocks {
 	struct clk *module;
 	struct clk *parent;
@@ -365,6 +376,12 @@ struct sun4i_codec {
 	struct clk	*clk_module;
 	bool a133;
 	bool a133_apb_on;
+	struct snd_soc_component *a133_component;
+	unsigned int a133_sleep_values[ARRAY_SIZE(a133_sleep_regs)];
+	bool a133_pm_suspended, a133_pm_fault, a133_pm_deep;
+	bool a133_pm_saved, a133_pm_irq_owned;
+	bool a133_pm_module[2], a133_pm_audio[2];
+	unsigned long a133_pm_rate[2];
 	struct regulator *a133_supply[2];
 	bool a133_supply_on[2];
 	struct clk *a133_pll_audio;
@@ -387,6 +404,7 @@ struct sun4i_codec {
 	bool jack_active;
 	bool jack_fault;
 	bool jack_registered;
+	bool jack_resume_fallback;
 	struct snd_soc_card *jack_card;
 	struct snd_soc_jack headphone_jack;
 
@@ -403,6 +421,11 @@ struct sun4i_codec {
 static void sun50i_a133_release_clocks(struct sun4i_codec *scodec,
 				     struct a133_stream_clocks *stream)
 {
+	unsigned int index = stream - scodec->a133_stream;
+
+	/* A close/hw_free while suspended must not revive released votes. */
+	scodec->a133_pm_module[index] = false;
+	scodec->a133_pm_audio[index] = false;
 	if (stream->module_enabled) {
 		clk_disable_unprepare(stream->module);
 		stream->module_enabled = false;
@@ -2681,6 +2704,7 @@ static int a133_component_probe(struct snd_soc_component *c)
 		if (ret < 0)
 			return ret;
 	}
+	scodec->a133_component = c;
 	/* A component reprobe must reflect the freshly muted register state. */
 	mutex_lock(&scodec->a133_volume_lock);
 	scodec->a133_dac_muted = true;
@@ -3273,6 +3297,12 @@ static void a133_jack_work(struct work_struct *work)
 	}
 	events = scodec->jack_pending;
 	scodec->jack_pending = 0;
+	/* Stock reinitializes detection after power loss and reports absent
+	 * if no new edge arrives. A real edge takes precedence over fallback.
+	 */
+	if (!events && scodec->jack_resume_fallback)
+		events = BIT(4);
+	scodec->jack_resume_fallback = false;
 	mutex_unlock(&scodec->jack_lock);
 
 	/* Coalesced opposite edges cannot establish the final physical state. */
@@ -3439,6 +3469,349 @@ setup_done:
 	return 0;
 }
 
+
+static int a133_codec_sleep_snapshot(struct sun4i_codec *scodec)
+{
+	static const struct { unsigned int reg, off; } quiet[] = {
+		{ 0x000, BIT(31) }, { 0x004, GENMASK(16, 0) },
+		{ 0x010, BIT(4) | BIT(0) },
+		{ 0x030, BIT(28) | BIT(3) | BIT(0) },
+		{ 0x0f0, BIT(31) | BIT(29) | BIT(28) },
+		{ 0x0f8, BIT(31) | BIT(29) | BIT(28) },
+		{ 0x300, BIT(31) | BIT(30) }, { 0x304, BIT(31) | BIT(30) },
+		{ 0x310, BIT(15) | BIT(14) }, { 0x318, BIT(7) },
+		{ 0x324, BIT(15) | BIT(11) | BIT(10) },
+	};
+	unsigned int i, val;
+	int ret;
+
+	/* ASoC returns success even if a DAPM event failed. Check physical off. */
+	for (i = 0; i < ARRAY_SIZE(quiet); i++) {
+		ret = regmap_read(scodec->regmap, quiet[i].reg, &val);
+		if (ret)
+			return ret;
+		if (val & quiet[i].off)
+			return -EBUSY;
+	}
+	if (!scodec->a133_dac_muted)
+		return -EBUSY;
+	if (scodec->gpio_pa) {
+		ret = gpiod_get_value_cansleep(scodec->gpio_pa);
+		if (ret)
+			return ret < 0 ? ret : -EBUSY;
+	}
+	for (i = 0; i < ARRAY_SIZE(a133_sleep_regs); i++) {
+		ret = regmap_read(scodec->regmap, a133_sleep_regs[i],
+				  &scodec->a133_sleep_values[i]);
+		if (ret)
+			return ret;
+	}
+	scodec->a133_pm_saved = true;
+	return 0;
+}
+
+static int a133_codec_sleep_resources_off(struct sun4i_codec *scodec)
+{
+	unsigned int i;
+	int ret;
+
+	mutex_lock(&scodec->a133_clock_lock);
+	for (i = 0; i < ARRAY_SIZE(scodec->a133_stream); i++) {
+		struct a133_stream_clocks *stream = &scodec->a133_stream[i];
+
+		scodec->a133_pm_module[i] = stream->module_enabled;
+		scodec->a133_pm_audio[i] = stream->audio_enabled;
+		scodec->a133_pm_rate[i] = clk_get_rate(stream->module);
+	}
+	/* Match stock's supply-before-clock shutdown, after outputs are off. */
+	for (i = 0; i < ARRAY_SIZE(scodec->a133_supply); i++) {
+		if (!scodec->a133_supply_on[i])
+			continue;
+		ret = regulator_disable(scodec->a133_supply[i]);
+		if (ret)
+			goto out;
+		scodec->a133_supply_on[i] = false;
+	}
+	for (i = 0; i < ARRAY_SIZE(scodec->a133_stream); i++) {
+		struct a133_stream_clocks *stream = &scodec->a133_stream[i];
+
+		/* Keep exclusive rate reservations across the clock cycle. */
+		if (stream->module_enabled) {
+			clk_disable_unprepare(stream->module);
+			stream->module_enabled = false;
+		}
+		if (stream->audio_enabled) {
+			clk_disable_unprepare(scodec->a133_pll_audio);
+			stream->audio_enabled = false;
+		}
+	}
+	a133_codec_apb_release(scodec);
+	ret = 0;
+out:
+	mutex_unlock(&scodec->a133_clock_lock);
+	return ret;
+}
+
+static int a133_codec_sleep_resources_on(struct sun4i_codec *scodec)
+{
+	unsigned int i;
+	int ret;
+
+	/* No host/register/clock operation may precede the deep CCU gate. */
+	if (scodec->a133_pm_deep) {
+		ret = sun50i_a133_ccu_deep_ready();
+		if (ret)
+			return ret;
+	}
+	mutex_lock(&scodec->a133_clock_lock);
+	for (i = 0; i < ARRAY_SIZE(scodec->a133_supply); i++) {
+		ret = a133_codec_supply_enable(scodec, i);
+		if (ret)
+			goto out;
+	}
+	ret = a133_codec_apb_enable(scodec);
+	if (ret)
+		goto out;
+	if (reset_control_status(scodec->rst) != 0 ||
+	    !__clk_is_enabled(scodec->clk_apb)) {
+		ret = -EIO;
+		goto out;
+	}
+	for (i = 0; i < ARRAY_SIZE(scodec->a133_stream); i++) {
+		struct a133_stream_clocks *stream = &scodec->a133_stream[i];
+
+		if (scodec->a133_pm_audio[i] && !stream->audio_enabled) {
+			if (!stream->audio_claimed) {
+				ret = -EIO;
+				goto out;
+			}
+			ret = clk_prepare_enable(scodec->a133_pll_audio);
+			if (ret)
+				goto out;
+			stream->audio_enabled = true;
+		}
+		if (scodec->a133_pm_audio[i] &&
+		    (!__clk_is_enabled(scodec->a133_pll_audio) ||
+		     clk_get_rate(scodec->a133_pll_audio) != 98304000)) {
+			ret = -EIO;
+			goto out;
+		}
+		if (!scodec->a133_pm_module[i])
+			continue;
+		if (!stream->module_claimed || !stream->parent ||
+		    clk_get_rate(stream->module) != scodec->a133_pm_rate[i] ||
+		    !clk_is_match(clk_get_parent(stream->module), stream->parent)) {
+			ret = -EIO;
+			goto out;
+		}
+		if (!stream->module_enabled) {
+			ret = clk_prepare_enable(stream->module);
+			if (ret)
+				goto out;
+			stream->module_enabled = true;
+		}
+		if (!__clk_is_enabled(stream->module)) {
+			ret = -EIO;
+			goto out;
+		}
+	}
+	ret = 0;
+out:
+	mutex_unlock(&scodec->a133_clock_lock);
+	return ret;
+}
+
+static void a133_codec_sleep_fence(struct sun4i_codec *scodec, bool block)
+{
+	/* REGCACHE_NONE normally bypasses caching, which also bypasses the
+	 * cache-only write gate. Both flags are required after producers stop.
+	 * With no cache, blocked reads fail and writes cannot touch hardware.
+	 */
+	if (block) {
+		regcache_cache_bypass(scodec->regmap, false);
+		regcache_cache_only(scodec->regmap, true);
+	} else {
+		regcache_cache_only(scodec->regmap, false);
+		regcache_cache_bypass(scodec->regmap, true);
+	}
+}
+
+static int a133_codec_sleep_jack_stop(struct sun4i_codec *scodec)
+{
+	int ret;
+
+	mutex_lock(&scodec->jack_lock);
+	scodec->jack_active = false;
+	scodec->jack_resume_fallback = false;
+	/* A detector fault already owns a disable depth. Do not borrow it. */
+	scodec->a133_pm_irq_owned = !scodec->jack_fault;
+	mutex_unlock(&scodec->jack_lock);
+	if (scodec->a133_pm_irq_owned)
+		disable_irq(scodec->jack_irq);
+	else
+		synchronize_irq(scodec->jack_irq);
+	cancel_delayed_work_sync(&scodec->jack_work);
+	ret = regmap_update_bits(scodec->regmap, A133_HMIC_CTRL, A133_JACK_IRQS, 0);
+	if (ret)
+		return ret;
+	return regmap_update_bits(scodec->regmap, A133_HMIC_BIAS, BIT(23), 0);
+}
+
+static int a133_codec_sleep_registers_restore(struct sun4i_codec *scodec)
+{
+	unsigned int i, val, check;
+	int ret;
+
+	/* Reapply the existing safe-off sequence and DSP initialization first.
+	 * Its temporary hardware gains are replaced by the saved controls below;
+	 * requested digital gain remains in a133_dac_volume throughout.
+	 */
+	ret = a133_component_probe(scodec->a133_component);
+	if (ret)
+		return ret;
+	for (i = 0; i < ARRAY_SIZE(a133_sleep_regs); i++) {
+		val = scodec->a133_sleep_values[i];
+		if (a133_sleep_regs[i] == A133_HMIC_BIAS)
+			val &= ~BIT(23);
+		if (a133_sleep_regs[i] == A133_HMIC_CTRL)
+			val &= ~A133_JACK_IRQS;
+		ret = regmap_write(scodec->regmap, a133_sleep_regs[i], val);
+		if (ret)
+			return ret;
+		ret = regmap_read(scodec->regmap, a133_sleep_regs[i], &check);
+		if (ret)
+			return ret;
+		if (check != val)
+			return -EIO;
+	}
+	/* Discard only old headphone event bits while detector and IRQ are off. */
+	ret = regmap_read(scodec->regmap, A133_HMIC_STATUS, &val);
+	if (ret)
+		return ret;
+	return regmap_write(scodec->regmap, A133_HMIC_STATUS,
+			    A133_DISCARD_CONFIG | (val & A133_JACK_EVENTS));
+}
+
+static int a133_codec_sleep_jack_start(struct sun4i_codec *scodec)
+{
+	int ret = 0;
+
+	mutex_lock(&scodec->jack_lock);
+	scodec->jack_pending = 0;
+	if (!scodec->jack_fault) {
+		ret = regmap_update_bits(scodec->regmap, A133_HMIC_CTRL,
+					A133_JACK_IRQS, scodec->a133_sleep_values[15]);
+		if (!ret)
+			ret = regmap_update_bits(scodec->regmap, A133_HMIC_BIAS,
+						BIT(23), scodec->a133_sleep_values[12]);
+	}
+	if (!ret) {
+		scodec->jack_active = true;
+		scodec->jack_resume_fallback = !scodec->jack_fault;
+	}
+	mutex_unlock(&scodec->jack_lock);
+	if (!ret && scodec->a133_pm_irq_owned) {
+		scodec->a133_pm_irq_owned = false;
+		enable_irq(scodec->jack_irq);
+	}
+	if (!ret && !scodec->jack_fault)
+		/* An IRQ's 250 ms debounce replaces this stock 10 ms fallback. */
+		schedule_delayed_work(&scodec->jack_work, msecs_to_jiffies(10));
+	return ret;
+}
+
+static int a133_codec_sleep_restore(struct device *dev)
+{
+	struct snd_soc_card *card = dev_get_drvdata(dev);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
+	int ret;
+
+	if (!scodec->a133_pm_suspended || !scodec->a133_pm_saved)
+		return -EINVAL;
+	ret = a133_codec_sleep_resources_on(scodec);
+	if (ret)
+		goto fault;
+	a133_codec_sleep_fence(scodec, false);
+	ret = a133_codec_sleep_registers_restore(scodec);
+	if (ret)
+		goto fault;
+	ret = a133_codec_sleep_jack_start(scodec);
+	if (ret)
+		goto fault;
+	scodec->a133_pm_saved = false;
+	scodec->a133_pm_suspended = false;
+	return snd_soc_resume(dev);
+fault:
+	/* Never schedule ASoC's asynchronous D0 transition on failed restore. */
+	scodec->a133_pm_fault = true;
+	a133_codec_sleep_fence(scodec, true);
+	return ret;
+}
+
+static int sun4i_codec_pm_prepare(struct device *dev)
+{
+	struct snd_soc_card *card = dev_get_drvdata(dev);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
+
+	if (!scodec->a133)
+		return 0;
+	if (scodec->a133_pm_fault || scodec->a133_pm_suspended)
+		return -EIO;
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		return sun50i_a133_ccu_deep_ready();
+	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EOPNOTSUPP;
+}
+
+static int sun4i_codec_pm_suspend(struct device *dev)
+{
+	struct snd_soc_card *card = dev_get_drvdata(dev);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
+	int ret, rollback;
+
+	if (!scodec->a133)
+		return 0;
+	ret = snd_soc_suspend(dev);
+	if (ret)
+		return ret;
+	scodec->a133_pm_suspended = true;
+	scodec->a133_pm_deep = pm_suspend_target_state == PM_SUSPEND_MEM;
+	ret = a133_codec_sleep_snapshot(scodec);
+	if (ret) {
+		scodec->a133_pm_suspended = false;
+		snd_soc_resume(dev);
+		return ret;
+	}
+	ret = a133_codec_sleep_jack_stop(scodec);
+	if (ret)
+		goto rollback;
+	a133_codec_sleep_fence(scodec, true);
+	ret = a133_codec_sleep_resources_off(scodec);
+	if (!ret)
+		return 0;
+rollback:
+	rollback = a133_codec_sleep_restore(dev);
+	if (rollback)
+		dev_err(dev, "codec suspend rollback failed: %d\n", rollback);
+	return ret;
+}
+
+static int sun4i_codec_pm_resume(struct device *dev)
+{
+	struct snd_soc_card *card = dev_get_drvdata(dev);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
+
+	if (!scodec->a133)
+		return 0;
+	if (scodec->a133_pm_fault)
+		return -EIO;
+	return a133_codec_sleep_restore(dev);
+}
+
+static const struct dev_pm_ops sun4i_codec_pm_ops = {
+	.prepare = sun4i_codec_pm_prepare,
+	.suspend = sun4i_codec_pm_suspend,
+	.resume = sun4i_codec_pm_resume,
+};
 
 static int sun4i_codec_probe(struct platform_device *pdev)
 {
@@ -3607,6 +3980,7 @@ static void sun4i_codec_remove(struct platform_device *pdev)
 static struct platform_driver sun4i_codec_driver = {
 	.driver = {
 		.name = "sun4i-codec",
+		.pm = pm_sleep_ptr(&sun4i_codec_pm_ops),
 		.of_match_table = sun4i_codec_of_match,
 	},
 	.probe = sun4i_codec_probe,
