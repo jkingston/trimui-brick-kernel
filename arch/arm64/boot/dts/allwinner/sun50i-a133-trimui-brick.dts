@@ -23,6 +23,16 @@
 		stdout-path = "serial0:115200n8";
 	};
 
+	reg_usb1_vbus: regulator-usb1-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb1-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&r_pio 0 8 GPIO_ACTIVE_HIGH>; /* PL8 */
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
 	gamepad {
 		compatible = "gpio-keys";
 		label = "TrimUI Brick Gamepad";
@@ -462,7 +472,15 @@
 	status = "okay";
 };
 
-/* The shared PHY retains ownership of auxiliary PHY1/EHCI1 resources. */
+&ehci1 {
+	status = "okay";
+};
+
+&ohci1 {
+	status = "okay";
+};
+
+/* Bottom-port OHCI also holds the stock auxiliary OHCI1 clocks/reset. */
 &ohci0 {
 	compatible = "trimui,brick-ohci", "generic-ohci";
 	clocks = <&ccu CLK_BUS_OHCI0>, <&ccu CLK_USB_OHCI0>,
@@ -473,6 +491,7 @@
 };
 
 &usbphy {
+	usb1_vbus-supply = <&reg_usb1_vbus>;
 	compatible = "trimui,brick-usb-phy", "allwinner,sun20i-d1-usb-phy";
 	clocks = <&ccu CLK_USB_PHY0>, <&ccu CLK_USB_PHY1>, <&ccu CLK_BUS_EHCI1>;
 	clock-names = "usb0_phy", "usb1_phy", "pmu1_clk";

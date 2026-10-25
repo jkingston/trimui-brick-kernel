@@ -258,7 +258,7 @@ static void sun4i_usb_phy_passby(struct sun4i_usb_phy *phy, int enable)
 	writel(reg_value, phy->pmu);
 }
 
-/* Brick-only auxiliary clocks; PHY1 is not exposed to consumers. */
+/* PHY0 keeps a shared vote on the Brick PHY1 clock/reset domain. */
 static int sun4i_usb_phy1_clock_enable(struct sun4i_usb_phy_data *data)
 {
 	struct sun4i_usb_phy *phy1 = &data->phys[1];
@@ -306,6 +306,14 @@ static int sun4i_usb_phy_init(struct phy *_phy)
 	int ret;
 	u32 val;
 
+	/* OHCI1 can be the first consumer, before EHCI1 or PHY0 probes. */
+	if (data->cfg->needs_phy1_clock && phy->index == 1) {
+		ret = sun4i_usb_phy1_clock_enable(data);
+		if (ret)
+			return ret;
+		goto clocks_ready;
+	}
+
 	ret = clk_prepare_enable(phy->clk);
 	if (ret)
 		return ret;
@@ -323,6 +331,7 @@ static int sun4i_usb_phy_init(struct phy *_phy)
 		return ret;
 	}
 
+clocks_ready:
 	if (data->cfg->needs_phy1_clock && phy->index == 0) {
 		ret = sun4i_usb_phy1_clock_enable(data);
 		if (ret) {
@@ -477,6 +486,10 @@ static int sun4i_usb_phy_exit(struct phy *_phy)
 	}
 
 	sun4i_usb_phy_passby(phy, 0);
+	if (data->cfg->needs_phy1_clock && phy->index == 1) {
+		sun4i_usb_phy1_clock_disable(data);
+		return 0;
+	}
 	reset_control_assert(phy->reset);
 	clk_disable_unprepare(phy->clk2);
 	clk_disable_unprepare(phy->clk);
@@ -833,10 +846,6 @@ static struct phy *sun4i_usb_phy_xlate(struct device *dev,
 {
 	struct sun4i_usb_phy_data *data = dev_get_drvdata(dev);
 
-	/* Auxiliary PHY1 is reserved for the Brick PHY0 clock dependency. */
-	if (data->cfg->needs_phy1_clock && args->args[0] != 0)
-		return ERR_PTR(-ENODEV);
-
 	if (args->args[0] >= data->num_phys)
 		return ERR_PTR(-ENODEV);
 
@@ -849,20 +858,27 @@ static struct phy *sun4i_usb_phy_xlate(struct device *dev,
 static void sun4i_usb_phy_shutdown(struct platform_device *pdev)
 {
 	struct sun4i_usb_phy_data *data = dev_get_drvdata(&pdev->dev);
-	struct phy *phy0 = data->phys[0].phy;
-	int ret;
+	int i, ret;
 
-	if (!data->cfg->needs_phy1_clock || data->dr_mode != USB_DR_MODE_HOST)
+	if (!data->cfg->needs_phy1_clock)
 		return;
 
 	/* HCD shutdown quiesces transfers but does not drop its PHY power vote. */
-	mutex_lock(&phy0->mutex);
-	data->phy0_init = false;
-	ret = sun4i_usb_phy_power_off(phy0);
-	mutex_unlock(&phy0->mutex);
+	for (i = 0; i < data->num_phys; i++) {
+		struct phy *phy = data->phys[i].phy;
+
+		if (!i && data->dr_mode != USB_DR_MODE_HOST)
+			continue;
+		mutex_lock(&phy->mutex);
+		if (!i)
+			data->phy0_init = false;
+		ret = sun4i_usb_phy_power_off(phy);
+		mutex_unlock(&phy->mutex);
+		if (ret)
+			dev_err(&pdev->dev,
+				"Cannot disable USB%d VBUS at shutdown: %d\n", i, ret);
+	}
 	cancel_delayed_work_sync(&data->detect);
-	if (ret)
-		dev_err(&pdev->dev, "Cannot disable host VBUS at shutdown: %d\n", ret);
 }
 
 static void sun4i_usb_phy_remove(struct platform_device *pdev)
@@ -962,7 +978,10 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 			continue;
 
 		snprintf(name, sizeof(name), "usb%d_reset", i);
-		phy->reset = devm_reset_control_get(dev, name);
+		if (data->cfg->needs_phy1_clock && i == 1)
+			phy->reset = devm_reset_control_get_shared(dev, name);
+		else
+			phy->reset = devm_reset_control_get(dev, name);
 		if (IS_ERR(phy->reset)) {
 			if (PTR_ERR(phy->reset) == -ENOENT)
 				break;
@@ -1037,7 +1056,7 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 		if (data->num_phys < 2 || !data->phys[1].clk2)
 			return dev_err_probe(dev, -EINVAL,
 					     "Brick PHY requires PHY1 and pmu1_clk\n");
-		data->phy1_bus_reset = devm_reset_control_get_exclusive(dev,
+		data->phy1_bus_reset = devm_reset_control_get_shared(dev,
 								"usb1_bus_reset");
 		if (IS_ERR(data->phy1_bus_reset))
 			return dev_err_probe(dev, PTR_ERR(data->phy1_bus_reset),
