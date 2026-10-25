@@ -50,6 +50,15 @@ static struct lock_class_key sunxi_pinctrl_irq_request_class;
 static struct irq_chip sunxi_pinctrl_edge_irq_chip;
 static struct irq_chip sunxi_pinctrl_level_irq_chip;
 
+static const struct syscore_ops sunxi_pinctrl_syscore_ops;
+
+static void sunxi_pinctrl_deep_unregister(void *data)
+{
+	struct sunxi_pinctrl_deep_context *deep = data;
+
+	unregister_syscore(&deep->syscore);
+}
+
 static bool sunxi_pinctrl_accessible(const struct sunxi_pinctrl *pctl)
 {
 	return !READ_ONCE(pctl->deep.fault);
@@ -1477,7 +1486,8 @@ static int sunxi_pinctrl_irq_set_wake(struct irq_data *d, unsigned int on)
 	struct sunxi_pinctrl *pctl = irq_data_get_irq_chip_data(d);
 	u8 bank = d->hwirq / IRQ_PER_BANK;
 
-	if (!sunxi_pinctrl_accessible(pctl))
+	/* An existing wake vote must remain releasable after a terminal fault. */
+	if (!sunxi_pinctrl_accessible(pctl) && on)
 		return -EIO;
 
 	return irq_set_irq_wake(pctl->irq[bank], on);
@@ -1551,9 +1561,6 @@ static void sunxi_pinctrl_irq_handler(struct irq_desc *desc)
 	struct sunxi_pinctrl *pctl = irq_desc_get_handler_data(desc);
 	unsigned long bank, reg, val;
 
-	if (!sunxi_pinctrl_accessible(pctl))
-		return;
-
 	for (bank = 0; bank < pctl->desc->irq_banks; bank++)
 		if (irq == pctl->irq[bank])
 			break;
@@ -1561,6 +1568,15 @@ static void sunxi_pinctrl_irq_handler(struct irq_desc *desc)
 	WARN_ON(bank == pctl->desc->irq_banks);
 
 	chained_irq_enter(chip, desc);
+	if (!sunxi_pinctrl_accessible(pctl)) {
+		/*
+		 * The fault path has disabled this parent. Complete Fast-EOI
+		 * handling, but leave mask/ack parents masked.
+		 */
+		if (chip->irq_eoi)
+			chained_irq_exit(chip, desc);
+		return;
+	}
 
 	reg = sunxi_irq_status_reg_from_bank(pctl->desc, bank);
 	val = readl(pctl->membase + reg);
@@ -1813,12 +1829,20 @@ static int sunxi_pinctrl_deep_init(struct platform_device *pdev,
 	struct sunxi_pinctrl_deep_context *deep = &pctl->deep;
 	unsigned int first_pin, last_pin;
 	size_t count;
+	int ret;
 
 	if (!of_property_read_bool(pdev->dev.of_node, "allwinner,stock-suspend"))
 		return 0;
 	if (!pctl->desc->a133_deep_context ||
 	    !of_machine_is_compatible("trimui,brick"))
 		return -ENODEV;
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret) {
+		if (IS_ENABLED(CONFIG_SUN50I_A133_CCU_SLEEP) &&
+		    ret == -EOPNOTSUPP)
+			return -EPROBE_DEFER;
+		return ret;
+	}
 
 	first_pin = pctl->desc->pins[0].pin.number - pctl->desc->pin_base;
 	last_pin = pctl->desc->pins[pctl->desc->npins - 1].pin.number -
@@ -1840,6 +1864,14 @@ static int sunxi_pinctrl_deep_init(struct platform_device *pdev,
 	    !deep->irq_debounce)
 		return -ENOMEM;
 
+	deep->syscore.ops = &sunxi_pinctrl_syscore_ops;
+	deep->syscore.data = pctl;
+	register_syscore(&deep->syscore);
+	ret = devm_add_action_or_reset(&pdev->dev,
+				       sunxi_pinctrl_deep_unregister, deep);
+	if (ret)
+		return ret;
+
 	deep->enabled = true;
 	return 0;
 }
@@ -1848,16 +1880,18 @@ static int sunxi_pinctrl_deep_prepare(struct device *dev)
 {
 	struct sunxi_pinctrl *pctl = dev_get_drvdata(dev);
 
+	if (pctl->deep.fault)
+		return -EIO;
 	if (!pctl->deep.enabled || pm_suspend_target_state != PM_SUSPEND_MEM)
 		return 0;
-	if (pctl->deep.fault || pctl->deep.saved)
-		return pctl->deep.fault ? -EIO : -EBUSY;
+	if (pctl->deep.saved)
+		return -EBUSY;
 	return sun50i_a133_ccu_deep_ready();
 }
 
-static int sunxi_pinctrl_deep_suspend_noirq(struct device *dev)
+static int sunxi_pinctrl_deep_syscore_suspend(void *data)
 {
-	struct sunxi_pinctrl *pctl = dev_get_drvdata(dev);
+	struct sunxi_pinctrl *pctl = data;
 	struct sunxi_pinctrl_deep_context *deep = &pctl->deep;
 	unsigned long flags;
 	unsigned int bank, word;
@@ -1961,9 +1995,8 @@ static void sunxi_pinctrl_deep_fault(struct sunxi_pinctrl *pctl, int error)
 	dev_err(pctl->dev, "A133 PIO deep context restore failed: %d\n", error);
 }
 
-static int sunxi_pinctrl_deep_resume_noirq(struct device *dev)
+static int sunxi_pinctrl_deep_resume(struct sunxi_pinctrl *pctl)
 {
-	struct sunxi_pinctrl *pctl = dev_get_drvdata(dev);
 	struct sunxi_pinctrl_deep_context *deep = &pctl->deep;
 	unsigned long flags;
 	unsigned int bank, word;
@@ -2023,10 +2056,20 @@ fault:
 	return ret;
 }
 
+static void sunxi_pinctrl_deep_syscore_resume(void *data)
+{
+	struct sunxi_pinctrl *pctl = data;
+
+	sunxi_pinctrl_deep_resume(pctl);
+}
+
+static const struct syscore_ops sunxi_pinctrl_syscore_ops = {
+	.suspend = sunxi_pinctrl_deep_syscore_suspend,
+	.resume = sunxi_pinctrl_deep_syscore_resume,
+};
+
 const struct dev_pm_ops sunxi_pinctrl_pm_ops = {
 	.prepare = sunxi_pinctrl_deep_prepare,
-	.suspend_noirq = sunxi_pinctrl_deep_suspend_noirq,
-	.resume_noirq = sunxi_pinctrl_deep_resume_noirq,
 };
 EXPORT_SYMBOL_GPL(sunxi_pinctrl_pm_ops);
 

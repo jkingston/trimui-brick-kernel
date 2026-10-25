@@ -15,6 +15,7 @@
 
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
+#include <linux/syscore_ops.h>
 
 #define PA_BASE	0
 #define PB_BASE	32
@@ -167,6 +168,7 @@ struct sunxi_pinctrl_regulator {
 };
 
 struct sunxi_pinctrl_deep_context {
+	struct syscore			syscore;
 	u32				*bank_regs;
 	u32				*irq_cfg;
 	u32				*irq_ctrl;
