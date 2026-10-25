@@ -157,7 +157,23 @@ static PHYS_HEAP_FUNCTIONS heap_funcs = {
 /* Keep the boot-established domain on. Vendor source documents an A133
  * JTAG/GPU-reset ordering erratum; no speculative resets are performed here.
  * Firmware manages its internal power islands. System suspend is refused
- * until a separately validated domain/clock restore sequence exists. */
+ * until a separately validated domain/clock restore sequence exists.
+ *
+ * In hardware mode, firmware idle leaves the PPU in HOST (status 1),
+ * with the 3D isolation bit set and the host interface still clocked.
+ * Accept that state only when waking from OFF; RGXDoStart restarts firmware.
+ * ALLOFF and inconsistent reset, isolation or clock state need full recovery. */
+static bool sunxi_apm_wake_valid(bool was_off, unsigned int reset,
+ unsigned int gate, unsigned int isolation, unsigned int status,
+ unsigned int control, unsigned int irqmask, unsigned long rate,
+ unsigned int dfs)
+{
+ if (!(reset & 1) || !(gate & 1) || (control & 3) != 2 ||
+     (irqmask & 1) || rate != 432000000UL || dfs != 1)
+  return false;
+ return ((status & 3) == 0 && (isolation & 3) == 0) ||
+        (was_off && (status & 3) == 1 && (isolation & 3) == 2);
+}
 static PVRSRV_ERROR sunxi_pre_power(IMG_HANDLE handle,
  PVRSRV_SYS_POWER_STATE next, PVRSRV_SYS_POWER_STATE old_state,
  PVRSRV_POWER_FLAGS flags)
@@ -168,11 +184,14 @@ static PVRSRV_ERROR sunxi_pre_power(IMG_HANDLE handle,
   return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
  }
  if (next == PVRSRV_SYS_POWER_STATE_ON) {
-  if ((readl(gpu->ppu + SUNXI_PPU_STATUS) & 3) != 0)
+  if (!sunxi_apm_wake_valid(old_state == PVRSRV_SYS_POWER_STATE_OFF,
+      readl(gpu->ppu + SUNXI_PPU_RSTN), readl(gpu->ppu + SUNXI_PPU_GATE),
+      readl(gpu->ppu + SUNXI_PPU_ISOLATION), readl(gpu->ppu + SUNXI_PPU_STATUS),
+      readl(gpu->ppu + SUNXI_PPU_CONTROL), readl(gpu->ppu + SUNXI_PPU_IRQ_MASK),
+      clk_get_rate(gpu->core), readl(gpu->dfs))) {
+   dev_err(gpu->dev, "Unsupported GPU wake PPU/clock state\n");
    return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
-  /* Preserve boot-selected DFS instead of changing GPU frequency. */
-  if (!clk_get_rate(gpu->core))
-   return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+  }
  }
  return PVRSRV_OK;
 }
@@ -256,7 +275,7 @@ PVRSRV_ERROR SysDevInit(void *osdev, PVRSRV_DEVICE_CONFIG **result)
   goto fail;
  }
  gpu->timing.ui32CoreClockSpeed = (core_rate / 16) * (16 - __ffs(dfs));
- gpu->timing.bEnableActivePM = IMG_FALSE;
+ gpu->timing.bEnableActivePM = IMG_TRUE;
  gpu->timing.bEnableRDPowIsland = IMG_TRUE;
  gpu->timing.ui32ActivePMLatencyms = 100;
  gpu->data.psRGXTimingInfo = &gpu->timing;
