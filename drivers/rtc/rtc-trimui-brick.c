@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* A133 RTC preserving the Brick firmware's clock configuration. */
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
@@ -12,6 +13,7 @@
 #include <linux/rtc.h>
 #include <linux/timekeeping.h>
 #include <linux/spinlock.h>
+#include <linux/suspend.h>
 
 #include "brick_radio_clocks.h"
 
@@ -32,6 +34,9 @@
 
 struct brick_rtc {
 	struct brick_radio_clocks *radio_clocks;
+	struct clk *bus;
+	struct reset_control *reset;
+	bool wake_armed;
 	void __iomem *base;
 	struct mutex lock;
 	spinlock_t alarm_lock;
@@ -527,6 +532,7 @@ static irqreturn_t brick_rtc_irq(int irq, void *data)
 	spin_unlock_irqrestore(&chip->alarm_lock, flags);
 	if (!pending)
 		return IRQ_NONE;
+	pm_wakeup_event(chip->rtc->dev.parent, 0);
 	rtc_update_irq(chip->rtc, 1, RTC_IRQF | RTC_AF);
 	return IRQ_HANDLED;
 }
@@ -579,6 +585,16 @@ static const struct rtc_class_ops brick_rtc_ops = {
 	.alarm_irq_enable = brick_rtc_alarm_irq_enable,
 };
 
+static void brick_rtc_wakeup_cleanup(void *data)
+{
+	struct device *dev = data;
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+
+	if (chip->wake_armed)
+		disable_irq_wake(chip->irq);
+	device_init_wakeup(dev, false);
+}
+
 static int brick_rtc_register_time(struct platform_device *pdev, struct brick_rtc *chip)
 {
 	struct device *dev = &pdev->dev;
@@ -607,6 +623,12 @@ static int brick_rtc_register_time(struct platform_device *pdev, struct brick_rt
 			       dev_name(dev), chip);
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot request alarm IRQ\n");
+	ret = device_init_wakeup(dev, true);
+	if (ret)
+		return ret;
+	ret = devm_add_action_or_reset(dev, brick_rtc_wakeup_cleanup, dev);
+	if (ret)
+		return ret;
 	rtc->ops = &brick_rtc_ops;
 	rtc->alarm_offset_max = BRICK_RTC_ALARM_MAX_GAP;
 	rtc->range_min = 0;
@@ -654,6 +676,8 @@ static int brick_rtc_probe(struct platform_device *pdev)
 	bus = devm_clk_get_enabled(dev, "bus");
 	if (IS_ERR(bus))
 		return dev_err_probe(dev, PTR_ERR(bus), "cannot enable bus clock\n");
+	chip->bus = bus;
+	chip->reset = reset;
 	chip->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(chip->base))
 		return PTR_ERR(chip->base);
@@ -672,13 +696,65 @@ static void brick_rtc_sync_state(struct device *dev)
 	brick_radio_clocks_sync(chip->radio_clocks);
 }
 
-static int brick_rtc_suspend(struct device *dev)
+static int brick_rtc_prepare(struct device *dev)
 {
-	/* Bus-off shadow synchronization and wakeup are not implemented. */
-	return -EBUSY;
+	/* No bus-off shadow or deep-memory resume protocol is implemented. */
+	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(brick_rtc_pm_ops, brick_rtc_suspend, NULL);
+static int brick_rtc_suspend(struct device *dev)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+	unsigned long flags;
+	int ret = 0;
+	bool arm;
+
+	mutex_lock(&chip->lock);
+	if (chip->wake_armed) {
+		ret = -EBUSY;
+		goto out;
+	}
+	/* Retain the bus clock and every shared radio clock vote. */
+	if (reset_control_status(chip->reset) != 0 || !__clk_is_enabled(chip->bus)) {
+		ret = -EIO;
+		goto out;
+	}
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	arm = device_may_wakeup(dev) && chip->alarm_owned;
+	if (chip->stopping || (arm && (!chip->irq_ready || chip->irq_masked ||
+	    chip->time_uncertain || chip->alarm_untrusted || chip->alarm_fault)))
+		ret = -EBUSY;
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	if (!ret && arm) {
+		ret = enable_irq_wake(chip->irq);
+		if (!ret)
+			chip->wake_armed = true;
+	}
+out:
+	mutex_unlock(&chip->lock);
+	return ret;
+}
+
+static int brick_rtc_resume(struct device *dev)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+	int ret = 0;
+
+	mutex_lock(&chip->lock);
+	if (chip->wake_armed) {
+		ret = disable_irq_wake(chip->irq);
+		if (!ret)
+			chip->wake_armed = false;
+	}
+	mutex_unlock(&chip->lock);
+	return ret;
+}
+
+static const struct dev_pm_ops brick_rtc_pm_ops = {
+	.prepare = brick_rtc_prepare,
+	.suspend = brick_rtc_suspend,
+	.resume = brick_rtc_resume,
+};
 
 static const struct of_device_id brick_rtc_match[] = {
 	{ .compatible = "trimui,brick-rtc" },
