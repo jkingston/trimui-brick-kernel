@@ -35,6 +35,10 @@ properties:
     maxItems: 1
     description: Active-high host signal requesting the controller remain awake.
 
+  host-wake-gpios:
+    maxItems: 1
+    description: Controller signal indicating activity to the host.
+
   clocks:
     items:
       - description: Shared low-power reference clock
