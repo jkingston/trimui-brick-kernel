@@ -42,6 +42,14 @@ properties:
       Delay in ms between disabling the backlight using GPIO and setting PWM
       value to 0.
 
+  max-brightness:
+    description:
+      Highest brightness index exposed to userspace. This limits the usable
+      range without changing the duty-cycle scale of the full brightness table.
+      When interpolation is enabled, this is an index in the interpolated table.
+      Must not exceed the highest index of the table.
+    minimum: 1
+
   num-interpolated-steps:
     description:
       Number of interpolated steps between each value of brightness-levels

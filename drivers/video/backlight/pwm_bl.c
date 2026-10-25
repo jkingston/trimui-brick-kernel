@@ -596,6 +596,19 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 		pb->scale = data->max_brightness;
 	}
 
+	/* A software limit must not rescale the physical duty-cycle table. */
+	if (of_property_present(pdev->dev.of_node, "max-brightness")) {
+		u32 limit;
+
+		ret = of_property_read_u32(pdev->dev.of_node, "max-brightness", &limit);
+		if (ret || !limit || limit > data->max_brightness) {
+			ret = dev_err_probe(&pdev->dev, -EINVAL,
+					    "invalid maximum brightness limit\n");
+			goto err_alloc;
+		}
+		data->max_brightness = limit;
+	}
+
 	pb->lth_brightness = data->lth_brightness * (div_u64(state.period,
 				pb->scale));
 
