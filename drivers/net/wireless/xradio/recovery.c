@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/firmware.h>
 #include <linux/mmc/sdio_func.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
+#include <linux/suspend.h>
 #include "xradio.h"
 #include "bh.h"
 #include "sdio.h"
@@ -219,14 +221,24 @@ void xrs_recovery_cancel(struct xradio_common *hw)
  */
 int xrs_pm_prepare(struct xradio_common *hw)
 {
+	bool deep = pm_suspend_target_state == PM_SUSPEND_MEM;
 	unsigned long flags;
 	int ret = 0;
+
+	if (deep) {
+		ret = sun50i_a133_ccu_deep_ready();
+		if (ret)
+			return ret;
+	} else if (pm_suspend_target_state != PM_SUSPEND_TO_IDLE) {
+		return -EOPNOTSUPP;
+	}
 
 	spin_lock_irqsave(&hw->recovery_lock, flags);
 	if (hw->removing || hw->pm_prepared) {
 		spin_unlock_irqrestore(&hw->recovery_lock, flags);
 		return -EBUSY;
 	}
+	hw->pm_deep = deep;
 	hw->pm_prepared = true;
 	spin_unlock_irqrestore(&hw->recovery_lock, flags);
 	cancel_delayed_work_sync(&hw->recovery_health);
@@ -259,7 +271,7 @@ int xrs_pm_stop_locked(struct xradio_common *hw)
 	detached = xrs_runtime_detached(hw);
 	if (!ret)
 		ret = detached;
-	if (!ret && (hw->irq_claimed || hw->bh_running))
+	if (!ret && (hw->irq_claimed || hw->bh_running || hw->firmware_loaded))
 		ret = -EBUSY;
 	hw->pm_stopped = true;
 	if (ret && !hw->irq_claimed && !hw->bh_running) {
@@ -289,6 +301,15 @@ int xrs_pm_restore_locked(struct xradio_common *hw)
 		return hw->pm_error;
 	if (!hw->pm_stopped)
 		return 0;
+	/* The transport is already joined. A failed syscore restore must not
+	 * even claim the host: that can runtime-resume inaccessible hardware.
+	 * Keep the admission mode across child ->start and suspend aborts.
+	 */
+	if (hw->pm_deep) {
+		ret = sun50i_a133_ccu_deep_ready();
+		if (ret)
+			goto dead;
+	}
 	/* A failed MMC parent resume may still be followed by child resume.
 	 * Do not reset/reload while MMC retains suspended or removed state.
 	 */
@@ -313,10 +334,15 @@ int xrs_pm_restore_locked(struct xradio_common *hw)
 	ieee80211_wake_queues(hw->hw);
 	return 0;
 dead:
-	xrs_transport_stop(hw);
+	/* Only a partial restart owns new transport resources. In particular,
+	 * do not touch the host again after a CCU or MMC readiness failure.
+	 */
 	if (restarted) {
-		int reset_ret = xrs_sdio_power_reset(hw->sdio_func,
-						   &hw->function_enabled);
+		int reset_ret;
+
+		xrs_transport_stop(hw);
+		reset_ret = xrs_sdio_power_reset(hw->sdio_func,
+						 &hw->function_enabled);
 
 		if (reset_ret)
 			dev_err(hw->pdev, "WLAN restore failure reset failed: %d\n", reset_ret);

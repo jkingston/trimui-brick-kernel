@@ -162,6 +162,7 @@ struct xradio_common {
 	bool removing, irq_claimed, function_enabled, bh_running, firmware_loaded;
 	int recovery_state;
 	bool pm_prepared; /* recovery_lock; excludes new recovery work */
+	bool pm_deep; /* admitted MEM cycle, including abort/complete */
 	bool pm_stopped; /* wiphy mutex; transport needs a fresh epoch */
 	int pm_error; /* wiphy mutex; terminal stop/restore error */
 	bool recovery_in_progress; /* wiphy mutex; excludes recursive config */

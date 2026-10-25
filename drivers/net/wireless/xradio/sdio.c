@@ -207,8 +207,6 @@ static int sdio_prepare(struct device *dev)
 {
 	struct xradio_common *hw = sdio_get_drvdata(dev_to_sdio_func(dev));
 
-	if (pm_suspend_target_state != PM_SUSPEND_TO_IDLE)
-		return -EOPNOTSUPP;
 	return xrs_pm_prepare(hw);
 }
 
