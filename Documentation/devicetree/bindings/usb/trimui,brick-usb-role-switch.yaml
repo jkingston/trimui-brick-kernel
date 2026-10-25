@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/trimui,brick-usb-role-switch.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: TrimUI Brick bottom USB controller role coordinator
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description: |
+  The bottom PHY is routed between a peripheral MUSB controller and an EHCI/OHCI
+  host pair. All three referenced controller nodes must be disabled; this owner
+  instantiates only the active group. The top USB host remains independent.
+
+properties:
+  compatible:
+    const: trimui,brick-usb-role-switch
+  phys:
+    maxItems: 1
+  phy-names:
+    const: usb
+  id-gpios:
+    maxItems: 1
+  vbus-power-supply:
+    description: AXP2202 USB input supply, identified by the PMIC node.
+  peripheral:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Disabled bottom MUSB controller.
+  ehci:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Disabled bottom EHCI controller.
+  ohci:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Disabled bottom OHCI controller.
+
+required:
+  - compatible
+  - phys
+  - phy-names
+  - id-gpios
+  - vbus-power-supply
+  - peripheral
+  - ehci
+  - ohci
+
+additionalProperties: false
