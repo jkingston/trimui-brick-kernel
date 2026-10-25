@@ -18,6 +18,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
+#include <linux/iommu.h>
 #include <linux/jiffies.h>
 #include <linux/clk.h>
 #include <linux/pm_runtime.h>
@@ -182,6 +183,7 @@ void cedrus_watchdog(struct work_struct *work)
 {
 	struct cedrus_dev *dev;
 	struct cedrus_ctx *ctx;
+	int ret;
 
 	dev = container_of(to_delayed_work(work),
 			   struct cedrus_dev, watchdog_work);
@@ -191,7 +193,10 @@ void cedrus_watchdog(struct work_struct *work)
 		return;
 
 	v4l2_err(&dev->v4l2_dev, "frame processing timed out!\n");
-	reset_control_reset(dev->rstc);
+	ret = reset_control_reset(dev->rstc);
+	if (ret && dev->requires_iommu)
+		panic("%s: VE reset failed (%d); DMA buffers remain owned",
+		      dev_name(dev->dev), ret);
 	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev, ctx->fh.m2m_ctx,
 					 VB2_BUF_STATE_ERROR);
 }
@@ -265,6 +270,18 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 		return -EINVAL;
 
 	dev->capabilities = variant->capabilities;
+	dev->requires_iommu = variant->requires_iommu;
+	if (variant->requires_iommu) {
+		struct iommu_domain *domain = iommu_get_domain_for_dev(dev->dev);
+
+		/* Identity/bypass must not silently replace the A133 DMA contract. */
+		if (!domain || !iommu_is_dma_domain(domain))
+			return dev_err_probe(dev->dev, -EINVAL,
+					     "A133 requires a translated DMA domain\n");
+		if (of_property_count_u32_elems(dev->dev->of_node, "allwinner,sram") != 4)
+			return dev_err_probe(dev->dev, -EINVAL,
+					     "A133 requires both SRAM selectors\n");
+	}
 
 	irq_dec = platform_get_irq(dev->pdev, 0);
 	if (irq_dec <= 0)

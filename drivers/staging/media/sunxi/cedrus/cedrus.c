@@ -643,6 +643,15 @@ static const struct cedrus_variant sun50i_h5_cedrus_variant = {
 	.mod_rate	= 402000000,
 };
 
+/* The shipped A133 MPEG2 register layout matches the tiled MPEG engine.
+ * Other codecs and linear output formats need separate qualification.
+ */
+static const struct cedrus_variant sun50i_a133_cedrus_variant = {
+	.capabilities	= CEDRUS_CAPABILITY_MPEG2_DEC,
+	.mod_rate	= 432000000,
+	.requires_iommu	= true,
+};
+
 static const struct cedrus_variant sun50i_h6_cedrus_variant = {
 	.capabilities	= CEDRUS_CAPABILITY_UNTILED |
 			  CEDRUS_CAPABILITY_MPEG2_DEC |
@@ -693,6 +702,10 @@ static const struct of_device_id cedrus_dt_match[] = {
 	{
 		.compatible = "allwinner,sun50i-h5-video-engine",
 		.data = &sun50i_h5_cedrus_variant,
+	},
+	{
+		.compatible = "allwinner,sun50i-a133-video-engine",
+		.data = &sun50i_a133_cedrus_variant,
 	},
 	{
 		.compatible = "allwinner,sun50i-h6-video-engine",

@@ -50,6 +50,7 @@ enum cedrus_h264_pic_type {
 struct cedrus_control {
 	struct v4l2_ctrl_config cfg;
 	unsigned int		capabilities;
+	bool		requires_iommu;
 };
 
 struct cedrus_h264_run {
@@ -175,6 +176,7 @@ struct cedrus_dec_ops {
 struct cedrus_variant {
 	unsigned int	capabilities;
 	unsigned int	mod_rate;
+	bool		requires_iommu;
 };
 
 struct cedrus_dev {
@@ -198,6 +200,7 @@ struct cedrus_dev {
 	struct reset_control	*rstc;
 
 	unsigned int		capabilities;
+	bool		requires_iommu;
 
 	struct delayed_work	watchdog_work;
 };
