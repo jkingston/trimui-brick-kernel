@@ -50,6 +50,7 @@ properties:
       - allwinner,sun20i-d1-pinctrl
       - allwinner,sun50i-a64-pinctrl
       - allwinner,sun50i-a64-r-pinctrl
+      - allwinner,sun50i-a133-pinctrl
       - allwinner,sun50i-a100-pinctrl
       - allwinner,sun50i-a100-r-pinctrl
       - allwinner,sun50i-h5-pinctrl
@@ -59,6 +60,18 @@ properties:
       - allwinner,sun50i-h616-r-pinctrl
       - allwinner,suniv-f1c100s-pinctrl
       - nextthing,gr8-pinctrl
+
+  vcc-pf18-supply:
+    description: Fixed 1.8 V input to the A133 PF bank selector.
+
+  vcc-pf33-supply:
+    description: Fixed 3.3 V input to the A133 PF bank selector.
+
+  pf-regulator:
+    type: object
+    $ref: /schemas/regulator/regulator.yaml#
+    unevaluatedProperties: false
+    description: A133 PF voltage selector; input rails remain enabled.
 
   reg:
     maxItems: 1
@@ -139,6 +152,21 @@ required:
   - gpio-controller
 
 allOf:
+  - if:
+      properties:
+        compatible:
+          const: allwinner,sun50i-a133-pinctrl
+    then:
+      required:
+        - vcc-pf18-supply
+        - vcc-pf33-supply
+        - pf-regulator
+    else:
+      properties:
+        vcc-pf18-supply: false
+        vcc-pf33-supply: false
+        pf-regulator: false
+
   # FIXME: We should have the pin bank supplies here, but not a lot of
   # boards are defining it at the moment so it would generate a lot of
   # warnings.
@@ -172,6 +200,7 @@ allOf:
       properties:
         compatible:
           enum:
+            - allwinner,sun50i-a133-pinctrl
             - allwinner,sun50i-a100-pinctrl
 
     then:

@@ -28,6 +28,7 @@ properties:
       - const: allwinner,sun50i-a64-emmc
       - const: allwinner,sun50i-a64-mmc
       - const: allwinner,sun50i-a100-emmc
+      - const: allwinner,sun50i-a133-mmc
       - const: allwinner,sun50i-a100-mmc
       - items:
           - enum:
