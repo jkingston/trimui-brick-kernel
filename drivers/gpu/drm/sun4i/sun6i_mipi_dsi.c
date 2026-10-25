@@ -20,6 +20,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_encoder.h>
@@ -1589,16 +1590,44 @@ static const struct of_device_id sun6i_dsi_of_table[] = {
 };
 MODULE_DEVICE_TABLE(of, sun6i_dsi_of_table);
 
-/* Experimental reset/resume ordering is not qualified. Reject system sleep. */
+/* DRM's master suspends the complete pipeline in the normal suspend phase.
+ * Validate teardown in the late phase, after every normal callback has run;
+ * component registration order is not a PM dependency between these devices.
+ */
 static int sun6i_dsi_pm_prepare(struct device *dev)
 {
 	struct sun6i_dsi *dsi = dev_get_drvdata(dev);
 
-	return dsi->variant->brick_experimental ? -EBUSY : 0;
+	if (!dsi->variant->brick_experimental)
+		return 0;
+	/* Deep sleep also needs DE/TCON and CCU restoration. */
+	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
+}
+
+static int sun6i_dsi_pm_suspend_late(struct device *dev)
+{
+	struct sun6i_dsi *dsi = dev_get_drvdata(dev);
+
+	if (!dsi->variant->brick_experimental)
+		return 0;
+	/* Encoder disable is void: do not let a logged cleanup failure become
+	 * successful suspend. Abort and let DRM restore the saved atomic state.
+	 * No MMIO is valid here once normal teardown has removed bus clocks.
+	 */
+	if (dsi->supply_on || dsi->reset_deasserted || dsi->clock_on ||
+	    dsi->phy_initialized || dsi->phy_on || dsi->panel_prepared ||
+	    dsi->panel_enabled || dsi->tcon_on || dsi->irq_live ||
+	    dsi->irq_enabled || dsi->irq_bus_on || dsi->hsc_pending ||
+	    (dsi->panel && (dsi->panel->prepared || dsi->panel->enabled))) {
+		dev_err(dev, "DSI pipeline did not quiesce for suspend\n");
+		return -EBUSY;
+	}
+	return 0;
 }
 
 static const struct dev_pm_ops sun6i_dsi_pm_ops = {
 	.prepare = sun6i_dsi_pm_prepare,
+	.suspend_late = sun6i_dsi_pm_suspend_late,
 };
 
 static struct platform_driver sun6i_dsi_platform_driver = {
