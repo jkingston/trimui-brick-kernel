@@ -364,6 +364,9 @@ struct sun4i_codec {
 	struct clk	*clk_apb;
 	struct clk	*clk_module;
 	bool a133;
+	bool a133_apb_on;
+	struct regulator *a133_supply[2];
+	bool a133_supply_on[2];
 	struct clk *a133_pll_audio;
 	struct clk *a133_pll_com_audio;
 	struct mutex a133_clock_lock;
@@ -2981,6 +2984,58 @@ static const struct regmap_config sun50i_a133_regmap_config = {
 	.max_register = 0x32c,
 };
 
+static void a133_codec_apb_release(void *data)
+{
+	struct sun4i_codec *scodec = data;
+
+	if (scodec->a133_apb_on) {
+		clk_disable_unprepare(scodec->clk_apb);
+		scodec->a133_apb_on = false;
+	}
+}
+
+static int a133_codec_apb_enable(struct sun4i_codec *scodec)
+{
+	int ret;
+
+	if (scodec->a133_apb_on)
+		return 0;
+	ret = clk_prepare_enable(scodec->clk_apb);
+	if (!ret)
+		scodec->a133_apb_on = true;
+	return ret;
+}
+
+/* Explicit ownership permits balanced suspend/resume and partial-failure
+ * cleanup. Keep shared voltages unchanged, exactly as the original probe.
+ */
+static void a133_codec_supplies_release(void *data)
+{
+	struct sun4i_codec *scodec = data;
+	int i;
+
+	for (i = ARRAY_SIZE(scodec->a133_supply) - 1; i >= 0; i--) {
+		if (scodec->a133_supply_on[i]) {
+			regulator_disable(scodec->a133_supply[i]);
+			scodec->a133_supply_on[i] = false;
+		}
+	}
+}
+
+static int a133_codec_supply_enable(struct sun4i_codec *scodec, unsigned int i)
+{
+	int ret;
+
+	if (scodec->a133_supply_on[i])
+		return 0;
+	ret = regulator_enable(scodec->a133_supply[i]);
+	if (ret)
+		return ret;
+	scodec->a133_supply_on[i] = true;
+	ret = regulator_get_voltage(scodec->a133_supply[i]);
+	return ret < 0 ? ret : ret == 1800000 ? 0 : -EINVAL;
+}
+
 static int sun50i_a133_codec_resources(struct sun4i_codec *scodec)
 {
 	struct device *dev = scodec->dev;
@@ -2990,16 +3045,21 @@ static int sun50i_a133_codec_resources(struct sun4i_codec *scodec)
 	if (!of_property_present(dev->of_node, "avcc-supply") ||
 	    !of_property_present(dev->of_node, "cpvin-supply"))
 		return -EINVAL;
-	ret = devm_regulator_get_enable_read_voltage(dev, "avcc");
-	if (ret < 0)
+	scodec->a133_supply[0] = devm_regulator_get(dev, "avcc");
+	if (IS_ERR(scodec->a133_supply[0]))
+		return PTR_ERR(scodec->a133_supply[0]);
+	scodec->a133_supply[1] = devm_regulator_get(dev, "cpvin");
+	if (IS_ERR(scodec->a133_supply[1]))
+		return PTR_ERR(scodec->a133_supply[1]);
+	ret = devm_add_action_or_reset(dev, a133_codec_supplies_release, scodec);
+	if (ret)
 		return ret;
-	if (ret != 1800000)
-		return -EINVAL;
-	ret = devm_regulator_get_enable_read_voltage(dev, "cpvin");
-	if (ret < 0)
+	ret = a133_codec_supply_enable(scodec, 0);
+	if (ret)
 		return ret;
-	if (ret != 1800000)
-		return -EINVAL;
+	ret = a133_codec_supply_enable(scodec, 1);
+	if (ret)
+		return ret;
 
 	scodec->a133_pll_audio = devm_clk_get(dev, "pll-audio");
 	if (IS_ERR(scodec->a133_pll_audio))
@@ -3411,8 +3471,10 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->regmap),
 				     "Failed to create our regmap\n");
 
-	/* Get the clocks from the DT */
-	scodec->clk_apb = devm_clk_get_enabled(&pdev->dev, "apb");
+	scodec->a133 = quirks == &sun50i_a133_codec_quirks;
+	/* Track the A133 APB vote explicitly; legacy ownership is unchanged. */
+	scodec->clk_apb = scodec->a133 ? devm_clk_get(&pdev->dev, "apb") :
+		devm_clk_get_enabled(&pdev->dev, "apb");
 	if (IS_ERR(scodec->clk_apb))
 		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->clk_apb),
 				     "Failed to get the APB clock\n");
@@ -3422,8 +3484,13 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->clk_module),
 				     "Failed to get the module clock\n");
 
-	scodec->a133 = quirks == &sun50i_a133_codec_quirks;
 	if (scodec->a133) {
+		ret = devm_add_action_or_reset(&pdev->dev, a133_codec_apb_release, scodec);
+		if (ret)
+			return ret;
+		ret = a133_codec_apb_enable(scodec);
+		if (ret)
+			return ret;
 		ret = sun50i_a133_codec_resources(scodec);
 		if (ret)
 			return dev_err_probe(&pdev->dev, ret, "Audio resources unavailable\n");
