@@ -161,6 +161,9 @@ struct xradio_common {
 	struct delayed_work recovery_health;
 	bool removing, irq_claimed, function_enabled, bh_running, firmware_loaded;
 	int recovery_state;
+	bool pm_prepared; /* recovery_lock; excludes new recovery work */
+	bool pm_stopped; /* wiphy mutex; transport needs a fresh epoch */
+	int pm_error; /* wiphy mutex; terminal stop/restore error */
 	bool recovery_in_progress; /* wiphy mutex; excludes recursive config */
 	u64 transport_epoch;
 	struct ieee80211_vif *recovery_vif; /* protected by wiphy mutex */

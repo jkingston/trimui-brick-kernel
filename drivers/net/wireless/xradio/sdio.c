@@ -10,6 +10,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/suspend.h>
 #include <linux/firmware.h>
 #include <linux/unaligned.h>
 #include <linux/interrupt.h>
@@ -199,14 +200,50 @@ static void sdio_remove(struct sdio_func *func)
  xradio_core_deinit(func);
 }
 
-/* Firmware and host ownership cannot yet survive system suspend. */
+/* No WoWLAN contract is advertised. cfg80211 disconnects before its child
+ * suspends; MMC may then power off WLAN through the board power sequence.
+ */
+static int sdio_prepare(struct device *dev)
+{
+	struct xradio_common *hw = sdio_get_drvdata(dev_to_sdio_func(dev));
+
+	if (pm_suspend_target_state != PM_SUSPEND_TO_IDLE)
+		return -EOPNOTSUPP;
+	return xrs_pm_prepare(hw);
+}
+
 static int sdio_suspend(struct device *dev)
 {
- return -EOPNOTSUPP;
+	struct xradio_common *hw = sdio_get_drvdata(dev_to_sdio_func(dev));
+	int ret;
+
+	wiphy_lock(hw->hw->wiphy);
+	ret = xrs_pm_stop_locked(hw);
+	wiphy_unlock(hw->hw->wiphy);
+	return ret;
+}
+
+static int sdio_resume(struct device *dev)
+{
+	struct xradio_common *hw = sdio_get_drvdata(dev_to_sdio_func(dev));
+	int ret;
+
+	wiphy_lock(hw->hw->wiphy);
+	ret = xrs_pm_restore_locked(hw);
+	wiphy_unlock(hw->hw->wiphy);
+	return ret;
+}
+
+static void sdio_complete(struct device *dev)
+{
+	xrs_pm_complete(sdio_get_drvdata(dev_to_sdio_func(dev)));
 }
 
 static const struct dev_pm_ops sdio_pm_ops = {
+	.prepare = sdio_prepare,
 	.suspend = sdio_suspend,
+	.resume = sdio_resume,
+	.complete = sdio_complete,
 };
 
 static struct sdio_driver sdio_driver = {

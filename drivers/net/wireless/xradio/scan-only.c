@@ -212,14 +212,17 @@ static int configure_radio(struct ieee80211_hw *dev)
 
 static int scan_start(struct ieee80211_hw *dev)
 {
- struct xradio_common *hw=dev->priv;
- int ret=configure_radio(dev);
- if(ret && hw->transport_epoch) {
-  WRITE_ONCE(hw->recovery_state,XRS_DEAD);
-  WRITE_ONCE(hw->bh_error,1);
-  ieee80211_stop_queues(dev);
- }
- return ret;
+	struct xradio_common *hw = dev->priv;
+	int ret = xrs_pm_restore_locked(hw);
+
+	if (!ret)
+		ret = configure_radio(dev);
+	if (ret && hw->transport_epoch) {
+		WRITE_ONCE(hw->recovery_state, XRS_DEAD);
+		WRITE_ONCE(hw->bh_error, 1);
+		ieee80211_stop_queues(dev);
+	}
+	return ret;
 }
 
 static void scan_cancel(struct ieee80211_hw *dev, struct ieee80211_vif *vif)
@@ -235,6 +238,8 @@ static void scan_stop(struct ieee80211_hw *dev, bool suspend)
 {
 	scan_cancel(dev, NULL);
 	xrs_runtime_stop(dev->priv);
+	if (suspend)
+		xrs_pm_stop_locked(dev->priv);
 }
 
 static int apply_interface(struct ieee80211_hw *dev, struct ieee80211_vif *vif)
