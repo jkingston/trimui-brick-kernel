@@ -17,7 +17,10 @@ description: |
   Read-only battery voltage, initialized gauge capacity and USB input
   presence are provided by a child device. The interrupt controller routes
   power-key press and release events without changing key timing. Charging
-  remains boot-established.
+  remains boot-established. Optional VMID and drivevbus regulators expose
+  the independent boost and output switch on nonzero-selector AXP2202 parts.
+  The output switch has an explicit vin-supply parent reference to VMID;
+  each provider has a 1000 microsecond enable delay.
 
 properties:
   compatible:
@@ -54,10 +57,32 @@ properties:
         unevaluatedProperties: false
         required:
           - regulator-always-on
+      vmid:
+        type: object
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+      drivevbus:
+        type: object
+        $ref: /schemas/regulator/regulator.yaml#
+        properties:
+          vin-supply:
+            description: Parent VMID boost regulator
+        required:
+          - vin-supply
+        unevaluatedProperties: false
+      cldo3:
+        type: object
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+        required:
+          - regulator-always-on
       cldo4:
         type: object
         $ref: /schemas/regulator/regulator.yaml#
         unevaluatedProperties: false
+    dependencies:
+      vmid: [drivevbus]
+      drivevbus: [vmid]
     required:
       - aldo3
       - aldo4

@@ -49,6 +49,7 @@ properties:
               - ingenic,jz4740-ohci
               - rockchip,rk3588-ohci
               - snps,hsdk-v1.0-ohci
+              - trimui,brick-ohci
           - const: generic-ohci
       - enum:
           - generic-ohci
@@ -186,7 +187,6 @@ allOf:
 
     else:
       properties:
-        clock-names: false
         atmel,vbus-gpio: false
         atmel,oc-gpio: false
 
@@ -203,7 +203,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: rockchip,rk3588-ohci
+            enum:
+              - rockchip,rk3588-ohci
+              - trimui,brick-ohci
     then:
       properties:
         clocks:
@@ -213,6 +215,45 @@ allOf:
         clocks:
           minItems: 1
           maxItems: 3
+
+  - if:
+      properties:
+        compatible:
+          not:
+            contains:
+              enum:
+                - atmel,at91rm9200-ohci
+                - trimui,brick-ohci
+    then:
+      properties:
+        clock-names: false
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: trimui,brick-ohci
+    then:
+      properties:
+        clocks:
+          items:
+            - description: OHCI0 bus clock
+            - description: OHCI0 module clock
+            - description: Auxiliary OHCI1 bus clock
+            - description: Auxiliary OHCI1 module clock
+        clock-names:
+          items:
+            - const: bus
+            - const: mod
+            - const: aux-bus
+            - const: aux-mod
+        resets:
+          items:
+            - description: OHCI0 bus reset
+            - description: Auxiliary OHCI1 bus reset
+      required:
+        - clocks
+        - clock-names
+        - resets
 
 unevaluatedProperties: false
 
