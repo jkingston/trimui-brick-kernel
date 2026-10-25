@@ -98,6 +98,7 @@ static void sunxi_musb_work(struct work_struct *work)
 {
 	struct sunxi_glue *glue = container_of(work, struct sunxi_glue, work);
 	bool vbus_on, phy_on;
+	int ret;
 
 	if (!test_bit(SUNXI_MUSB_FL_ENABLED, &glue->flags))
 		return;
@@ -131,16 +132,35 @@ static void sunxi_musb_work(struct work_struct *work)
 
 	if (phy_on != vbus_on) {
 		if (vbus_on) {
-			phy_power_on(glue->phy);
+			ret = phy_power_on(glue->phy);
+			if (ret) {
+				dev_err_ratelimited(glue->dev,
+						    "Failed to power on PHY: %d\n", ret);
+				return;
+			}
 			set_bit(SUNXI_MUSB_FL_PHY_ON, &glue->flags);
 		} else {
-			phy_power_off(glue->phy);
+			ret = phy_power_off(glue->phy);
+			if (ret) {
+				dev_err_ratelimited(glue->dev,
+						    "Failed to power off PHY: %d\n", ret);
+				return;
+			}
 			clear_bit(SUNXI_MUSB_FL_PHY_ON, &glue->flags);
 		}
 	}
 
-	if (test_and_clear_bit(SUNXI_MUSB_FL_PHY_MODE_PEND, &glue->flags))
-		phy_set_mode(glue->phy, glue->phy_mode);
+	if (test_and_clear_bit(SUNXI_MUSB_FL_PHY_MODE_PEND, &glue->flags)) {
+		ret = phy_set_mode(glue->phy, glue->phy_mode);
+		if (ret) {
+			/* Keep the requested mode pending for a later control event.
+			 * Do not spin-retry a failed PHY transaction from this worker.
+			 */
+			set_bit(SUNXI_MUSB_FL_PHY_MODE_PEND, &glue->flags);
+			dev_err_ratelimited(glue->dev,
+					    "Failed to set PHY mode: %d\n", ret);
+		}
+	}
 }
 
 static void sunxi_musb_set_vbus(struct musb *musb, int is_on)
