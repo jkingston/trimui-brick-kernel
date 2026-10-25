@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Read-only telemetry; boot firmware owns charger and gauge configuration. */
+#include <linux/devm-helpers.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
@@ -146,25 +148,127 @@ static const struct power_supply_desc usb_desc = {
 	.get_property = axp2202_usb_get,
 };
 
+#define AXP2202_POLL_INTERVAL (30 * HZ)
+
+struct axp2202_sample {
+	bool valid;
+	int error;
+	int value;
+};
+
+struct axp2202_monitor {
+	struct power_supply *battery;
+	struct power_supply *usb;
+	struct delayed_work work;
+	struct axp2202_sample status;
+	struct axp2202_sample capacity;
+	struct axp2202_sample online;
+};
+
+static bool axp2202_sample_changed(struct power_supply *psy,
+				   enum power_supply_property property,
+				   struct axp2202_sample *sample)
+{
+	union power_supply_propval val = { 0 };
+	bool changed;
+	int ret;
+
+	ret = power_supply_get_property(psy, property, &val);
+	changed = sample->valid && (sample->error != ret ||
+		  (!ret && sample->value != val.intval));
+	sample->valid = true;
+	sample->error = ret;
+	if (!ret)
+		sample->value = val.intval;
+
+	return changed;
+}
+
+static void axp2202_poll(struct work_struct *work)
+{
+	struct axp2202_monitor *monitor = container_of(to_delayed_work(work),
+						     struct axp2202_monitor, work);
+	bool battery_changed, usb_changed;
+
+	battery_changed = axp2202_sample_changed(monitor->battery,
+						 POWER_SUPPLY_PROP_STATUS, &monitor->status);
+	battery_changed |= axp2202_sample_changed(monitor->battery,
+						  POWER_SUPPLY_PROP_CAPACITY, &monitor->capacity);
+	usb_changed = axp2202_sample_changed(monitor->usb,
+					     POWER_SUPPLY_PROP_ONLINE, &monitor->online);
+	if (battery_changed || usb_changed)
+		power_supply_changed(monitor->battery);
+	if (usb_changed)
+		power_supply_changed(monitor->usb);
+
+	schedule_delayed_work(&monitor->work, AXP2202_POLL_INTERVAL);
+}
+
+static int axp2202_telemetry_suspend(struct device *dev)
+{
+	struct axp2202_monitor *monitor = dev_get_drvdata(dev);
+
+	cancel_delayed_work_sync(&monitor->work);
+	return 0;
+}
+
+static int axp2202_telemetry_resume(struct device *dev)
+{
+	struct axp2202_monitor *monitor = dev_get_drvdata(dev);
+
+	schedule_delayed_work(&monitor->work, 0);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(axp2202_telemetry_pm_ops,
+			       axp2202_telemetry_suspend,
+			       axp2202_telemetry_resume);
+
 static int axp2202_telemetry_probe(struct platform_device *pdev)
 {
 	struct power_supply_config config = {
 		.drv_data = dev_get_regmap(pdev->dev.parent, NULL),
 	};
-	struct power_supply *psy;
+	struct axp2202_monitor *monitor;
+	int ret;
 
 	if (!config.drv_data)
 		return -ENODEV;
-	psy = devm_power_supply_register(&pdev->dev, &battery_desc, &config);
-	if (IS_ERR(psy))
-		return PTR_ERR(psy);
-	psy = devm_power_supply_register(&pdev->dev, &usb_desc, &config);
-	return PTR_ERR_OR_ZERO(psy);
+	monitor = devm_kzalloc(&pdev->dev, sizeof(*monitor), GFP_KERNEL);
+	if (!monitor)
+		return -ENOMEM;
+	platform_set_drvdata(pdev, monitor);
+	monitor->battery = devm_power_supply_register(&pdev->dev, &battery_desc,
+						      &config);
+	if (IS_ERR(monitor->battery))
+		return PTR_ERR(monitor->battery);
+	monitor->usb = devm_power_supply_register(&pdev->dev, &usb_desc, &config);
+	if (IS_ERR(monitor->usb))
+		return PTR_ERR(monitor->usb);
+
+	/* Cancel polling before either managed power supply is released. */
+	ret = devm_delayed_work_autocancel(&pdev->dev, &monitor->work,
+					   axp2202_poll);
+	if (ret)
+		return ret;
+	schedule_delayed_work(&monitor->work, 0);
+	return 0;
+}
+
+static void axp2202_telemetry_shutdown(struct platform_device *pdev)
+{
+	struct axp2202_monitor *monitor = platform_get_drvdata(pdev);
+
+	cancel_delayed_work_sync(&monitor->work);
 }
 
 static struct platform_driver axp2202_telemetry_driver = {
 	.probe = axp2202_telemetry_probe,
-	.driver.name = "axp2202-telemetry",
+	.shutdown = axp2202_telemetry_shutdown,
+	.driver = {
+		.name = "axp2202-telemetry",
+		.pm = pm_sleep_ptr(&axp2202_telemetry_pm_ops),
+	},
 };
 module_platform_driver(axp2202_telemetry_driver);
 MODULE_ALIAS("platform:axp2202-telemetry");
