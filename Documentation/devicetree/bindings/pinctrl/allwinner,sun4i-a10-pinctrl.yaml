@@ -73,6 +73,13 @@ properties:
     unevaluatedProperties: false
     description: A133 PF voltage selector; input rails remain enabled.
 
+  allwinner,stock-suspend:
+    type: boolean
+    description:
+      Save and reconstruct the A133 PIO context around the stock monitor's
+      system suspend flow. This requires matching main and R-CCU context
+      restoration and is intended only for the TrimUI Brick stock boot chain.
+
   reg:
     maxItems: 1
 
@@ -166,6 +173,17 @@ allOf:
         vcc-pf18-supply: false
         vcc-pf33-supply: false
         pf-regulator: false
+
+  - if:
+      not:
+        properties:
+          compatible:
+            enum:
+              - allwinner,sun50i-a133-pinctrl
+              - allwinner,sun50i-a100-r-pinctrl
+    then:
+      properties:
+        allwinner,stock-suspend: false
 
   # FIXME: We should have the pin bank supplies here, but not a lot of
   # boards are defining it at the moment so it would generate a lot of
