@@ -9,6 +9,7 @@
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
 #include <linux/reset.h>
+#include <linux/suspend.h>
 #include "pwm-sun50i-a133-arith.h"
 #include "pwm-sun50i-a133-lifecycle.h"
 
@@ -28,6 +29,8 @@ struct brick_pwm {
 	struct clk *bus, *osc;
 	struct reset_control *rst;
 	struct mutex lock;
+	bool suspended, retention_fault;
+	u32 sleep_pair, sleep_ctl, sleep_period;
 };
 static u32 rd(struct brick_pwm *p, unsigned int reg)
 {
@@ -64,6 +67,10 @@ static int brick_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	    brick_pwm_ticks(s->period, s->duty_cycle, &duty))
 		return -EINVAL;
 	mutex_lock(&p->lock);
+	if (p->retention_fault || p->suspended) {
+		ret = p->retention_fault ? -EIO : -EBUSY;
+		goto out;
+	}
 	ret = brick_guard(p);
 	if (ret) goto out;
 	if (s->enabled && (rd(p, PCR) & PERIOD_BUSY)) { ret = -EBUSY; goto out; }
@@ -102,6 +109,10 @@ static int brick_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	int ret;
 
 	mutex_lock(&p->lock);
+	if (p->retention_fault || p->suspended) {
+		ret = p->retention_fault ? -EIO : -EBUSY;
+		goto out;
+	}
 	ret = brick_guard(p);
 	if (ret) goto out;
 	ctl = rd(p, PCR);
@@ -227,12 +238,81 @@ static const struct of_device_id brick_match[] = {
 	{ .compatible = "allwinner,sun50i-a133-pwm" }, { }
 };
 MODULE_DEVICE_TABLE(of, brick_match);
+/* s2idle retains this driver's bus clock, oscillator and reset ownership.
+ * Deep suspend and hibernation need a separate restore contract.
+ */
 static int brick_pm_prepare(struct device *dev)
 {
-	/* Controller retention/resume ordering is not qualified. */
-	return -EBUSY;
+	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
 }
-static const struct dev_pm_ops brick_pm_ops = { .prepare = brick_pm_prepare };
+static int brick_pm_suspend(struct device *dev)
+{
+	struct pwm_chip *chip = dev_get_drvdata(dev);
+	struct brick_pwm *p = pwmchip_get_drvdata(chip);
+	int ret;
+
+	mutex_lock(&p->lock);
+	if (p->retention_fault || p->suspended) {
+		ret = p->retention_fault ? -EIO : -EBUSY;
+		goto out;
+	}
+	ret = brick_guard(p);
+	if (ret)
+		goto out;
+	/* PWM device links put the backlight consumer first. Never blank an
+	 * active consumer behind its back or restore light before the panel.
+	 */
+	if ((rd(p, PER) | rd(p, PCGR)) & BIT(0) ||
+	    (rd(p, PCR) & PERIOD_BUSY)) {
+		ret = -EBUSY;
+		goto out;
+	}
+	p->sleep_pair = rd(p, PCCR);
+	p->sleep_ctl = rd(p, PCR);
+	p->sleep_period = rd(p, PPR);
+	p->suspended = true;
+out:
+	mutex_unlock(&p->lock);
+	return ret;
+}
+static int brick_pm_resume(struct device *dev)
+{
+	struct pwm_chip *chip = dev_get_drvdata(dev);
+	struct brick_pwm *p = pwmchip_get_drvdata(chip);
+	int ret = 0;
+
+	mutex_lock(&p->lock);
+	if (!p->suspended)
+		goto out;
+	/* Check accessibility before MMIO; do not guess a lost-clock/reset
+	 * recovery sequence. A fault blocks future applies until reprobe.
+	 */
+	if (reset_control_status(p->rst) != 0 || !__clk_is_enabled(p->bus) ||
+	    clk_get_rate(p->osc) != 24000000) {
+		ret = -EIO;
+		goto fault;
+	}
+	ret = brick_guard(p);
+	if (ret || rd(p, PCCR) != p->sleep_pair ||
+	    rd(p, PCR) != p->sleep_ctl || rd(p, PPR) != p->sleep_period ||
+	    ((rd(p, PER) | rd(p, PCGR)) & BIT(0))) {
+		ret = -EIO;
+		goto fault;
+	}
+	p->suspended = false;
+	goto out;
+fault:
+	p->retention_fault = true;
+	dev_err(dev, "PWM s2idle retention lost; output remains unavailable\n");
+out:
+	mutex_unlock(&p->lock);
+	return ret;
+}
+static const struct dev_pm_ops brick_pm_ops = {
+	.prepare = brick_pm_prepare,
+	.suspend = brick_pm_suspend,
+	.resume = brick_pm_resume,
+};
 static struct platform_driver brick_driver = {
 	.probe = brick_probe,
 	.remove = brick_remove,
