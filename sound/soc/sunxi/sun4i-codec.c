@@ -280,6 +280,9 @@
 #define SUN50I_A133_ADC_FIFOS		0x038
 #define SUN50I_A133_ADC_CNT		0x044
 #define SUN50I_A133_ADC_DAP		0x0f8
+#define SUN50I_A133_ADC_HPF_H		0x200
+#define SUN50I_A133_ADC_HPF_L		0x204
+#define SUN50I_A133_ADC_DRC_CTRL		0x208
 #define SUN50I_A133_ADCL			0x300
 #define SUN50I_A133_ADCR			0x304
 #define SUN50I_A133_MICBIAS		0x318
@@ -876,6 +879,25 @@ static int sun4i_codec_hw_params_playback(struct sun4i_codec *scodec,
 	return 0;
 }
 
+/* Stock capture HPF coefficients depend on the PCM rate, not the PLL rate. */
+static int a133_adc_hpf_rate(struct sun4i_codec *scodec, unsigned int rate)
+{
+	u32 coefficient;
+	int ret;
+
+	if (rate == 16000)
+		coefficient = 0x00f623a5;
+	else if (rate == 44100)
+		coefficient = 0x00fc60db;
+	else
+		coefficient = 0x00fcabb3;
+
+	ret = regmap_write(scodec->regmap, SUN50I_A133_ADC_HPF_H, coefficient >> 16);
+	if (ret)
+		return ret;
+	return regmap_write(scodec->regmap, SUN50I_A133_ADC_HPF_L, coefficient & 0xffff);
+}
+
 static int sun4i_codec_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *params,
 				 struct snd_soc_dai *dai)
@@ -917,6 +939,8 @@ static int sun4i_codec_hw_params(struct snd_pcm_substream *substream,
 			}
 			ret = regmap_field_update_bits(scodec->reg_adc_fifoc,
 				GENMASK(31, 29) | BIT(24) | BIT(16) | GENMASK(13, 12), val);
+			if (!ret)
+				ret = a133_adc_hpf_rate(scodec, params_rate(params));
 		} else {
 			ret = sun4i_codec_hw_params_playback(scodec, params, hwrate);
 		}
@@ -2448,6 +2472,74 @@ static int a133_headphone_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+/*
+ * Coefficients from the shipped A133 codec initialization. Keep the ordered
+ * writes: stock overwrites the peak attack values and writes EPS high twice,
+ * without touching EPS low. Do not substitute a different SoC's register map.
+ * Processing stays disabled until the associated DAPM supplies are powered.
+ */
+static int a133_adc_dsp_init(struct snd_soc_component *c)
+{
+	static const struct { unsigned int reg, value; } coefficients[] = {
+		{ 0x20c, 0x000b },
+		{ 0x210, 0x77f0 },
+		{ 0x214, 0x000b },
+		{ 0x218, 0x77f0 },
+		{ 0x21c, 0x00ff },
+		{ 0x220, 0xe1f8 },
+		{ 0x224, 0x00ff },
+		{ 0x228, 0xe1f8 },
+		{ 0x20c, 0x0001 },
+		{ 0x210, 0x2bb0 },
+		{ 0x214, 0x0001 },
+		{ 0x218, 0x2bb0 },
+		{ 0x264, 0xff64 },
+		{ 0x268, 0x1741 },
+		{ 0x24c, 0xfc03 },
+		{ 0x250, 0x80f3 },
+		{ 0x27c, 0xf608 },
+		{ 0x280, 0xc25f },
+		{ 0x254, 0x0352 },
+		{ 0x258, 0x69e0 },
+		{ 0x23c, 0x06b3 },
+		{ 0x240, 0x002c },
+		{ 0x26c, 0x0a13 },
+		{ 0x270, 0x9682 },
+		{ 0x25c, 0x0022 },
+		{ 0x260, 0x2222 },
+		{ 0x244, 0x0100 },
+		{ 0x248, 0x0000 },
+		{ 0x284, 0x01c5 },
+		{ 0x288, 0x3ef0 },
+		{ 0x274, 0x0423 },
+		{ 0x278, 0x4f68 },
+		{ 0x28c, 0x0001 },
+		{ 0x290, 0x7665 },
+		{ 0x294, 0x0000 },
+		{ 0x298, 0x0f04 },
+		{ 0x29c, 0x69e0 },
+		{ 0x2a0, 0xf95b },
+		{ 0x2a4, 0xf95b },
+		{ 0x2a8, 0x2c3f },
+		{ 0x2ac, 0x0002 },
+		{ 0x2ac, 0x5600 },
+		{ SUN50I_A133_ADC_HPF_H, 0x00ff },
+		{ SUN50I_A133_ADC_HPF_L, 0xfac1 },
+	};
+	unsigned int i;
+	int ret;
+
+	ret = snd_soc_component_update_bits(c, SUN50I_A133_ADC_DRC_CTRL, 0xfb, 0xfb);
+	if (ret < 0)
+		return ret;
+	for (i = 0; i < ARRAY_SIZE(coefficients); i++) {
+		ret = snd_soc_component_write(c, coefficients[i].reg, coefficients[i].value);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
+}
+
 /* Low initial digital level; userspace deliberately raises volume for test. */
 static int a133_component_probe(struct snd_soc_component *c)
 {
@@ -2459,7 +2551,7 @@ static int a133_component_probe(struct snd_soc_component *c)
 		{ SUN50I_A133_ADCL, BIT(31) | BIT(30) | GENMASK(12, 8) | GENMASK(7, 0), 0x55 },
 		{ SUN50I_A133_ADCR, BIT(31) | BIT(30) | GENMASK(12, 8) | GENMASK(7, 0), 0x55 },
 		{ SUN50I_A133_MICBIAS, BIT(7), 0 },
-		/* DSP coefficient programming is separate from the ADC transport. */
+		/* Disable shared processing before writing any coefficients. */
 		{ SUN50I_A133_ADC_DAP, BIT(31) | BIT(29) | BIT(28), 0 },
 		{ SUN50I_A133_HEADPHONE, BIT(15), 0 },
 		{ SUN50I_A133_HEADPHONE, BIT(10), 0 },
@@ -2485,7 +2577,7 @@ static int a133_component_probe(struct snd_soc_component *c)
 		if (ret < 0)
 			return ret;
 	}
-	return 0;
+	return a133_adc_dsp_init(c);
 }
 
 static int a133_adc_event(struct snd_soc_dapm_widget *w,
@@ -2510,6 +2602,9 @@ static const struct snd_kcontrol_new a133_controls[] = {
 	SOC_SINGLE("Headphone Playback Volume", SUN50I_A133_DAC_ANALOG, 28, 7, 0),
 };
 static const struct snd_soc_dapm_widget a133_widgets[] = {
+	SND_SOC_DAPM_SUPPLY("ADC DAP", SUN50I_A133_ADC_DAP, 31, 0, NULL, 0),
+	SND_SOC_DAPM_SUPPLY("ADC HPF", SUN50I_A133_ADC_DAP, 28, 0, NULL, 0),
+	SND_SOC_DAPM_SUPPLY("ADC DRC", SUN50I_A133_ADC_DAP, 29, 0, NULL, 0),
 	SND_SOC_DAPM_ADC_E("Left ADC", "Codec Capture", SUN50I_A133_ADCL, 31, 0,
 			   a133_adc_event, SND_SOC_DAPM_POST_PMU),
 	SND_SOC_DAPM_ADC_E("Right ADC", "Codec Capture", SUN50I_A133_ADCR, 31, 0,
@@ -2530,6 +2625,12 @@ static const struct snd_soc_dapm_widget a133_widgets[] = {
 	SND_SOC_DAPM_OUTPUT("HPOUTR"),
 };
 static const struct snd_soc_dapm_route a133_routes[] = {
+	/* Stock enables HPF for capture, and DRC for the MIC2 amplifier path. */
+	{ "ADC HPF", NULL, "ADC DAP" },
+	{ "ADC DRC", NULL, "ADC DAP" },
+	{ "Left ADC", NULL, "ADC HPF" },
+	{ "Right ADC", NULL, "ADC HPF" },
+	{ "MIC2 Amplifier", NULL, "ADC DRC" },
 	{ "Left ADC", NULL, "MIC1 Amplifier" },
 	{ "Right ADC", NULL, "MIC2 Amplifier" },
 	{ "MIC1 Amplifier", NULL, "MIC1" },
