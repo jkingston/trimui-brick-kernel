@@ -56,6 +56,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 #include <linux/sun50i-a133-gpu.h>
 #include "pvrsrv_device.h"
 #include "power.h"
@@ -181,6 +182,7 @@ struct sunxi_gpu {
 	bool transition_fault;
 	enum sunxi_sleep_phase sleep_phase;
 	bool sleep_verified;
+	bool sleep_deep;
 	struct device *dev;
 	struct clk *core, *bus, *ppu_clock;
 	void __iomem *ppu, *dfs;
@@ -291,7 +293,7 @@ static PHYS_HEAP_FUNCTIONS heap_funcs = {
 
 /* External clocks and reset-controller resources remain enabled. The provider
  * owns internal PPU power removal and restores it before this wake validation.
- * s2idle retains these resources; deep sleep remains unsupported.
+ * CCU restores physical outer clocks before deep resume validates them.
  * In hardware mode, firmware idle leaves
  * the PPU in HOST (status 1), with 3D isolation and the host interface clocked.
  * Accept HOST only when waking from OFF; RGXDoStart restarts the firmware.
@@ -343,17 +345,29 @@ static PVRSRV_ERROR sunxi_system_sleep(IMG_HANDLE handle, IMG_BOOL suspend,
 	struct sunxi_gpu *gpu = handle;
 	bool fault = false;
 
+	if (!complete && suspend && pm_suspend_target_state == PM_SUSPEND_MEM &&
+	    sun50i_a133_ccu_deep_ready())
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	if (!complete && !suspend && gpu->sleep_deep &&
+	    a133_gpu_deep_resume(gpu->dev)) {
+		sunxi_latch_fault(gpu, -EIO);
+		WRITE_ONCE(gpu->sleep_phase, SUNXI_SLEEP_FAULT);
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	}
 	if (!complete && suspend && sunxi_policy_sleep(gpu, true))
 		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 	mutex_lock(&gpu->irq_lock);
 	if (!complete) {
 		if (sunxi_power_fault(gpu) ||
-		    (suspend && pm_suspend_target_state != PM_SUSPEND_TO_IDLE) ||
+		    (suspend && pm_suspend_target_state != PM_SUSPEND_TO_IDLE &&
+		     pm_suspend_target_state != PM_SUSPEND_MEM) ||
 		    gpu->sleep_phase != (suspend ? SUNXI_AWAKE : SUNXI_ASLEEP)) {
 			result = PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 		} else {
 			gpu->sleep_phase = suspend ? SUNXI_SUSPENDING : SUNXI_RESUMING;
 			gpu->sleep_verified = false;
+			if (suspend)
+				gpu->sleep_deep = pm_suspend_target_state == PM_SUSPEND_MEM;
 		}
 	} else if (result != PVRSRV_OK || !gpu->sleep_verified ||
 		   gpu->sleep_phase != (suspend ? SUNXI_SUSPENDING : SUNXI_RESUMING)) {
@@ -673,11 +687,21 @@ static PVRSRV_ERROR sunxi_post_power(IMG_HANDLE handle,
 				    sunxi_irq_quiesce(gpu, true, false) != 1)
 					goto sleep_fault;
 			}
-			/* Fresh forced OFF may retain 3D/HOST. No unproven forced
-			 * internal cut: only existing APM-owned OFF is preserved.
+			/* s2idle can retain 3D/HOST. Deep sleep additionally consumes
+			 * the held stop barrier for the stock SW/HOST -> ALLOFF path.
 			 */
 			if (!sunxi_sleep_retained(gpu))
 				goto sleep_fault;
+			if ((flags & PVRSRV_POWER_FLAGS_SUSPEND_REQ) && gpu->sleep_deep) {
+				bool stopped;
+
+				mutex_lock(&gpu->irq_lock);
+				stopped = gpu->irq_owner.state.phase == IRQ_QUIESCED &&
+					  gpu->irq_owner.state.stop_sequence;
+				mutex_unlock(&gpu->irq_lock);
+				if (!stopped || a133_gpu_deep_off(gpu->dev))
+					goto sleep_fault;
+			}
 		}
 		WRITE_ONCE(gpu->sleep_verified, true);
 		return PVRSRV_OK;

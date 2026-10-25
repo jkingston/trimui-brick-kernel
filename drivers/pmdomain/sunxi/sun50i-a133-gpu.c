@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* A133 revision 6 GPU domain with DDK-controlled internal power transitions. */
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -33,6 +35,7 @@ struct a133_gpu_domain {
 	const char *failure_stage;
 	bool attempted;
 	bool boot_ready;
+	bool deep_suspended;
 	int result;
 };
 
@@ -227,6 +230,10 @@ int a133_gpu_internal_off(struct device *consumer)
 	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
 		return -ENODEV;
 	mutex_lock(&p->handoff_lock);
+	if (p->deep_suspended) {
+		ret = READ_ONCE(p->result) ?: -EBUSY;
+		goto out;
+	}
 	if (p->handoff_state == A133_FAULT || READ_ONCE(p->result)) {
 		ret = READ_ONCE(p->result);
 		goto out;
@@ -303,6 +310,124 @@ static int a133_internal_restore(struct a133_gpu_domain *p)
 	return 0;
 }
 
+/* Stock keeps outer clock references while CCU system sleep owns their physical
+ * restoration. Check that contract before the first PPU or DFS access.
+ */
+static int a133_deep_accessible(struct a133_gpu_domain *p)
+{
+	int ret = sun50i_a133_ccu_deep_ready();
+
+	if (ret)
+		return ret;
+	if (reset_control_status(p->gpu_reset) != 0 ||
+	    reset_control_status(p->ppu_reset) != 0 ||
+	    !__clk_is_enabled(p->parent) || !__clk_is_enabled(p->core) ||
+	    !__clk_is_enabled(p->bus) || !__clk_is_enabled(p->ppu_clk) ||
+	    clk_get_rate(p->parent) != A133_GPU_FIXED_RATE ||
+	    clk_get_rate(p->core) != A133_GPU_FIXED_RATE)
+		return -EIO;
+	return 0;
+}
+
+/* DDK power lock held, logical OFF and successful stop/IRQ barrier established.
+ * An already-OFF caller retains that barrier from its preceding stop, without
+ * intervening restart. Stock explicitly selects SW/HOST before genpd ALLOFF.
+ */
+int a133_gpu_deep_off(struct device *consumer)
+{
+	/* Pair with publication after provider resource initialization. */
+	struct a133_gpu_domain *p = smp_load_acquire(&a133_provider);
+	struct a133_snapshot s;
+	u32 value;
+	int ret;
+
+	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
+		return -ENODEV;
+	mutex_lock(&p->handoff_lock);
+	/* Pair with the completed boot sequence, before any MMIO. */
+	if (!smp_load_acquire(&p->boot_ready) || READ_ONCE(p->result) ||
+	    p->deep_suspended) {
+		ret = READ_ONCE(p->result) ?: -EINVAL;
+		goto out;
+	}
+	ret = a133_deep_accessible(p);
+	if (ret)
+		goto out;
+	if (p->handoff_state == A133_INTERNAL_OFF) {
+		s = a133_ppu_snapshot(p);
+		if (!a133_internal_tuple(&s, true))
+			goto invalid;
+	} else if (p->handoff_state == A133_HW || p->handoff_state == A133_SW_HOST) {
+		s = a133_snapshot(p);
+		if (!a133_handoff_valid(&s, p->handoff_state == A133_HW ? 2 : 1,
+				       p->handoff_state == A133_SW_HOST, p->dfs_code))
+			goto invalid;
+		/* Shipped sunxiPostPowerState: requests masked, SW1 then HOST1.
+		 * HOST here is software protocol metadata, not a fresh idle proof;
+		 * the DDK stop and drained IRQ supplied that proof before this call.
+		 */
+		writel((s.control & ~3U) | 1, p->ppu + 0x24);
+		ret = readl_poll_timeout(p->ppu + 0x24, value,
+					(value & 3) == 1, 1, 1000);
+		if (ret)
+			goto invalid;
+		writel((s.status & ~3U) | 1, p->ppu + 0x20);
+		brick_ppu_power_off(p->ppu);
+		s = a133_ppu_snapshot(p);
+		if (!a133_internal_tuple(&s, true))
+			goto invalid;
+		p->handoff_state = A133_INTERNAL_OFF;
+	} else {
+		ret = -EINVAL;
+		goto out;
+	}
+	p->deep_suspended = true;
+	ret = 0;
+	goto out;
+invalid:
+	ret = a133_fault(p, "deep-off", -EIO);
+out:
+	mutex_unlock(&p->handoff_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(a133_gpu_deep_off);
+
+/* Clients remain blocked and IRQ remains drained. No powered-domain read until
+ * CCU restore and live clock/reset state are validated. Default-OFF DDK resume
+ * leaves the PPU off; first later workload uses the ordinary internal restore.
+ */
+int a133_gpu_deep_resume(struct device *consumer)
+{
+	/* Pair with publication after provider resource initialization. */
+	struct a133_gpu_domain *p = smp_load_acquire(&a133_provider);
+	struct a133_snapshot s;
+	int ret;
+
+	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
+		return -ENODEV;
+	mutex_lock(&p->handoff_lock);
+	if (!p->deep_suspended || READ_ONCE(p->result)) {
+		ret = READ_ONCE(p->result) ?: -EINVAL;
+		goto out;
+	}
+	ret = a133_deep_accessible(p);
+	if (ret)
+		goto fault;
+	s = a133_ppu_snapshot(p);
+	if (p->handoff_state != A133_INTERNAL_OFF || !a133_internal_tuple(&s, true)) {
+		ret = -EIO;
+		goto fault;
+	}
+	p->deep_suspended = false;
+	goto out;
+fault:
+	ret = a133_fault(p, "deep-resume", ret);
+out:
+	mutex_unlock(&p->handoff_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(a133_gpu_deep_resume);
+
 int a133_gpu_apm_handoff(struct device *consumer, bool wake, bool forced)
 {
 	/* Pair with provider publication after boot resource setup. */
@@ -321,6 +446,10 @@ int a133_gpu_apm_handoff(struct device *consumer, bool wake, bool forced)
 		return -ENODEV;
 	might_sleep();
 	mutex_lock(&p->handoff_lock);
+	if (p->deep_suspended) {
+		ret = READ_ONCE(p->result) ?: -EBUSY;
+		goto out;
+	}
 	if (p->handoff_state == A133_FAULT) {
 		ret = READ_ONCE(p->result);
 		goto out;
@@ -415,6 +544,10 @@ int a133_gpu_s2idle_retained(struct device *consumer)
 	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
 		return -ENODEV;
 	mutex_lock(&p->handoff_lock);
+	if (p->deep_suspended) {
+		ret = READ_ONCE(p->result) ?: -EBUSY;
+		goto out;
+	}
 	if (!smp_load_acquire(&p->boot_ready) || READ_ONCE(p->result)) {
 		ret = READ_ONCE(p->result) ?: -EIO;
 		goto out;
@@ -469,6 +602,10 @@ int a133_gpu_set_dfs(struct device *consumer, unsigned long rate)
 	if (!p || !consumer || consumer->pm_domain != &p->genpd.domain)
 		return -ENODEV;
 	mutex_lock(&p->handoff_lock);
+	if (p->deep_suspended) {
+		ret = READ_ONCE(p->result) ?: -EBUSY;
+		goto out;
+	}
 	/* Pair with boot_ready publication of initialized DFS ownership. */
 	if (!smp_load_acquire(&p->boot_ready) || READ_ONCE(p->result)) {
 		ret = READ_ONCE(p->result) ?: -EIO;
@@ -581,6 +718,8 @@ static int a133_gpu_probe(struct platform_device *pdev)
 
 static int a133_gpu_suspend_prepare(struct device *dev)
 {
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		return sun50i_a133_ccu_deep_ready();
 	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
 }
 

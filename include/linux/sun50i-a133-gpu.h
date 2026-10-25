@@ -17,6 +17,11 @@ int a133_gpu_internal_off(struct device *consumer);
 int a133_gpu_latch_fault(struct device *consumer, int error);
 /* Validate retained ownership without waking or changing external resources. */
 int a133_gpu_s2idle_retained(struct device *consumer);
+/* System sleep only: stopped firmware and a retained synchronous IRQ barrier.
+ * Outer references remain held; CCU restoration is a mandatory prerequisite.
+ */
+int a133_gpu_deep_off(struct device *consumer);
+int a133_gpu_deep_resume(struct device *consumer);
 /* DDK clock transaction only: cache while internally OFF, write/readback otherwise. */
 int a133_gpu_set_dfs(struct device *consumer, unsigned long rate);
 /* RAM-only expected DFS; caller holds the DDK power mutex. Zero on fault. */
