@@ -389,6 +389,23 @@ static int sun4i_drv_sleep_check(struct sun4i_drv *drv)
 	return 0;
 }
 
+static void sun4i_drv_sleep_stop(struct device *dev, struct sun4i_drv *drv)
+{
+	unsigned int i;
+	int ret;
+
+	/* DRM cleanup may fail before it calls encoder_disable. Retry owned
+	 * output shutdown directly, without needing another atomic commit.
+	 */
+	for (i = 0; i < SUN4I_SLEEP_STAGES; i++) {
+		if (!drv->sleep[i].fault)
+			continue;
+		ret = drv->sleep[i].fault(drv->sleep[i].dev);
+		if (ret)
+			dev_err(dev, "display output shutdown failed: %d\n", ret);
+	}
+}
+
 static int sun4i_drv_drm_sys_suspend(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
@@ -419,6 +436,7 @@ static int sun4i_drv_drm_sys_suspend(struct device *dev)
 				err = drv->sleep[i].result(drv->sleep[i].dev);
 		if (err) {
 			dev_err(dev, "display suspend rollback failed: %d\n", err);
+			sun4i_drv_sleep_stop(dev, drv);
 			WRITE_ONCE(drv->sleep_error, err);
 			for (i = 0; i < SUN4I_SLEEP_STAGES; i++)
 				if (drv->sleep[i].suspend)
@@ -437,6 +455,7 @@ static int sun4i_drv_drm_sys_resume(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
 	struct sun4i_drv *drv = drm->dev_private;
+	bool context_ready = false;
 	unsigned int i;
 	int ret, err;
 
@@ -445,6 +464,7 @@ static int sun4i_drv_drm_sys_resume(struct device *dev)
 	ret = sun50i_a133_ccu_deep_ready();
 	if (ret)
 		goto fault;
+	context_ready = true;
 	ret = sun4i_drv_sleep_check(drv);
 	if (ret)
 		goto fault;
@@ -477,6 +497,8 @@ fault:
 	/* PM errors do not prevent thawed userspace issuing fresh DRM ioctls.
 	 * Keep the failed device isolated until reboot.
 	 */
+	if (context_ready)
+		sun4i_drv_sleep_stop(dev, drv);
 	WRITE_ONCE(drv->sleep_error, ret);
 	for (i = 0; i < SUN4I_SLEEP_STAGES; i++)
 		if (drv->sleep[i].suspend)

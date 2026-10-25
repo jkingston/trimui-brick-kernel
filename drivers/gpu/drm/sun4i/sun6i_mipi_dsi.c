@@ -1369,6 +1369,11 @@ static const struct regmap_config sun6i_dsi_regmap_config = {
 
 static int sun6i_dsi_pm_suspend_late(struct device *dev);
 
+static int sun6i_dsi_deep_fault(struct device *dev)
+{
+	return sun6i_dsi_brick_stop(dev_get_drvdata(dev));
+}
+
 static int sun6i_dsi_deep_restore(struct device *dev)
 {
 	struct sun6i_dsi *dsi = dev_get_drvdata(dev);
@@ -1448,6 +1453,7 @@ static int sun6i_dsi_bind(struct device *dev, struct device *master,
 			.dev = dev, .check = sun6i_dsi_pm_suspend_late,
 			.restore = sun6i_dsi_deep_restore,
 			.result = sun6i_dsi_deep_result,
+			.fault = sun6i_dsi_deep_fault,
 		};
 	}
 

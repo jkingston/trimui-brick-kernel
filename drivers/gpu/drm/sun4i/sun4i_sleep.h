@@ -23,6 +23,8 @@ struct sun4i_sleep_client {
 	void (*suspend)(struct device *dev);
 	/* CCU readiness is checked before any reconstruction callback. */
 	int (*restore)(struct device *dev);
+	/* Best-effort output shutdown on failure, only with accessible context. */
+	int (*fault)(struct device *dev);
 	/* Report errors hidden by DRM's void encoder enable callback. */
 	int (*result)(struct device *dev);
 };
