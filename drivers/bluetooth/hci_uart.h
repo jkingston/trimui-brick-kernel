@@ -64,6 +64,8 @@ struct hci_uart_proto {
 struct hci_uart {
 	struct tty_struct	*tty;
 	struct serdev_device	*serdev;
+	struct mutex		serdev_lock;
+	bool			serdev_suspended;
 	struct hci_dev		*hdev;
 	unsigned long		flags;
 	unsigned long		hdev_flags;
@@ -110,6 +112,8 @@ static inline int hci_uart_register_device(struct hci_uart *hu,
 }
 
 void hci_uart_unregister_device(struct hci_uart *hu);
+int hci_uart_suspend_closed(struct hci_uart *hu);
+void hci_uart_resume_closed(struct hci_uart *hu);
 
 int hci_uart_tx_wakeup(struct hci_uart *hu);
 int hci_uart_wait_until_sent(struct hci_uart *hu);

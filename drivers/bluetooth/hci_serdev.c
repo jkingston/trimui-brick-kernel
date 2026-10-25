@@ -114,9 +114,15 @@ static int hci_uart_flush(struct hci_dev *hdev)
 static int hci_uart_open(struct hci_dev *hdev)
 {
 	struct hci_uart *hu = hci_get_drvdata(hdev);
-	int err;
+	int err = 0;
 
 	BT_DBG("%s %p", hdev->name, hdev);
+
+	mutex_lock(&hu->serdev_lock);
+	if (hu->serdev_suspended) {
+		err = -EBUSY;
+		goto unlock;
+	}
 
 	/* When Quirk HCI_QUIRK_NON_PERSISTENT_SETUP is set by
 	 * driver, BT SoC is completely turned OFF during
@@ -125,14 +131,16 @@ static int hci_uart_open(struct hci_dev *hdev)
 	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags)) {
 		err = serdev_device_open(hu->serdev);
 		if (err)
-			return err;
+			goto unlock;
 		set_bit(HCI_UART_PROTO_READY, &hu->flags);
 	}
 
 	/* Undo clearing this from hci_uart_close() */
 	hdev->flush = hci_uart_flush;
 
-	return 0;
+unlock:
+	mutex_unlock(&hu->serdev_lock);
+	return err;
 }
 
 /* Close device */
@@ -142,8 +150,9 @@ static int hci_uart_close(struct hci_dev *hdev)
 
 	BT_DBG("hdev %p", hdev);
 
+	mutex_lock(&hu->serdev_lock);
 	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
-		return 0;
+		goto unlock;
 
 	hci_uart_flush(hdev);
 	hdev->flush = NULL;
@@ -157,8 +166,35 @@ static int hci_uart_close(struct hci_dev *hdev)
 		serdev_device_close(hu->serdev);
 	}
 
+unlock:
+	mutex_unlock(&hu->serdev_lock);
 	return 0;
 }
+
+/* Only a closed transport can suspend without a controller sleep protocol.
+ * Serialize against HCI open work, which runs on a non-freezable workqueue.
+ */
+int hci_uart_suspend_closed(struct hci_uart *hu)
+{
+	int err = 0;
+
+	mutex_lock(&hu->serdev_lock);
+	if (test_bit(HCI_UART_PROTO_READY, &hu->flags))
+		err = -EBUSY;
+	else
+		hu->serdev_suspended = true;
+	mutex_unlock(&hu->serdev_lock);
+	return err;
+}
+EXPORT_SYMBOL_GPL(hci_uart_suspend_closed);
+
+void hci_uart_resume_closed(struct hci_uart *hu)
+{
+	mutex_lock(&hu->serdev_lock);
+	hu->serdev_suspended = false;
+	mutex_unlock(&hu->serdev_lock);
+}
+EXPORT_SYMBOL_GPL(hci_uart_resume_closed);
 
 /* Send frames from HCI layer */
 static int hci_uart_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
@@ -309,6 +345,8 @@ int hci_uart_register_device_priv(struct hci_uart *hu,
 
 	BT_DBG("");
 
+	mutex_init(&hu->serdev_lock);
+	hu->serdev_suspended = false;
 	serdev_device_set_client_ops(hu->serdev, &hci_serdev_client_ops);
 
 	if (percpu_init_rwsem(&hu->proto_lock))

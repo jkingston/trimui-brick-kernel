@@ -599,11 +599,30 @@ static void xr_system_shutdown(struct serdev_device *serdev)
 }
 static int xr_suspend(struct device *dev)
 {
-	return -EOPNOTSUPP;
+	struct hci_uart *hu = serdev_device_get_drvdata(to_serdev_device(dev));
+	int err;
+
+	/* A powered controller still needs a proven RX sleep handshake. */
+	err = hci_uart_suspend_closed(hu);
+	if (err)
+		return -EOPNOTSUPP;
+	/* A failed regulator release can leave power held after HCI closes. */
+	if (xr_of(hu)->powered) {
+		hci_uart_resume_closed(hu);
+		return -EOPNOTSUPP;
+	}
+	return 0;
 }
-static const struct dev_pm_ops xr_pm = { .suspend = xr_suspend,
-					 .freeze = xr_suspend,
-					 .poweroff = xr_suspend };
+
+static int xr_resume(struct device *dev)
+{
+	struct hci_uart *hu = serdev_device_get_drvdata(to_serdev_device(dev));
+
+	hci_uart_resume_closed(hu);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(xr_pm, xr_suspend, xr_resume);
 static const struct of_device_id xr_match[] = {
 	{ .compatible = "xradio,xr829-bt" },
 	{},
