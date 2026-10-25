@@ -196,6 +196,7 @@ struct sun6i_vchan {
 	u8			port;
 	u8			irq_type;
 	bool			cyclic;
+	bool			deferred_issue;
 };
 
 struct sun6i_dma_dev {
@@ -991,7 +992,14 @@ static int sun6i_dma_terminate_all(struct dma_chan *chan)
 	}
 
 	vchan->cyclic = false;
-	vchan_get_all_descriptors(&vchan->vc, &head);
+	vchan->deferred_issue = false;
+	/* A callback may already hold the active cyclic descriptor outside
+	 * vc.lock. Leave terminated descriptors for device_synchronize.
+	 */
+	list_splice_tail_init(&vchan->vc.desc_allocated, &head);
+	list_splice_tail_init(&vchan->vc.desc_submitted, &head);
+	list_splice_tail_init(&vchan->vc.desc_issued, &head);
+	list_splice_tail_init(&vchan->vc.desc_completed, &head);
 
 	if (pchan) {
 		if (!sdev->pm_fault) {
@@ -1055,6 +1063,24 @@ static enum dma_status sun6i_dma_tx_status(struct dma_chan *chan,
 	return ret;
 }
 
+static void sun6i_dma_issue_pending_locked(struct sun6i_dma_dev *sdev,
+					   struct sun6i_vchan *vchan)
+{
+	if (READ_ONCE(sdev->pm_blocked)) {
+		vchan->deferred_issue = true;
+		return;
+	}
+	vchan->deferred_issue = false;
+	if (vchan_issue_pending(&vchan->vc)) {
+		spin_lock(&sdev->lock);
+		if (!vchan->phy && list_empty(&vchan->node)) {
+			list_add_tail(&vchan->node, &sdev->pending);
+			tasklet_schedule(&sdev->task);
+		}
+		spin_unlock(&sdev->lock);
+	}
+}
+
 static void sun6i_dma_issue_pending(struct dma_chan *chan)
 {
 	struct sun6i_dma_dev *sdev = to_sun6i_dma_dev(chan->device);
@@ -1062,41 +1088,27 @@ static void sun6i_dma_issue_pending(struct dma_chan *chan)
 	unsigned long flags;
 
 	spin_lock_irqsave(&vchan->vc.lock, flags);
-	if (READ_ONCE(sdev->pm_blocked))
-		goto out;
-
-	if (vchan_issue_pending(&vchan->vc)) {
-		spin_lock(&sdev->lock);
-
-		if (!vchan->phy && list_empty(&vchan->node)) {
-			list_add_tail(&vchan->node, &sdev->pending);
-			tasklet_schedule(&sdev->task);
-			dev_dbg(chan2dev(chan), "vchan %p: issued\n",
-				&vchan->vc);
-		}
-
-		spin_unlock(&sdev->lock);
-	} else {
-		dev_dbg(chan2dev(chan), "vchan %p: nothing to issue\n",
-			&vchan->vc);
-	}
-
-out:
+	sun6i_dma_issue_pending_locked(sdev, vchan);
 	spin_unlock_irqrestore(&vchan->vc.lock, flags);
+}
+
+static void sun6i_dma_synchronize(struct dma_chan *chan)
+{
+	struct sun6i_dma_dev *sdev = to_sun6i_dma_dev(chan->device);
+
+	/* Faulted PCM reports DMA_ERROR, so close need not issue terminate. */
+	if (READ_ONCE(sdev->pm_fault))
+		sun6i_dma_terminate_all(chan);
+	vchan_synchronize(&to_sun6i_vchan(chan)->vc);
 }
 
 static void sun6i_dma_free_chan_resources(struct dma_chan *chan)
 {
-	struct sun6i_dma_dev *sdev = to_sun6i_dma_dev(chan->device);
 	struct sun6i_vchan *vchan = to_sun6i_vchan(chan);
-	unsigned long flags;
 
-	if (READ_ONCE(sdev->pm_blocked) && !sdev->pm_reset)
+	if (sun6i_dma_terminate_all(chan))
 		return;
-	spin_lock_irqsave(&sdev->lock, flags);
-	list_del_init(&vchan->node);
-	spin_unlock_irqrestore(&sdev->lock, flags);
-
+	sun6i_dma_synchronize(chan);
 	vchan_free_chan_resources(&vchan->vc);
 }
 
@@ -1429,6 +1441,7 @@ static int sun6i_dma_probe(struct platform_device *pdev)
 	sdc->slave.device_pause			= sun6i_dma_pause;
 	sdc->slave.device_resume		= sun6i_dma_resume;
 	sdc->slave.device_terminate_all		= sun6i_dma_terminate_all;
+	sdc->slave.device_synchronize		= sun6i_dma_synchronize;
 	sdc->slave.src_addr_widths		= sdc->cfg->src_addr_widths;
 	sdc->slave.dst_addr_widths		= sdc->cfg->dst_addr_widths;
 	sdc->slave.directions			= BIT(DMA_DEV_TO_MEM) |
@@ -1599,7 +1612,7 @@ static int sun6i_dma_pm_suspend_late(struct device *dev)
 	disable_irq(sdev->irq);
 	tasklet_disable(&sdev->task);
 	for (i = 0; i < sdev->num_vchans; i++) {
-		tasklet_disable(&sdev->vchans[i].vc.task);
+		tasklet_kill(&sdev->vchans[i].vc.task);
 		/* Drain a control/status operation that entered before the gate. */
 		spin_lock_irqsave(&sdev->vchans[i].vc.lock, flags);
 		spin_unlock_irqrestore(&sdev->vchans[i].vc.lock, flags);
@@ -1742,7 +1755,10 @@ fault:
 		err = reset_control_status(sdev->rstc);
 		err = err == 1 ? 0 : (err < 0 ? err : -EIO);
 	}
-	sdev->pm_reset = !err;
+	if (err)
+		panic("sun6i DMA: cannot isolate lost context (restore %d, reset %d)",
+		      ret, err);
+	sdev->pm_reset = true;
 	WRITE_ONCE(sdev->pm_fault, true);
 	dev_err(dev, "DMA context restore failed: %d, reset isolation: %d\n", ret, err);
 	return ret;
@@ -1757,11 +1773,20 @@ static int sun6i_dma_pm_resume_early(struct device *dev)
 		return 0;
 	if (!sdev->pm_fault)
 		WRITE_ONCE(sdev->pm_blocked, false);
-	/* A terminal fault still drains software callbacks. The service tasklet
+	if (!sdev->pm_fault) {
+		for (i = 0; i < sdev->num_vchans; i++) {
+			struct sun6i_vchan *vchan = &sdev->vchans[i];
+			unsigned long flags;
+
+			spin_lock_irqsave(&vchan->vc.lock, flags);
+			if (vchan->deferred_issue)
+				sun6i_dma_issue_pending_locked(sdev, vchan);
+			spin_unlock_irqrestore(&vchan->vc.lock, flags);
+		}
+	}
+	/* Callbacks were drained before suspend. On fault the service tasklet
 	 * and all hardware-facing DMA APIs remain gated until reboot.
 	 */
-	for (i = 0; i < sdev->num_vchans; i++)
-		tasklet_enable(&sdev->vchans[i].vc.task);
 	tasklet_enable(&sdev->task);
 	if (!sdev->pm_fault) {
 		enable_irq(sdev->irq);
