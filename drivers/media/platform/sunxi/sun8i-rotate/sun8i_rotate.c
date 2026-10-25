@@ -84,6 +84,17 @@ static void rotate_calc_addr_pitch(dma_addr_t buffer,
 	}
 }
 
+static bool rotate_uses_mixer(struct rotate_ctx *ctx)
+{
+	const struct rotate_format *fmt = rotate_find_format(ctx->src_fmt.pixelformat);
+
+	return ctx->dev->a133 && !(fmt->flags & ROTATE_FLAG_YUV) &&
+		(ctx->src_fmt.width != ctx->dst_fmt.width ||
+		 ctx->src_fmt.height != ctx->dst_fmt.height ||
+		 ctx->src_fmt.pixelformat != ctx->dst_fmt.pixelformat) &&
+		!ctx->rotate && !ctx->hflip && !ctx->vflip;
+}
+
 static void rotate_program(void *priv)
 {
 	struct rotate_ctx *ctx = priv;
@@ -97,6 +108,12 @@ static void rotate_program(void *priv)
 	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 
 	v4l2_m2m_buf_copy_metadata(src, dst);
+	if (dev->a133 && dev->mixer_job) {
+		sun50i_g2d_rgb_mixer(ctx,
+			vb2_dma_contig_plane_dma_addr(&src->vb2_buf, 0),
+			vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, 0));
+		return;
+	}
 
 	val = ROTATE_GLB_CTL_MODE(ROTATE_MODE_COPY_ROTATE);
 	if (ctx->hflip)
@@ -165,7 +182,7 @@ static void rotate_program(void *priv)
 	rotate_set_bits(dev, ROTATE_GLB_CTL, ROTATE_GLB_CTL_START);
 }
 
-/* A133 G2D owns both internal engines; the mixer remains held in reset. */
+/* A133 G2D owns both engines; idle/recovered state selects the rotator. */
 static void rotate_a133_enable(struct rotate_dev *dev)
 {
 	writel(BIT(1), dev->top);
@@ -180,8 +197,20 @@ static void rotate_a133_work(struct work_struct *work)
 	struct vb2_v4l2_buffer *src, *dst;
 	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
 
+	/* Drain the previous ISR before changing the engine it may access. */
+	disable_irq(dev->irq);
+	dev->mixer_job = rotate_uses_mixer(ctx);
+	/* Shared block, serialized jobs: clear stale state in both sub-engines. */
+	writel(0, dev->top + 8);
+	writel(dev->mixer_job ? BIT(0) : BIT(1), dev->top);
+	writel(dev->mixer_job ? BIT(0) : BIT(1), dev->top + 4);
+	writel(dev->mixer_job ? BIT(0) : BIT(1), dev->top + 8);
 	reinit_completion(&dev->complete);
-	rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
+	if (dev->mixer_job)
+		writel(BIT(0), dev->top + 0x104);
+	else
+		rotate_write(dev, ROTATE_INT, ROTATE_INT_FINISH_IRQ);
+	enable_irq(dev->irq);
 	rotate_program(ctx);
 	if (!wait_for_completion_timeout(&dev->complete, msecs_to_jiffies(500))) {
 		/* Never return DMA buffers until reset has contained a timed-out job. */
@@ -224,6 +253,14 @@ static irqreturn_t rotate_irq(int irq, void *data)
 	unsigned int val;
 
 	if (dev->a133) {
+		if (dev->mixer_job) {
+			val = readl(dev->top + 0x104);
+			if (!(val & BIT(0)))
+				return IRQ_NONE;
+			writel(BIT(0), dev->top + 0x104);
+			complete(&dev->complete);
+			return IRQ_HANDLED;
+		}
 		val = rotate_read(dev, ROTATE_INT);
 		if (!(val & ROTATE_INT_FINISH_IRQ))
 			return IRQ_NONE;
@@ -399,6 +436,23 @@ static int rotate_try_fmt_vid_cap(struct file *file, void *priv,
 {
 	struct rotate_ctx *ctx = rotate_file2ctx(file);
 
+	const struct rotate_format *src = rotate_find_format(ctx->src_fmt.pixelformat);
+	const struct rotate_format *dst = rotate_find_format(f->fmt.pix.pixelformat);
+
+	if (ctx->dev->a133 && !(src->flags & ROTATE_FLAG_YUV) &&
+	    !ctx->rotate && !ctx->hflip && !ctx->vflip) {
+		if (!dst || dst->flags & ROTATE_FLAG_YUV)
+			f->fmt.pix.pixelformat = ctx->src_fmt.pixelformat;
+		f->fmt.pix.width = clamp(f->fmt.pix.width, ROTATE_MIN_WIDTH, ROTATE_MAX_WIDTH);
+		f->fmt.pix.height = clamp(f->fmt.pix.height, ROTATE_MIN_HEIGHT, ROTATE_MAX_HEIGHT);
+		f->fmt.pix.field = V4L2_FIELD_NONE;
+		f->fmt.pix.colorspace = ctx->src_fmt.colorspace;
+		f->fmt.pix.xfer_func = ctx->src_fmt.xfer_func;
+		f->fmt.pix.ycbcr_enc = ctx->src_fmt.ycbcr_enc;
+		f->fmt.pix.quantization = ctx->src_fmt.quantization;
+		rotate_prepare_format(&f->fmt.pix);
+		return 0;
+	}
 	return rotate_set_cap_format(ctx, &f->fmt.pix, ctx->rotate);
 }
 
@@ -674,7 +728,11 @@ static int rotate_s_ctrl(struct v4l2_ctrl *ctrl)
 	struct rotate_ctx *ctx = container_of(ctrl->handler,
 					      struct rotate_ctx,
 					      ctrl_handler);
-	struct v4l2_pix_format fmt;
+	struct v4l2_pix_format fmt = ctx->dst_fmt;
+
+	/* Mixer and rotator cannot operate on the same transaction. */
+	if (ctrl->val && rotate_uses_mixer(ctx))
+		return -EINVAL;
 
 	switch (ctrl->id) {
 	case V4L2_CID_HFLIP:

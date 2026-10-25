@@ -132,6 +132,7 @@ struct rotate_dev {
 	bool a133;
 	bool removing;
 	bool resume_failed;
+	bool mixer_job;
 	struct kref ref;
 	int irq;
 	struct clk *mbus_clk;
@@ -144,5 +145,7 @@ struct rotate_dev {
 
 	struct reset_control	*rstc;
 };
+
+void sun50i_g2d_rgb_mixer(struct rotate_ctx *ctx, dma_addr_t src, dma_addr_t dst);
 
 #endif
