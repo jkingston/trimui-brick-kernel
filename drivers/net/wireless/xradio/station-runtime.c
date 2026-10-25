@@ -809,12 +809,25 @@ static int station_join(struct xradio_common *hw,struct ieee80211_vif *vif,
  join.dtimPeriod=settings.dtim;join.beaconInterval=settings.beacon_interval;
  join.basicRateSet=settings.basic_rates;join.ssidLength=settings.ssid_len;
  memcpy(join.ssid,settings.ssid,settings.ssid_len);memcpy(join.bssid,settings.bssid,6);
+	/* Apply limits before JOIN can transmit association management frames. */
+	ret = xrs_power_limit(hw->hw->conf.chandef.chan->max_power,
+			      hw->hw->conf.power_level, vif->bss_conf.txpower,
+			      hw->scan_power.min_power_level,
+			      hw->scan_power.max_power_level, &power);
+	if (ret)
+		return ret;
+	ret = wsm_set_output_power(hw, power, 0);
+	if (ret)
+		return ret;
  ret=wsm_join(hw,&join,0);if(ret)return ret;
  /* Vendor applies receive filters after JOIN, with one beacon forwarded. */
  ret=wsm_beacon_filter_control(hw,&beacons,0);if(ret)return ret;
  ret=wsm_set_rx_filter(hw,&filter,0);if(ret)return ret;
  ret=wsm_set_bssid_filtering(hw,true,0);if(ret)return ret;
 
+	/* JOIN may narrow, but must not widen, the calibrated configuration range. */
+	join.minPowerLevel = max(join.minPowerLevel, hw->scan_power.min_power_level);
+	join.maxPowerLevel = min(join.maxPowerLevel, hw->scan_power.max_power_level);
  ret=xrs_power_limit(hw->hw->conf.chandef.chan->max_power,hw->hw->conf.power_level,
                      vif->bss_conf.txpower,join.minPowerLevel,join.maxPowerLevel,&power);
  if(ret)return ret;

@@ -196,6 +196,12 @@ static int configure_radio(struct ieee80211_hw *dev)
 		if (ret)
 			return ret;
 		hw->scan_power = cfg.txPowerRange[0];
+		hw->scan_power.min_power_level = max(hw->scan_power.min_power_level,
+						     hw->sdd_power_min);
+		hw->scan_power.max_power_level = min(hw->scan_power.max_power_level,
+						     hw->sdd_power_max);
+		if (hw->scan_power.min_power_level > hw->scan_power.max_power_level)
+			return -ERANGE;
 		hw->scan_only_configured = true;
 	}
 	ret = wsm_write_mib(hw, 0x1006, active, sizeof(active), 0);
@@ -316,8 +322,9 @@ static int hardware_scan(struct ieee80211_hw *dev, struct ieee80211_vif *vif,
   r->channels[i].maxChannelTime = 120;
  }
  memcpy(r->policy, channels, sizeof(channels));
- ret = xrs_scan_plan_build(&r->plan, channels, req->n_channels,
-                           req->n_ssids, lengths, 10, req->no_cck);
+	ret = xrs_scan_plan_build(&r->plan, channels, req->n_channels,
+				  req->n_ssids, lengths, dev->conf.power_level,
+				  req->no_cck);
  if (ret) goto free;
  /* Validate every active batch before accepting ownership or transmitting. */
  for (i = 0; i < r->plan.count; i++) {

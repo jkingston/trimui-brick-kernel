@@ -209,6 +209,7 @@ struct xradio_common {
 
 	/* Radio data */
 	int output_power;
+	int sdd_power_min, sdd_power_max;
 	int noise;
 
 	/* calibration, output power limit and rssi<->dBm conversation data */

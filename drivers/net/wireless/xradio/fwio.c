@@ -17,6 +17,7 @@
 
 #include "xradio.h"
 #include "fwio.h"
+#include "sdd-power.h"
 #include "hwio.h"
 #include "bh.h"
 #include "sdio.h"
@@ -110,6 +111,10 @@ static int xradio_parse_sdd(struct xradio_common *hw, u32 *dpll)
   off += 2 + e[1];
  }
  if (!ref) return -EINVAL;
+	ret = xrs_sdd_power(hw->sdd->data, hw->sdd->size,
+			    &hw->sdd_power_min, &hw->sdd_power_max);
+	if (ret)
+		return ret;
  dev_info(hw->pdev, "XR829 SDD validated: 24MHz, PTA=%u\n", hw->is_BT_Present);
  return 0;
 }
