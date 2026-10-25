@@ -797,7 +797,11 @@ int xrs_runtime_rx(struct xradio_common *hw,const u8 *data,size_t size)
 		    size < 16 + 26 || (data[16 + 4] & 1))
 			goto out;
 		tid = data[16 + 24] & 15;
-		if (tid >= 8 || !(s->ba.rx & BIT(tid)))
+		/* Firmware can continue aggregating after a host reorder timeout.
+		 * RX_STOP only removes mac80211's reorder session; it does not
+		 * tear down firmware BA ownership. Let mac80211 handle each MPDU.
+		 */
+		if (tid >= 8)
 			goto out;
 	}
  if(view.radio.channel!=s->settings.channel || !xrs_ht_rx_allowed(&s->ht,&view.rate))goto out;
