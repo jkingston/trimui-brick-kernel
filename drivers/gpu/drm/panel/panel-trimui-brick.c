@@ -263,6 +263,25 @@ static void brick_remove(struct mipi_dsi_device *dsi)
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&p->panel);
 }
+/* Failed prepare can retain private resources without panel.prepared being
+ * set. Validate these after the DRM master's normal suspend phase as well.
+ */
+static int brick_suspend_late(struct device *dev)
+{
+	struct brick_panel *p = dev_get_drvdata(dev);
+
+	if (p->panel.enabled || p->panel.prepared || p->backlight_attempted ||
+	    p->commands_allowed || p->power0_on || p->power1_on || p->pins_active) {
+		dev_err(dev, "panel resources did not quiesce for suspend\n");
+		return -EBUSY;
+	}
+	return 0;
+}
+
+static const struct dev_pm_ops brick_pm_ops = {
+	.suspend_late = brick_suspend_late,
+};
+
 static const struct of_device_id brick_of_match[] = {
 	{ .compatible = "trimui,brick-jd9168", .data = &jd9168_desc },
 	{ }
@@ -270,7 +289,8 @@ static const struct of_device_id brick_of_match[] = {
 MODULE_DEVICE_TABLE(of, brick_of_match);
 static struct mipi_dsi_driver brick_driver = {
 	.probe = brick_probe, .remove = brick_remove, .shutdown = brick_shutdown,
-	.driver = { .name = "panel-trimui-brick", .of_match_table = brick_of_match },
+	.driver = { .name = "panel-trimui-brick", .of_match_table = brick_of_match,
+		.pm = &brick_pm_ops },
 };
 module_mipi_dsi_driver(brick_driver);
 MODULE_DESCRIPTION("TrimUI Brick JD9168 panel");
