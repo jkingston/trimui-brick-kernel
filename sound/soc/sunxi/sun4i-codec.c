@@ -279,6 +279,8 @@
 #define SUN50I_A133_ADC_VOL		0x034
 #define SUN50I_A133_ADC_FIFOS		0x038
 #define SUN50I_A133_ADC_CNT		0x044
+#define SUN50I_A133_DAC_DAP		0x0f0
+#define SUN50I_A133_DAC_DRC_CTRL		0x108
 #define SUN50I_A133_ADC_DAP		0x0f8
 #define SUN50I_A133_ADC_HPF_H		0x200
 #define SUN50I_A133_ADC_HPF_L		0x204
@@ -2540,6 +2542,72 @@ static int a133_adc_dsp_init(struct snd_soc_component *c)
 	return 0;
 }
 
+/* Shipped speaker DRC coefficients; the headphone-only path bypasses DRC. */
+static int a133_dac_dsp_init(struct snd_soc_component *c)
+{
+	static const struct { unsigned int reg, value; } coefficients[] = {
+		{ 0x10c, 0x000b },
+		{ 0x110, 0x77bf },
+		{ 0x114, 0x000b },
+		{ 0x118, 0x77f0 },
+		{ 0x11c, 0x00ff },
+		{ 0x120, 0xe1f8 },
+		{ 0x124, 0x00ff },
+		{ 0x128, 0xe1f8 },
+		{ 0x12c, 0x0001 },
+		{ 0x130, 0x2bb0 },
+		{ 0x134, 0x0001 },
+		{ 0x138, 0x2bb0 },
+		{ 0x18c, 0x0001 },
+		{ 0x190, 0x7665 },
+		{ 0x194, 0x0000 },
+		{ 0x198, 0x0f04 },
+		{ 0x164, 0xfe56 },
+		{ 0x168, 0xcb10 },
+		{ 0x14c, 0xfb04 },
+		{ 0x150, 0x612f },
+		{ 0x17c, 0xf608 },
+		{ 0x180, 0xc25f },
+		{ 0x154, 0x0352 },
+		{ 0x158, 0x69e0 },
+		{ 0x13c, 0x06b3 },
+		{ 0x140, 0x002c },
+		{ 0x16c, 0x0a13 },
+		{ 0x170, 0x9682 },
+		{ 0x15c, 0x0040 },
+		{ 0x160, 0x0000 },
+		{ 0x144, 0x00fb },
+		{ 0x148, 0xcda5 },
+		{ 0x184, 0x0179 },
+		{ 0x188, 0xb472 },
+		{ 0x174, 0x0423 },
+		{ 0x178, 0x4f68 },
+		{ 0x19c, 0x0352 },
+		{ 0x1a0, 0x69e0 },
+		{ 0x1a4, 0xf95b },
+		{ 0x1a8, 0x2c3f },
+		{ 0x1ac, 0x0002 },
+		{ 0x1b0, 0x5600 },
+	};
+	unsigned int i;
+	int ret;
+
+	/* Stock disables DAC HPF; do not program or enable that filter. */
+	ret = snd_soc_component_update_bits(c, SUN50I_A133_DAC_DAP,
+					    BIT(31) | BIT(29) | BIT(28), 0);
+	if (ret < 0)
+		return ret;
+	ret = snd_soc_component_update_bits(c, SUN50I_A133_DAC_DRC_CTRL, 0xfb, 0);
+	if (ret < 0)
+		return ret;
+	for (i = 0; i < ARRAY_SIZE(coefficients); i++) {
+		ret = snd_soc_component_write(c, coefficients[i].reg, coefficients[i].value);
+		if (ret < 0)
+			return ret;
+	}
+	return 0;
+}
+
 /* Low initial digital level; userspace deliberately raises volume for test. */
 static int a133_component_probe(struct snd_soc_component *c)
 {
@@ -2577,7 +2645,10 @@ static int a133_component_probe(struct snd_soc_component *c)
 		if (ret < 0)
 			return ret;
 	}
-	return a133_adc_dsp_init(c);
+	ret = a133_adc_dsp_init(c);
+	if (ret)
+		return ret;
+	return a133_dac_dsp_init(c);
 }
 
 static int a133_adc_event(struct snd_soc_dapm_widget *w,
@@ -2654,19 +2725,58 @@ static const struct snd_soc_component_driver sun50i_a133_codec_component = {
 	.endianness = 1,
 };
 
+/*
+ * DRC is the only enabled DAC processor. The single Speaker widget owns its
+ * common gate, even when both headphone outputs feed the external amplifier.
+ * Headphone-only playback never acquires this gate. ADC processing is separate.
+ */
+static int a133_speaker_drc_disable(struct sun4i_codec *scodec)
+{
+	int ret, err;
+
+	ret = regmap_update_bits(scodec->regmap, SUN50I_A133_DAC_DAP,
+				 BIT(31) | BIT(29), 0);
+	/* Attempt both shutdown writes even when one fails. */
+	err = regmap_update_bits(scodec->regmap, SUN50I_A133_DAC_DRC_CTRL, 0xfb, 0);
+	return ret ?: err;
+}
+
+static int a133_speaker_drc_enable(struct sun4i_codec *scodec)
+{
+	int ret;
+
+	ret = regmap_update_bits(scodec->regmap, SUN50I_A133_DAC_DRC_CTRL, 0xfb, 0xfb);
+	if (ret)
+		goto disable;
+	ret = regmap_update_bits(scodec->regmap, SUN50I_A133_DAC_DAP,
+				 BIT(31) | BIT(29), BIT(31) | BIT(29));
+	if (!ret)
+		return 0;
+
+disable:
+	a133_speaker_drc_disable(scodec);
+	return ret;
+}
+
 static int sun50i_a133_speaker_event(struct snd_soc_dapm_widget *w,
 				   struct snd_kcontrol *k, int event)
 {
 	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
+	int ret;
 
 	if (event == SND_SOC_DAPM_POST_PMU) {
 		if (!scodec->gpio_pa)
 			return -ENODEV;
+		/* DAPM logs event errors but does not abort the graph: keep PA off. */
+		ret = a133_speaker_drc_enable(scodec);
+		if (ret)
+			return ret;
 		gpiod_set_value_cansleep(scodec->gpio_pa, 1);
 		msleep(scodec->pa_delay_ms);
 	} else {
 		gpiod_set_value_cansleep(scodec->gpio_pa, 0);
+		return a133_speaker_drc_disable(scodec);
 	}
 	return 0;
 }
