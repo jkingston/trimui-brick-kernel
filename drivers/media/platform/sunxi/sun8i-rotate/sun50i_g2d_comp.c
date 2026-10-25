@@ -366,8 +366,10 @@ static int g2d_comp_set_fmt(struct file *file, void *priv, struct v4l2_format *f
 	g2d_comp_try_fmt(file, priv, fmt);
 	node->format = fmt->fmt.pix;
 	if (node->index == 1) {
+		v4l2_ctrl_lock(node->comp->alpha_ctrl);
 		v4l2_ctrl_activate(node->comp->alpha_ctrl,
 				   fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_XRGB32);
+		v4l2_ctrl_unlock(node->comp->alpha_ctrl);
 		node->comp->compose = (struct v4l2_rect) {
 			.width = fmt->fmt.pix.width, .height = fmt->fmt.pix.height,
 		};
@@ -487,6 +489,14 @@ static void g2d_comp_release(struct kref *ref)
 	kfree(comp);
 }
 
+/* The media node can outlive all video nodes, including an admitted ioctl. */
+static void g2d_comp_media_release(struct media_devnode *node)
+{
+	struct g2d_comp *comp = container_of(node->media_dev, struct g2d_comp, media);
+
+	kref_put(&comp->ref, g2d_comp_release);
+}
+
 static void g2d_comp_video_release(struct video_device *vfd)
 {
 	struct g2d_comp_node *node = container_of(vfd, struct g2d_comp_node, vfd);
@@ -530,13 +540,14 @@ int sun50i_g2d_comp_register(struct rotate_dev *dev)
 	comp->alpha = 255;
 	comp->compose = (struct v4l2_rect) { .width = 640, .height = 480 };
 	comp->media.dev = dev->dev;
+	strscpy(comp->media.driver_name, "sun8i-rotate", sizeof(comp->media.driver_name));
 	strscpy(comp->media.model, "A133 G2D compositor", sizeof(comp->media.model));
 	media_device_init(&comp->media);
 	dev->v4l2_dev.mdev = &comp->media;
 	v4l2_ctrl_handler_init(&comp->controls, 1);
-	comp->controls.lock = &dev->dev_mutex;
 	comp->alpha_ctrl = v4l2_ctrl_new_std(&comp->controls, &g2d_comp_ctrl_ops,
 			  V4L2_CID_ALPHA_COMPONENT, 0, 255, 1, 255);
+	/* Not published yet: no concurrent control users. */
 	v4l2_ctrl_activate(comp->alpha_ctrl, false);
 	if (comp->controls.error) {
 		ret = comp->controls.error;
@@ -615,6 +626,11 @@ int sun50i_g2d_comp_register(struct rotate_dev *dev)
 	ret = media_device_register(&comp->media);
 	if (ret)
 		goto nodes;
+	/* Registration keeps the devnode alive until unregister, so replacing
+	 * its final-release hook here cannot race the last file close.
+	 */
+	kref_get(&comp->ref);
+	comp->media.devnode->release = g2d_comp_media_release;
 	dev->compose = comp;
 	return 0;
 nodes:
