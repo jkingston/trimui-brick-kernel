@@ -423,6 +423,7 @@
 		vddio-supply = <&aldo3>;
 		reset-gpios = <&r_pio 0 2 GPIO_ACTIVE_LOW>;
 		device-wake-gpios = <&r_pio 0 4 GPIO_ACTIVE_HIGH>;
+		host-wake-gpios = <&r_pio 0 3 GPIO_ACTIVE_HIGH>;
 	};
 };
 

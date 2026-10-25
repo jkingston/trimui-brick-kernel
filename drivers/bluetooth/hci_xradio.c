@@ -3,8 +3,10 @@
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
@@ -25,7 +27,9 @@ static const u8 xr_digest[32] = { 0x88, 0xd6, 0x89, 0xdb, 0x80, 0x14, 0x45,
 				  0xf4, 0x50, 0xa7, 0xf6 };
 struct xr {
 	struct hci_uart hu;
-	struct gpio_desc *reset, *wake;
+	struct gpio_desc *reset, *wake, *host_wake;
+	int host_wake_irq;
+	bool host_wake_enabled;
 	struct regulator_bulk_data supplies[2];
 	struct clk_bulk_data clocks[2];
 	bool powered, registered;
@@ -48,11 +52,36 @@ static unsigned long xr_left(unsigned long end)
 {
 	return time_before(jiffies, end) ? end - jiffies : 0;
 }
+static irqreturn_t xr_host_wake(int irq, void *data)
+{
+	struct xr *xr = data;
+
+	/* The UART remains active. Account for controller activity without
+	 * promising system suspend or controller low-power support.
+	 */
+	pm_wakeup_event(&xr->hu.serdev->dev, 0);
+	return IRQ_HANDLED;
+}
+static void xr_host_wake_disable(struct xr *xr)
+{
+	if (xr->host_wake_enabled) {
+		disable_irq(xr->host_wake_irq);
+		xr->host_wake_enabled = false;
+	}
+}
+static void xr_host_wake_cleanup(void *data)
+{
+	struct xr *xr = data;
+
+	xr_host_wake_disable(xr);
+	device_init_wakeup(&xr->hu.serdev->dev, false);
+}
 static int xr_power_off(struct xr *xr)
 {
 	unsigned long flags;
 	int err = 0;
 
+	xr_host_wake_disable(xr);
 	gpiod_set_value_cansleep(xr->reset, 1);
 	gpiod_set_value_cansleep(xr->wake, 0);
 	spin_lock_irqsave(&xr->rx_lock, flags);
@@ -109,6 +138,10 @@ static int xr_power_on(struct xr *xr)
 		return err;
 	}
 	xr->powered = true;
+	if (xr->host_wake) {
+		enable_irq(xr->host_wake_irq);
+		xr->host_wake_enabled = true;
+	}
 	msleep(20);
 	gpiod_set_value_cansleep(xr->reset, 0);
 	msleep(20);
@@ -516,6 +549,30 @@ static int xr_probe(struct serdev_device *serdev)
 	if (IS_ERR(xr->wake))
 		return dev_err_probe(&serdev->dev, PTR_ERR(xr->wake),
 				     "device wake\n");
+	xr->host_wake = devm_gpiod_get_optional(&serdev->dev, "host-wake", GPIOD_IN);
+	if (IS_ERR(xr->host_wake))
+		return dev_err_probe(&serdev->dev, PTR_ERR(xr->host_wake),
+				     "host wake\n");
+	if (xr->host_wake) {
+		unsigned long trigger = gpiod_is_active_low(xr->host_wake) ?
+			IRQF_TRIGGER_FALLING : IRQF_TRIGGER_RISING;
+
+		xr->host_wake_irq = gpiod_to_irq(xr->host_wake);
+		if (xr->host_wake_irq < 0)
+			return dev_err_probe(&serdev->dev, xr->host_wake_irq,
+					     "host wake IRQ\n");
+		err = devm_request_irq(&serdev->dev, xr->host_wake_irq,
+				       xr_host_wake, trigger | IRQF_NO_AUTOEN,
+				       "xr829-host-wake", xr);
+		if (err)
+			return dev_err_probe(&serdev->dev, err, "host wake IRQ\n");
+		err = device_init_wakeup(&serdev->dev, true);
+		if (err)
+			return err;
+		err = devm_add_action_or_reset(&serdev->dev, xr_host_wake_cleanup, xr);
+		if (err)
+			return err;
+	}
 	serdev_device_set_drvdata(serdev, &xr->hu);
 	err = hci_uart_register_device(&xr->hu, &xr_proto);
 	if (!err)
