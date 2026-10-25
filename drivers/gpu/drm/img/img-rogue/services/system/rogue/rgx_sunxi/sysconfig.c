@@ -287,7 +287,7 @@ static bool sunxi_apm_wake_valid(bool was_off, unsigned int reset,
 	unsigned int dfs)
 {
 	if (!(reset & 1) || !(gate & 1) || (control & 3) != 2 ||
-	    (irqmask & 1) || rate != 432000000UL || dfs != 1)
+	    (irqmask & 1) || rate != A133_GPU_FIXED_RATE || dfs != 1)
 		return false;
 	return ((status & 3) == 0 && (isolation & 3) == 0) ||
 	       (was_off && (status & 3) == 1 && (isolation & 3) == 2);

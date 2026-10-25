@@ -3,6 +3,10 @@
 #define _LINUX_SUN50I_A133_GPU_H
 
 #include <linux/types.h>
+
+/* Fixed Brick stock clock; established before the GPU consumer probes. */
+#define A133_GPU_FIXED_RATE 702000000UL
+
 struct device;
 
 /* Callers hold the DDK power mutex; never invoke from IRQ/runtime-PM context. */

@@ -50,6 +50,28 @@ static int a133_gpu_power_on(struct generic_pm_domain *genpd)
 	 */
 	p->attempted = true;
 	WRITE_ONCE(p->result, -EIO);
+	/*
+	 * Fixed boot clock, before internal reset release and DDK initialization.
+	 * CLK_GPU does not propagate rate changes to its PLL parent.
+	 * No voltage or DFS change: stock uses its inherited board supply.
+	 */
+	if (reset_control_status(p->gpu_reset) != 1 ||
+	    reset_control_status(p->ppu_reset) != 1 ||
+	    clk_round_rate(p->parent, A133_GPU_FIXED_RATE) != A133_GPU_FIXED_RATE) {
+		ret = -EINVAL;
+		goto failed;
+	}
+	ret = clk_set_rate(p->parent, A133_GPU_FIXED_RATE);
+	if (ret)
+		goto failed;
+	ret = clk_set_rate(p->core, A133_GPU_FIXED_RATE);
+	if (ret)
+		goto failed;
+	if (clk_get_rate(p->parent) != A133_GPU_FIXED_RATE ||
+	    clk_get_rate(p->core) != A133_GPU_FIXED_RATE) {
+		ret = -ERANGE;
+		goto failed;
+	}
 	ret = reset_control_deassert(p->ppu_reset);
 	if (ret)
 		goto failed;
@@ -80,7 +102,7 @@ static int a133_gpu_power_on(struct generic_pm_domain *genpd)
 	ret = clk_prepare_enable(p->core);
 	if (ret)
 		goto failed;
-	if (clk_get_rate(p->core) != 432000000 ||
+	if (clk_get_rate(p->core) != A133_GPU_FIXED_RATE ||
 	    readq(p->gpu + 0x20) != 0x0016006600360026ULL ||
 	    readl(p->dfs) != 1) {
 		ret = -ENODEV;
@@ -104,7 +126,8 @@ static int a133_gpu_power_on(struct generic_pm_domain *genpd)
 	WRITE_ONCE(p->result, 0);
 	/* Publish completed boot initialization to transition callers. */
 	smp_store_release(&p->boot_ready, true);
-	dev_info(p->dev, "GPU domain on, hardware control at 432 MHz\n");
+	dev_info(p->dev, "GPU domain on, hardware control at %lu Hz\n",
+		 A133_GPU_FIXED_RATE);
 	return 0;
 failed:
 	WRITE_ONCE(p->result, ret);
@@ -144,7 +167,7 @@ static bool a133_handoff_valid(const struct a133_snapshot *s, u32 mode,
 	bool host_only)
 {
 	if (!(s->reset & 1) || !(s->gate & 1) || (s->control & 3) != mode ||
-	    (s->irqmask & 1) || s->dfs != 1 || s->rate != 432000000UL)
+	    (s->irqmask & 1) || s->dfs != 1 || s->rate != A133_GPU_FIXED_RATE)
 		return false;
 	return ((s->status & 3) == 1 && (s->isolation & 3) == 2) ||
 	       (!host_only && !(s->status & 3) && !(s->isolation & 3));
@@ -255,7 +278,7 @@ static int a133_internal_restore(struct a133_gpu_domain *p)
 	 * establish accessibility before the separate DFS read.
 	 */
 	s = a133_snapshot(p);
-	if (s.dfs != 1 || s.rate != 432000000UL)
+	if (s.dfs != 1 || s.rate != A133_GPU_FIXED_RATE)
 		return a133_fault(p, "restore-clock", -EIO);
 	writel((control & ~3U) | 2, p->ppu + 0x24);
 	ret = readl_poll_timeout(p->ppu + 0x24, value, (value & 3) == 2, 1, 1000);
