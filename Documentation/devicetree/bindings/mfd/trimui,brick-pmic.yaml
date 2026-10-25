@@ -16,7 +16,9 @@ description: |
   The interface preserves inherited voltage selectors and shared CLDO1.
   Read-only battery voltage, initialized gauge capacity and USB input
   presence are provided by a child device. The interrupt controller routes
-  power-key press and release events without changing key timing. Charging
+  power-key press and release events without changing key timing. Power-key
+  press can wake suspend-to-idle through the nested PMIC interrupt and its
+  R_INTC NMI parent. This does not establish deep-suspend support. Charging
   current limits remain boot-established unless explicitly written through
   power-supply properties. The Brick policy caps charge current at 1920 mA
   (stock's encoded 1950 mA setting) and USB input at 2500 mA. These are

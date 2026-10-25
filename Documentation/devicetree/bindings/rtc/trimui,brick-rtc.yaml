@@ -21,6 +21,10 @@ description: |
   gates: index 0 is LPO fanout, index 1 is DCXO peripheral reference.
   This board path requires valid inherited clock sources; it does not change
   mux, divider, oscillator trim or calibration.
+  Suspend-to-idle retains the bus clock and radio outputs. A trusted alarm
+  explicitly programmed by the RTC driver can wake through its alarm IRQ;
+  inherited alarms are preserved without granting them wake ownership.
+  Deep suspend and hibernation are not supported by this retained-state path.
 
 allOf:
   - $ref: rtc.yaml#
