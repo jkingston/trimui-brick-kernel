@@ -17,7 +17,12 @@ description: |
   Read-only battery voltage, initialized gauge capacity and USB input
   presence are provided by a child device. The interrupt controller routes
   power-key press and release events without changing key timing. Charging
-  remains boot-established. Optional VMID and drivevbus regulators expose
+  current limits remain boot-established unless explicitly written through
+  power-supply properties. The Brick policy caps charge current at 1920 mA
+  (stock's encoded 1950 mA setting) and USB input at 2500 mA. These are
+  configuration limits, not measured current or negotiated source capability.
+  Voltage, gauge and suspend charging configuration are not changed.
+  Optional VMID and drivevbus regulators expose
   the independent boost and output switch on nonzero-selector AXP2202 parts.
   The output switch has an explicit vin-supply parent reference to VMID;
   each provider has a 1000 microsecond enable delay.
