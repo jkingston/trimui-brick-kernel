@@ -951,8 +951,11 @@ static int
 mv64xxx_i2c_runtime_suspend(struct device *dev)
 {
 	struct mv64xxx_i2c_data *drv_data = dev_get_drvdata(dev);
+	int ret;
 
-	reset_control_assert(drv_data->rstc);
+	ret = reset_control_assert(drv_data->rstc);
+	if (ret)
+		return ret;
 	clk_disable_unprepare(drv_data->reg_clk);
 	clk_disable_unprepare(drv_data->clk);
 
@@ -963,14 +966,27 @@ static int
 mv64xxx_i2c_runtime_resume(struct device *dev)
 {
 	struct mv64xxx_i2c_data *drv_data = dev_get_drvdata(dev);
+	int ret;
 
-	clk_prepare_enable(drv_data->clk);
-	clk_prepare_enable(drv_data->reg_clk);
-	reset_control_reset(drv_data->rstc);
+	ret = clk_prepare_enable(drv_data->clk);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(drv_data->reg_clk);
+	if (ret)
+		goto disable_clk;
+	ret = reset_control_reset(drv_data->rstc);
+	if (ret)
+		goto disable_reg_clk;
 
 	mv64xxx_i2c_hw_init(drv_data);
 
 	return 0;
+
+disable_reg_clk:
+	clk_disable_unprepare(drv_data->reg_clk);
+disable_clk:
+	clk_disable_unprepare(drv_data->clk);
+	return ret;
 }
 
 static int
