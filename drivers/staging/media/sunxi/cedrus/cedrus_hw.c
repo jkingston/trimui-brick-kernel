@@ -18,6 +18,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
+#include <linux/jiffies.h>
 #include <linux/clk.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
@@ -134,6 +135,7 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 	struct cedrus_ctx *ctx;
 	enum vb2_buffer_state state;
 	enum cedrus_irq_status status;
+	unsigned long deadline = dev->watchdog_work.timer.expires;
 
 	/*
 	 * If cancel_delayed_work returns false it means watchdog already
@@ -150,8 +152,17 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 	}
 
 	status = ctx->current_codec->irq_status(ctx);
-	if (status == CEDRUS_IRQ_NONE)
+	if (status == CEDRUS_IRQ_NONE) {
+		unsigned long now = jiffies;
+
+		/*
+		 * The current job still owns DMA. An unrelated interrupt must
+		 * not remove its timeout or grant it a new full timeout period.
+		 */
+		schedule_delayed_work(&dev->watchdog_work,
+				      time_after(deadline, now) ? deadline - now : 1);
 		return IRQ_NONE;
+	}
 
 	ctx->current_codec->irq_disable(ctx);
 	ctx->current_codec->irq_clear(ctx);
