@@ -31,6 +31,8 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 	switch (reg) {
 	case 0x0f: /* VBUS implementation selector */
 	case 0x13: /* VBUS output switch */
+	case 0x17: /* USB input current limit */
+	case 0x62: /* Constant charge current */
 	case AXP2202_STATUS:
 	case AXP2202_CHARGE_STATUS:
 	case AXP2202_MODULE_EN:
@@ -54,7 +56,7 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 
 static bool brick_writeable(struct device *dev, unsigned int reg)
 {
-	return reg == 0x13 || reg == AXP2202_MODULE_EN ||
+	return reg == 0x17 || reg == 0x62 || reg == 0x13 || reg == AXP2202_MODULE_EN ||
 	       reg == AXP2202_LDO_EN1 ||
 	       (reg >= AXP2202_IRQ_ENABLE && reg < AXP2202_IRQ_ENABLE + 5) ||
 	       (reg >= AXP2202_IRQ_STATUS && reg < AXP2202_IRQ_STATUS + 5);
