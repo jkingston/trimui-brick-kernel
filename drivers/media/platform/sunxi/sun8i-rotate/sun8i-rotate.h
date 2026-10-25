@@ -146,6 +146,11 @@ struct rotate_dev {
 	struct reset_control	*rstc;
 };
 
-void sun50i_g2d_rgb_mixer(struct rotate_ctx *ctx, dma_addr_t src, dma_addr_t dst);
+struct rotate_format;
+
+void rotate_calc_addr_pitch(dma_addr_t buffer, u32 bytesperline, u32 height,
+			    const struct rotate_format *fmt, dma_addr_t *addr, u32 *pitch);
+
+void sun50i_g2d_mixer(struct rotate_ctx *ctx, dma_addr_t src, dma_addr_t dst);
 
 #endif

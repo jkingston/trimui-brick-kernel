@@ -13,6 +13,8 @@
 #define G2D_BLD_SIZE	0x0448
 #define G2D_BLD_OUT_COLOR	0x0460
 #define G2D_ROP_CTL	0x0480
+#define G2D_CSC_CTL	0x0500
+#define G2D_CSC2_COEFF	0x0570
 #define G2D_V0_ATTCTL	0x0800
 #define G2D_V0_MBSIZE	0x0804
 #define G2D_V0_PITCH0	0x080c
@@ -183,7 +185,30 @@ static const u32 g2d_linear[32] = {
 	0x001e2200, 0x00202000, 0x00221e00, 0x00241c00, 0x00261a00,
 	0x00281800, 0x002a1600, 0x002c1400, 0x002e1200, 0x00301000,
 	0x00320e00, 0x00340c00, 0x00360a00, 0x00380800, 0x003a0600,
-	0x003c0400, 0x003e0200, };
+	0x003c0400, 0x003e0200,
+};
+
+static const u32 g2d_rgb_to_yuv_709[12] = {
+	0x0bb, 0x0275, 0x03f, 0x4200, 0xFFFFFF99, 0xFFFFFEA6, 0x01c2, 0x20200,
+	0x01c2, 0xFFFFFE67, 0xFFFFFFD7, 0x20200,
+};
+
+static const u32 g2d_yuv_to_rgb_709[12] = {
+	0x04a8, 0x0, 0x072c, 0xFFFC1F7D, 0x04a8, 0xFFFFFF26, 0xFFFFFDDD,
+	0x133F8, 0x04a8, 0x0876, 0, 0xFFFB7AA0,
+};
+
+static const u32 g2d_rgb_to_yuv_601[12] = {
+	0x0107, 0x0204, 0x064, 0x4200,
+	0xFFFFFF68, 0xFFFFFED6, 0x01c2, 0x20200,
+	0x01c2, 0xFFFFFE87, 0xFFFFFFB7, 0x20200,
+};
+
+static const u32 g2d_yuv_to_rgb_601[12] = {
+	0x04a8, 0x0, 0x0662, 0xFFFC865A,
+	0x04a8, 0xFFFFFE70, 0xFFFFFCBF, 0x21FF4,
+	0x04a8, 0x0812, 0x0, 0xFFFBAE4A,
+};
 
 static u32 g2d_coefficient_offset(u32 step)
 {
@@ -201,46 +226,59 @@ static u32 g2d_coefficient_offset(u32 step)
 	return set * 32;
 }
 
-static void g2d_rgb_scale(struct rotate_dev *dev, u32 iw, u32 ih, u32 ow, u32 oh)
+static void g2d_scale(struct rotate_dev *dev, const struct rotate_format *fmt,
+		      u32 iw, u32 ih, u32 ow, u32 oh)
 {
-	u32 mw = min(iw, ow * 8), mh = min(ih, oh * 4);
+	bool packed_yuv = fmt->flags & ROTATE_FLAG_YUV && fmt->planes == 1;
+	bool yuv420 = fmt->vsub == 2;
+	u32 mw = packed_yuv ? iw : min(iw, ow * 8);
+	u32 mh = packed_yuv ? ih : min(ih, oh * 4);
 	u32 hs = div_u64((u64)mw << 19, ow);
 	u32 vs = div_u64((u64)mh << 19, oh);
 	u32 offset = g2d_coefficient_offset(hs);
+	u32 coffset = g2d_coefficient_offset(hs / fmt->hsub);
+	u32 voffset = g2d_coefficient_offset(vs);
+	u32 cw = DIV_ROUND_UP(mw, fmt->hsub);
+	u32 ch = DIV_ROUND_UP(mh, fmt->vsub);
+	u32 ctrl = fmt->planes > 1 ? BIT(16) : 0;
 	void __iomem *b = dev->top;
 	unsigned int i;
 
 	/* Coarse downsampling precedes the fractional scaler, as in stock. */
-	if (iw >= ow * 8) {
+	if (!packed_yuv && iw >= ow * 8) {
 		writel(mw << 16 | iw, b + G2D_V0_HDS_CTL0);
-		writel(mw << 16 | iw, b + G2D_V0_HDS_CTL1);
+		/* Shipped 4:2:0 code writes chroma to CTL0 too; qualification pending. */
+		writel((mw / fmt->hsub) << 16 | DIV_ROUND_UP(iw, fmt->hsub),
+		       b + (yuv420 ? G2D_V0_HDS_CTL0 : G2D_V0_HDS_CTL1));
 	}
-	if (ih >= oh * 4) {
+	if (!packed_yuv && ih >= oh * 4) {
 		writel(mh << 16 | ih, b + G2D_V0_VDS_CTL0);
-		writel(mh << 16 | ih, b + G2D_V0_VDS_CTL1);
+		writel((mh / fmt->vsub) << 16 | DIV_ROUND_UP(ih, fmt->vsub),
+		       b + G2D_V0_VDS_CTL1);
 	}
-	writel(0x101, b + G2D_VS_CTRL);
+	writel(ctrl | 0x101, b + G2D_VS_CTRL);
 	writel(ROTATE_SIZE(ow, oh), b + G2D_VS_OUT_SIZE);
 	writel(0xff, b + G2D_VS_GLB_ALPHA);
 	writel(ROTATE_SIZE(mw, mh), b + G2D_VS_Y_SIZE);
-	writel(ROTATE_SIZE(mw, mh), b + G2D_VS_C_SIZE);
+	writel(ROTATE_SIZE(cw, ch), b + G2D_VS_C_SIZE);
 	writel(hs << 1, b + G2D_VS_Y_HSTEP);
 	writel(vs << 1, b + G2D_VS_Y_VSTEP);
-	writel(hs << 1, b + G2D_VS_C_HSTEP);
-	writel(vs << 1, b + G2D_VS_C_VSTEP);
+	writel((hs << 1) / fmt->hsub, b + G2D_VS_C_HSTEP);
+	writel((vs << 1) / fmt->vsub, b + G2D_VS_C_VSTEP);
 	writel(0, b + G2D_VS_Y_HPHASE);
 	writel(0, b + G2D_VS_Y_VPHASE0);
-	writel(0, b + G2D_VS_C_HPHASE);
-	writel(0, b + G2D_VS_C_VPHASE0);
+	writel(yuv420 ? 0xfffc0000 : 0, b + G2D_VS_C_HPHASE);
+	writel(yuv420 ? 0xfffc0000 : 0, b + G2D_VS_C_VPHASE0);
 	for (i = 0; i < 32; i++) {
 		writel(g2d_lanczos[offset + i], b + G2D_VS_Y_HCOEF0 + i * 4);
-		writel(g2d_linear[i], b + G2D_VS_Y_VCOEF0 + i * 4);
-		writel(g2d_lanczos[offset + i], b + G2D_VS_C_HCOEF0 + i * 4);
+		writel(fmt->planes > 1 ? g2d_lanczos[voffset + i] : g2d_linear[i],
+		       b + G2D_VS_Y_VCOEF0 + i * 4);
+		writel(g2d_lanczos[coffset + i], b + G2D_VS_C_HCOEF0 + i * 4);
 	}
-	writel(1, b + G2D_VS_CTRL);
+	writel(ctrl | 1, b + G2D_VS_CTRL);
 }
 
-void sun50i_g2d_rgb_mixer(struct rotate_ctx *ctx, dma_addr_t src, dma_addr_t dst)
+void sun50i_g2d_mixer(struct rotate_ctx *ctx, dma_addr_t src, dma_addr_t dst)
 {
 	struct rotate_dev *dev = ctx->dev;
 	const struct rotate_format *in = rotate_find_format(ctx->src_fmt.pixelformat);
@@ -248,28 +286,55 @@ void sun50i_g2d_rgb_mixer(struct rotate_ctx *ctx, dma_addr_t src, dma_addr_t dst
 	void __iomem *b = dev->top;
 	u32 iw = ctx->src_fmt.width, ih = ctx->src_fmt.height;
 	u32 ow = ctx->dst_fmt.width, oh = ctx->dst_fmt.height;
+	dma_addr_t addr[3] = {};
+	u32 pitch[3] = {};
+	const u32 *csc;
+	unsigned int i;
+	bool iyuv = in->flags & ROTATE_FLAG_YUV;
+	bool oyuv = out->flags & ROTATE_FLAG_YUV;
 
 	/* The worker reset this engine before programming; all unused planes off. */
 	writel(0xff000001 | in->hw_format << 8, b + G2D_V0_ATTCTL);
 	writel(ROTATE_SIZE(iw, ih), b + G2D_V0_MBSIZE);
 	writel(ROTATE_SIZE(iw, ih), b + G2D_V0_SIZE);
-	writel(ctx->src_fmt.bytesperline, b + G2D_V0_PITCH0);
-	writel(lower_32_bits(src), b + G2D_V0_LADD0);
+	rotate_calc_addr_pitch(src, ctx->src_fmt.bytesperline, ih, in, addr, pitch);
+	for (i = 0; i < 3; i++) {
+		writel(pitch[i], b + G2D_V0_PITCH0 + i * 4);
+		writel(lower_32_bits(addr[i]), b + G2D_V0_LADD0 + i * 4);
+	}
 	writel(0, b + G2D_V0_HADD);
-	if (iw != ow || ih != oh)
-		g2d_rgb_scale(dev, iw, ih, ow, oh);
+	if (iyuv || iw != ow || ih != oh)
+		g2d_scale(dev, in, iw, ih, ow, oh);
 
-	/* Single source, RGB blender space, source-copy raster operation. */
+	/* Single source, input color space, source-copy raster operation. */
 	writel(0xf0, b + G2D_ROP_CTL);
 	writel(BIT(8), b + G2D_BLD_EN_CTL);
 	writel(ROTATE_SIZE(ow, oh), b + G2D_BLD_CH_ISIZE0);
 	writel(ROTATE_SIZE(ow, oh), b + G2D_BLD_SIZE);
-	writel(0, b + G2D_BLD_OUT_COLOR);
+	writel(iyuv ? BIT(1) : 0, b + G2D_BLD_OUT_COLOR);
+	if (iyuv != oyuv) {
+		u32 enc = iyuv ? ctx->src_fmt.ycbcr_enc : ctx->dst_fmt.ycbcr_enc;
+
+		if (enc == V4L2_YCBCR_ENC_DEFAULT)
+			enc = V4L2_MAP_YCBCR_ENC_DEFAULT(ctx->src_fmt.colorspace);
+		if (iyuv)
+			csc = enc == V4L2_YCBCR_ENC_709 ? g2d_yuv_to_rgb_709 : g2d_yuv_to_rgb_601;
+		else
+			csc = enc == V4L2_YCBCR_ENC_709 ? g2d_rgb_to_yuv_709 : g2d_rgb_to_yuv_601;
+		writel(BIT(2), b + G2D_CSC_CTL);
+		for (i = 0; i < 12; i++)
+			writel(csc[i], b + G2D_CSC2_COEFF + i * 4);
+	}
 	writel(out->hw_format, b + G2D_WB_ATT);
 	writel(ROTATE_SIZE(ow, oh), b + G2D_WB_SIZE);
-	writel(ctx->dst_fmt.bytesperline, b + G2D_WB_PITCH0);
-	writel(lower_32_bits(dst), b + G2D_WB_LADD0);
-	writel(0, b + G2D_WB_HADD0);
+	memset(addr, 0, sizeof(addr));
+	memset(pitch, 0, sizeof(pitch));
+	rotate_calc_addr_pitch(dst, ctx->dst_fmt.bytesperline, oh, out, addr, pitch);
+	for (i = 0; i < 3; i++) {
+		writel(pitch[i], b + G2D_WB_PITCH0 + i * 4);
+		writel(lower_32_bits(addr[i]), b + G2D_WB_LADD0 + i * 8);
+		writel(0, b + G2D_WB_HADD0 + i * 8);
+	}
 	writel(BIT(4), b + G2D_MIXER_INT);
 	writel(BIT(31), b + G2D_MIXER_CTL);
 }

@@ -64,10 +64,9 @@ static inline void rotate_set_bits(struct rotate_dev *dev, u32 reg, u32 bits)
 	writel(readl(dev->base + reg) | bits, dev->base + reg);
 }
 
-static void rotate_calc_addr_pitch(dma_addr_t buffer,
-				   u32 bytesperline, u32 height,
-				   const struct rotate_format *fmt,
-				   dma_addr_t *addr, u32 *pitch)
+void rotate_calc_addr_pitch(dma_addr_t buffer, u32 bytesperline, u32 height,
+			    const struct rotate_format *fmt,
+			    dma_addr_t *addr, u32 *pitch)
 {
 	u32 size;
 	int i;
@@ -86,13 +85,43 @@ static void rotate_calc_addr_pitch(dma_addr_t buffer,
 
 static bool rotate_uses_mixer(struct rotate_ctx *ctx)
 {
-	const struct rotate_format *fmt = rotate_find_format(ctx->src_fmt.pixelformat);
+	const struct rotate_format *in = rotate_find_format(ctx->src_fmt.pixelformat);
+	const struct rotate_format *out = rotate_find_format(ctx->dst_fmt.pixelformat);
 
-	return ctx->dev->a133 && !(fmt->flags & ROTATE_FLAG_YUV) &&
-		(ctx->src_fmt.width != ctx->dst_fmt.width ||
-		 ctx->src_fmt.height != ctx->dst_fmt.height ||
-		 ctx->src_fmt.pixelformat != ctx->dst_fmt.pixelformat) &&
-		!ctx->rotate && !ctx->hflip && !ctx->vflip;
+	if (!ctx->dev->a133 || ctx->rotate || ctx->hflip || ctx->vflip)
+		return false;
+	if (ctx->src_fmt.width != ctx->dst_fmt.width ||
+	    ctx->src_fmt.height != ctx->dst_fmt.height ||
+	    ((in->flags ^ out->flags) & ROTATE_FLAG_YUV))
+		return true;
+	/* Preserve the original rotator's YUV-to-planar-420 path. */
+	if (in->flags & ROTATE_FLAG_YUV)
+		return ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_YUV420;
+	return ctx->src_fmt.pixelformat != ctx->dst_fmt.pixelformat;
+}
+
+static int rotate_check_csc(struct rotate_ctx *ctx)
+{
+	const struct rotate_format *in = rotate_find_format(ctx->src_fmt.pixelformat);
+	const struct rotate_format *out = rotate_find_format(ctx->dst_fmt.pixelformat);
+	bool iyuv = in->flags & ROTATE_FLAG_YUV;
+	bool oyuv = out->flags & ROTATE_FLAG_YUV;
+	struct v4l2_pix_format *yuv = iyuv ? &ctx->src_fmt : &ctx->dst_fmt;
+	struct v4l2_pix_format *rgb = iyuv ? &ctx->dst_fmt : &ctx->src_fmt;
+	u32 enc = yuv->ycbcr_enc, yq = yuv->quantization, rq = rgb->quantization;
+
+	if (!rotate_uses_mixer(ctx) || iyuv == oyuv)
+		return 0;
+	if (!enc)
+		enc = V4L2_MAP_YCBCR_ENC_DEFAULT(yuv->colorspace);
+	if (!yq)
+		yq = V4L2_MAP_QUANTIZATION_DEFAULT(false, yuv->colorspace, enc);
+	if (!rq)
+		rq = V4L2_MAP_QUANTIZATION_DEFAULT(true, rgb->colorspace, enc);
+	if ((enc != V4L2_YCBCR_ENC_601 && enc != V4L2_YCBCR_ENC_709) ||
+	    yq != V4L2_QUANTIZATION_LIM_RANGE || rq != V4L2_QUANTIZATION_FULL_RANGE)
+		return -EINVAL;
+	return 0;
 }
 
 static void rotate_program(void *priv)
@@ -109,7 +138,7 @@ static void rotate_program(void *priv)
 
 	v4l2_m2m_buf_copy_metadata(src, dst);
 	if (dev->a133 && dev->mixer_job) {
-		sun50i_g2d_rgb_mixer(ctx,
+		sun50i_g2d_mixer(ctx,
 			vb2_dma_contig_plane_dma_addr(&src->vb2_buf, 0),
 			vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, 0));
 		return;
@@ -349,7 +378,9 @@ static int rotate_querycap(struct file *file, void *priv,
 static int rotate_enum_fmt_vid_cap(struct file *file, void *priv,
 				   struct v4l2_fmtdesc *f)
 {
-	return rotate_enum_fmt(f, true);
+	struct rotate_ctx *ctx = rotate_file2ctx(file);
+
+	return rotate_enum_fmt(f, !ctx->dev->a133);
 }
 
 static int rotate_enum_fmt_vid_out(struct file *file, void *priv,
@@ -439,17 +470,28 @@ static int rotate_try_fmt_vid_cap(struct file *file, void *priv,
 	const struct rotate_format *src = rotate_find_format(ctx->src_fmt.pixelformat);
 	const struct rotate_format *dst = rotate_find_format(f->fmt.pix.pixelformat);
 
-	if (ctx->dev->a133 && !(src->flags & ROTATE_FLAG_YUV) &&
-	    !ctx->rotate && !ctx->hflip && !ctx->vflip) {
-		if (!dst || dst->flags & ROTATE_FLAG_YUV)
+	if (ctx->dev->a133 && !ctx->rotate && !ctx->hflip && !ctx->vflip) {
+		if (!dst)
 			f->fmt.pix.pixelformat = ctx->src_fmt.pixelformat;
 		f->fmt.pix.width = clamp(f->fmt.pix.width, ROTATE_MIN_WIDTH, ROTATE_MAX_WIDTH);
 		f->fmt.pix.height = clamp(f->fmt.pix.height, ROTATE_MIN_HEIGHT, ROTATE_MAX_HEIGHT);
 		f->fmt.pix.field = V4L2_FIELD_NONE;
 		f->fmt.pix.colorspace = ctx->src_fmt.colorspace;
 		f->fmt.pix.xfer_func = ctx->src_fmt.xfer_func;
-		f->fmt.pix.ycbcr_enc = ctx->src_fmt.ycbcr_enc;
-		f->fmt.pix.quantization = ctx->src_fmt.quantization;
+		dst = rotate_find_format(f->fmt.pix.pixelformat);
+		if (src->flags & ROTATE_FLAG_YUV) {
+			f->fmt.pix.ycbcr_enc = ctx->src_fmt.ycbcr_enc;
+			f->fmt.pix.quantization = dst->flags & ROTATE_FLAG_YUV ?
+				ctx->src_fmt.quantization : V4L2_QUANTIZATION_FULL_RANGE;
+		} else if (dst->flags & ROTATE_FLAG_YUV) {
+			if (!f->fmt.pix.ycbcr_enc)
+				f->fmt.pix.ycbcr_enc =
+					V4L2_MAP_YCBCR_ENC_DEFAULT(f->fmt.pix.colorspace);
+			f->fmt.pix.quantization = V4L2_QUANTIZATION_LIM_RANGE;
+		} else {
+			f->fmt.pix.ycbcr_enc = ctx->src_fmt.ycbcr_enc;
+			f->fmt.pix.quantization = ctx->src_fmt.quantization;
+		}
 		rotate_prepare_format(&f->fmt.pix);
 		return 0;
 	}
@@ -633,10 +675,11 @@ static void rotate_queue_cleanup(struct vb2_queue *vq, u32 state)
 static int rotate_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct rotate_ctx *owner = vb2_get_drv_priv(vq);
+	int error = owner->dev->resume_failed ? -EIO : rotate_check_csc(owner);
 
-	if (owner->dev->resume_failed) {
+	if (error) {
 		rotate_queue_cleanup(vq, VB2_BUF_STATE_QUEUED);
-		return -EIO;
+		return error;
 	}
 
 	if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
