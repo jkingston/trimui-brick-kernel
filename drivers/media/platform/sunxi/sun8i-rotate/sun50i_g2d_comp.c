@@ -497,6 +497,18 @@ static void g2d_comp_media_release(struct media_devnode *node)
 	kref_put(&comp->ref, g2d_comp_release);
 }
 
+static void g2d_comp_media_init(struct media_devnode *node)
+{
+	struct g2d_comp *comp = container_of(node->media_dev, struct g2d_comp, media);
+
+	kref_get(&comp->ref);
+	node->release = g2d_comp_media_release;
+}
+
+static const struct media_device_ops g2d_comp_media_ops = {
+	.devnode_init = g2d_comp_media_init,
+};
+
 static void g2d_comp_video_release(struct video_device *vfd)
 {
 	struct g2d_comp_node *node = container_of(vfd, struct g2d_comp_node, vfd);
@@ -540,6 +552,7 @@ int sun50i_g2d_comp_register(struct rotate_dev *dev)
 	comp->alpha = 255;
 	comp->compose = (struct v4l2_rect) { .width = 640, .height = 480 };
 	comp->media.dev = dev->dev;
+	comp->media.ops = &g2d_comp_media_ops;
 	strscpy(comp->media.driver_name, "sun8i-rotate", sizeof(comp->media.driver_name));
 	strscpy(comp->media.model, "A133 G2D compositor", sizeof(comp->media.model));
 	media_device_init(&comp->media);
@@ -626,11 +639,6 @@ int sun50i_g2d_comp_register(struct rotate_dev *dev)
 	ret = media_device_register(&comp->media);
 	if (ret)
 		goto nodes;
-	/* Registration keeps the devnode alive until unregister, so replacing
-	 * its final-release hook here cannot race the last file close.
-	 */
-	kref_get(&comp->ref);
-	comp->media.devnode->release = g2d_comp_media_release;
 	dev->compose = comp;
 	return 0;
 nodes:
