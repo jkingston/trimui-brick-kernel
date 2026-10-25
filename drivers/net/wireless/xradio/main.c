@@ -164,6 +164,8 @@ static struct ieee80211_hw *xradio_init_common(size_t hw_priv_data_len)
 
 	ieee80211_hw_set(hw, SIGNAL_DBM);
 	ieee80211_hw_set(hw, SW_CRYPTO_CONTROL);
+	ieee80211_hw_set(hw, SUPPORTS_PS);
+	ieee80211_hw_set(hw, SUPPORTS_DYNAMIC_PS);
 	hw->wiphy->cipher_suites = xr829_station_ciphers;
 	hw->wiphy->n_cipher_suites = ARRAY_SIZE(xr829_station_ciphers);
 

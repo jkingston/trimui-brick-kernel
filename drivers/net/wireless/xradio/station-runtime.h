@@ -17,6 +17,7 @@ int xrs_runtime_detached(struct xradio_common *hw);
 void xrs_runtime_new_epoch(struct xradio_common *hw);
 int xrs_runtime_add_address(struct xradio_common *hw,const u8 *address);
 void xrs_runtime_remove_address(struct xradio_common *hw);
+void xrs_runtime_pm_complete(struct xradio_common *hw);
 void xrs_runtime_stop(struct xradio_common *hw);
 void xrs_runtime_tx(struct xradio_common *hw, struct ieee80211_sta *sta, struct sk_buff *skb);
 int xrs_runtime_get_tx(struct xradio_common *hw, u8 **data, size_t *len);

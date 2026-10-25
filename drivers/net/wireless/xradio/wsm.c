@@ -824,6 +824,10 @@ int wsm_handle_rx(struct xradio_common *hw, int id,
   if (xrs_runtime_joined(hw))
    return xrs_runtime_rx(hw, buf.data, buf.end - buf.data);
   return xr829_scan_rx(hw, buf.data, buf.end - buf.data);
+	case 0x0809:
+		if (!interface_link_id)
+			xrs_runtime_pm_complete(hw);
+		return 0;
  case 0x0806:
   if (xrw_scan_complete_decode(&complete, buf.data, buf.end - buf.data) < 0)
    return -EINVAL;
@@ -836,6 +840,7 @@ int wsm_handle_rx(struct xradio_common *hw, int id,
  case 0x040b: /* join */
  case 0x040c: /* add key */
  case 0x040d: /* remove key */
+	case 0x0410: /* power-management request */
  case 0x0411: /* BSS parameters */
  case 0x0412: /* TX queue parameters */
  case 0x0413: /* EDCA parameters */
@@ -993,4 +998,24 @@ nomem:
  if (buf->begin)
   memzero_explicit(buf->begin,buf->end-buf->begin);
  wsm_buf_reset(buf);wsm_cmd_unlock(hw);return ret;
+}
+
+/* Caller owns the station transaction through the separate PM indication. */
+int wsm_set_pm(struct xradio_common *hw, const struct wsm_set_pm *arg, int if_id)
+{
+	struct wsm_buf *buf = &hw->wsm_cmd_buf;
+	int ret;
+
+	wsm_cmd_lock(hw);
+	WSM_PUT8(buf, arg->pmMode);
+	WSM_PUT8(buf, arg->fastPsmIdlePeriod);
+	WSM_PUT8(buf, arg->apPsmChangePeriod);
+	WSM_PUT8(buf, arg->minAutoPsPollPeriod);
+	ret = wsm_cmd_send(hw, buf, NULL, 0x0010, WSM_CMD_TIMEOUT, if_id);
+	wsm_cmd_unlock(hw);
+	return ret;
+nomem:
+	wsm_buf_reset(buf);
+	wsm_cmd_unlock(hw);
+	return ret;
 }

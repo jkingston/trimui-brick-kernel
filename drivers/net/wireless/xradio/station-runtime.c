@@ -8,6 +8,8 @@
 #include "recovery.h"
 #include "station-address.h"
 #include "station-power.h"
+#include "station-ps.h"
+#include <linux/completion.h>
 #include "station-plan.h"
 #include "station-tx-state.h"
 #include "station-bus.h"
@@ -34,6 +36,8 @@ struct xrs_runtime {
  spinlock_t lock;
  struct mutex bus_lock; /* held across get_tx -> SDIO write -> written */
  struct mutex control_lock;
+	struct completion pm_done;
+	struct xrs_ps_state ps;
  struct delayed_work timeout;
  struct work_struct policy_work;
  struct xpc_cache policies;
@@ -245,6 +249,67 @@ void xrs_runtime_remove_address(struct xradio_common *hw)
 static int station_key_drain(struct xrs_runtime *s);
 static int station_key_send(void *context,u16 command,const u8 *payload,size_t size);
 
+/* The BH signals completion without taking control_lock. Like the vendor,
+ * use indication arrival, not its undocumented payload, as the switch fence.
+ */
+void xrs_runtime_pm_complete(struct xradio_common *hw)
+{
+	struct xrs_runtime *s = hw->station;
+	unsigned long flags;
+
+	if (!s)
+		return;
+	spin_lock_irqsave(&s->lock, flags);
+	if (xrs_ps_indicate(&s->ps))
+		complete(&s->pm_done);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+/* control_lock serializes both command confirmation and mode indication.
+ * A timed-out transition cannot be retried in this firmware epoch: a late
+ * indication has no transaction ID. Keep SDIO awake; this is radio PS only.
+ */
+static int station_ps_update(struct xrs_runtime *s, bool enabled, int timeout_ms)
+{
+	struct xradio_common *hw = s->hw;
+	struct wsm_set_pm pm;
+	unsigned long flags;
+	u8 wire[4];
+	int ret;
+
+	if (s->poisoned || READ_ONCE(hw->bh_error))
+		return -EIO;
+	xrs_ps_encode(wire, enabled, timeout_ms);
+	spin_lock_irqsave(&s->lock, flags);
+	ret = xrs_ps_begin(&s->ps, wire);
+	if (ret > 0)
+		reinit_completion(&s->pm_done);
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (ret <= 0)
+		return ret;
+	pm.pmMode = wire[0];
+	pm.fastPsmIdlePeriod = wire[1];
+	pm.apPsmChangePeriod = wire[2];
+	pm.minAutoPsPollPeriod = wire[3];
+	ret = wsm_set_pm(hw, &pm, 0);
+	if (!ret && !wait_for_completion_timeout(&s->pm_done, 2 * HZ))
+		ret = -ETIMEDOUT;
+	if (!ret && READ_ONCE(hw->bh_error))
+		ret = -EIO;
+	spin_lock_irqsave(&s->lock, flags);
+	ret = xrs_ps_finish(&s->ps, ret);
+	if (ret) {
+		s->poisoned = true;
+		WRITE_ONCE(hw->bh_error, 1);
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (ret) {
+		ieee80211_stop_queues(hw->hw);
+		dev_err(hw->pdev, "XR829 PM transition uncertain: %d\n", ret);
+	}
+	return ret;
+}
+
 void xrs_runtime_stop(struct xradio_common *hw)
 {
  struct xrs_runtime *s=hw->station;
@@ -255,6 +320,11 @@ void xrs_runtime_stop(struct xradio_common *hw)
  mutex_lock(&s->control_lock);
  if(!s->joined && !s->poisoned)goto out;
  if(s->poisoned || READ_ONCE(hw->bh_error)) {ret=-EIO;goto failed;}
+	if (s->ps.valid && s->ps.applied[0]) {
+		ret = station_ps_update(s, false, 0);
+		if (ret)
+			goto failed;
+	}
  ret=station_key_drain(s);if(ret)goto failed;
  /* Exclude all receive delivery during teardown; queued TX has completed. */
  spin_lock_irqsave(&s->lock,flags);
@@ -279,6 +349,7 @@ void xrs_runtime_stop(struct xradio_common *hw)
 	memset(&s->settings, 0, sizeof(s->settings));
 	memset(&s->ht, 0, sizeof(s->ht));
 	memset(&s->ba, 0, sizeof(s->ba));
+	memset(&s->ps, 0, sizeof(s->ps));
 	s->keychanging = false;
  spin_unlock_irqrestore(&s->lock,flags);
  if(ret)goto failed;
@@ -333,6 +404,7 @@ int xrs_runtime_init(struct xradio_common *hw)
  }
  s->hw=hw;s->sending=-1;spin_lock_init(&s->lock);
  mutex_init(&s->bus_lock);mutex_init(&s->control_lock);
+	init_completion(&s->pm_done);
  INIT_DELAYED_WORK(&s->timeout,tx_timeout);
  INIT_WORK(&s->policy_work,station_policy_work);xpc_init(&s->policies);hw->station=s;
  s->debugfs=debugfs_create_dir("xr829-station",NULL);
@@ -418,21 +490,29 @@ int xrs_get_txpower(struct ieee80211_hw *dev,struct ieee80211_vif *vif,
  mutex_unlock(&s->control_lock);return ret;
 }
 
-int xrs_runtime_config(struct xradio_common *hw,u32 changed)
+int xrs_runtime_config(struct xradio_common *hw, u32 changed)
 {
- struct xrs_runtime *s=hw->station;
- if(s && smp_load_acquire(&s->joined) &&
-    (!hw->hw->conf.chandef.chan ||
-     hw->hw->conf.chandef.chan->hw_value!=s->settings.channel)) {
-  xrs_runtime_stop(hw);return -EOPNOTSUPP;
- }
- if(s && (changed&(IEEE80211_CONF_CHANGE_POWER|IEEE80211_CONF_CHANGE_CHANNEL))) {
-  int ret=0;
-  mutex_lock(&s->control_lock);
-  if(s->joined)ret=station_power_update(s,hw->hw->conf.power_level);
-  mutex_unlock(&s->control_lock);return ret;
- }
- return 0;
+	struct xrs_runtime *s = hw->station;
+	int ret = 0;
+
+	if (!s)
+		return 0;
+	/* Pair with JOIN publication before reading its channel settings. */
+	if (smp_load_acquire(&s->joined) &&
+	    (!hw->hw->conf.chandef.chan ||
+	     hw->hw->conf.chandef.chan->hw_value != s->settings.channel)) {
+		xrs_runtime_stop(hw);
+		return -EOPNOTSUPP;
+	}
+	mutex_lock(&s->control_lock);
+	if (s->joined &&
+	    (changed & (IEEE80211_CONF_CHANGE_POWER | IEEE80211_CONF_CHANGE_CHANNEL)))
+		ret = station_power_update(s, hw->hw->conf.power_level);
+	if (!ret && s->associated && (changed & IEEE80211_CONF_CHANGE_PS))
+		ret = station_ps_update(s, hw->hw->conf.flags & IEEE80211_CONF_PS,
+					hw->hw->conf.dynamic_ps_timeout);
+	mutex_unlock(&s->control_lock);
+	return ret;
 }
 
 void xrs_runtime_tx(struct xradio_common *hw,struct ieee80211_sta *sta,struct sk_buff *skb)
@@ -850,6 +930,13 @@ static int station_join(struct xradio_common *hw,struct ieee80211_vif *vif,
 	if (ret)
 		return ret;
  ret=wsm_join(hw,&join,0);if(ret)return ret;
+	/* RESET/fresh firmware starts ACTIVE (vendor unjoin clears its cache).
+	 * JOIN has not requested PS. Avoid waiting for a no-op mode indication.
+	 */
+	spin_lock_irqsave(&s->lock, flags);
+	memset(&s->ps, 0, sizeof(s->ps));
+	s->ps.valid = true;
+	spin_unlock_irqrestore(&s->lock, flags);
  /* Vendor applies receive filters after JOIN, with one beacon forwarded. */
  ret=wsm_beacon_filter_control(hw,&beacons,0);if(ret)return ret;
  ret=wsm_set_rx_filter(hw,&filter,0);if(ret)return ret;
@@ -902,7 +989,10 @@ void xrs_bss_changed(struct ieee80211_hw *dev,struct ieee80211_vif *vif,
   mutex_unlock(&s->control_lock);
   if(ret) {ieee80211_connection_loss(vif);return;}
  }
- if(!s || !(changed&(BSS_CHANGED_ASSOC|BSS_CHANGED_HT|BSS_CHANGED_ERP_PREAMBLE|BSS_CHANGED_ERP_SLOT)))return;
+	if (!s || !(changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_HT |
+			       BSS_CHANGED_ERP_PREAMBLE | BSS_CHANGED_ERP_SLOT |
+			       BSS_CHANGED_BEACON_INFO)))
+		return;
  if(!vif->cfg.assoc) {if((changed&BSS_CHANGED_ASSOC) && s->joined)xrs_runtime_stop(hw);return;}
  mutex_lock(&s->control_lock);
  if(!s->joined || s->poisoned) {ret=-EIO;goto out;}
@@ -934,6 +1024,18 @@ void xrs_bss_changed(struct ieee80211_hw *dev,struct ieee80211_vif *vif,
  ret=station_mib32(hw,0x0003,info->use_short_slot?9:20);if(ret)goto out;
 	ret = wsm_set_block_ack_policy(hw, negotiated.enabled ? XRS_BA_TIDS : 0,
 				       negotiated.enabled ? XRS_BA_TIDS : 0, 0);
+	if (ret)
+		goto out;
+	/* Normal vendor DTIM policy; do not extend the AP's multicast interval. */
+	if (info->dtim_period)
+		s->settings.dtim = info->dtim_period;
+	ret = wsm_set_beacon_wakeup_period(hw,
+					   s->settings.beacon_interval * s->settings.dtim > 1000 ?
+					   1 : s->settings.dtim, 0, 0);
+	if (ret)
+		goto out;
+	ret = station_ps_update(s, dev->conf.flags & IEEE80211_CONF_PS,
+				dev->conf.dynamic_ps_timeout);
 	if (ret)
 		goto out;
 	spin_lock_irqsave(&s->lock, irqflags);
@@ -1159,6 +1261,7 @@ void xrs_runtime_new_epoch(struct xradio_common *hw)
  memset(&s->settings,0,sizeof(s->settings));
 	memset(&s->ht, 0, sizeof(s->ht));
 	memset(&s->ba, 0, sizeof(s->ba));
+	memset(&s->ps, 0, sizeof(s->ps));
  memset(&s->address,0,sizeof(s->address));
  xpc_init(&s->policies);
  s->enqueue_order=0;s->next_slot=0;s->sending=-1;
