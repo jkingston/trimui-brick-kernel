@@ -21,6 +21,9 @@
 #include <linux/of_clk.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/machine.h>
+#include <linux/regulator/of_regulator.h>
 #include <linux/slab.h>
 
 #include <linux/pinctrl/consumer.h>
@@ -722,6 +725,138 @@ static const struct pinconf_ops sunxi_pconf_ops = {
 	.pin_config_group_set	= sunxi_pconf_group_set,
 };
 
+#if IS_ENABLED(CONFIG_REGULATOR)
+/* A133 PF switches between two fixed rails; neither PMIC voltage is changed. */
+static const unsigned int sunxi_a133_pf_voltages[] = { 1800000, 3300000 };
+
+static int sunxi_a133_pf_get_voltage_sel(struct regulator_dev *rdev)
+{
+	struct sunxi_pinctrl *pctl = rdev_get_drvdata(rdev);
+	unsigned long flags;
+	u32 mode, select;
+
+	raw_spin_lock_irqsave(&pctl->lock, flags);
+	mode = readl(pctl->membase + 0x340);
+	select = readl(pctl->membase + 0x350);
+	raw_spin_unlock_irqrestore(&pctl->lock, flags);
+	if (select & BIT(0))
+		return 1;
+	/* An uninitialized selector is not evidence of a valid 1.8 V state. */
+	return mode & BIT(5) ? 0 : -EINVAL;
+}
+
+static int sunxi_a133_pf_set_voltage_sel(struct regulator_dev *rdev,
+				       unsigned int selector)
+{
+	struct sunxi_pinctrl *pctl = rdev_get_drvdata(rdev);
+	unsigned long flags;
+	u32 mode, select;
+
+	if (selector >= ARRAY_SIZE(sunxi_a133_pf_voltages))
+		return -EINVAL;
+
+	/* Match shipped sunxi_sel_pio_mode: +340 PF is sticky after 1.8 V. */
+	raw_spin_lock_irqsave(&pctl->lock, flags);
+	mode = readl(pctl->membase + 0x340);
+	if (!selector)
+		mode |= BIT(5);
+	writel(mode, pctl->membase + 0x340);
+	select = readl(pctl->membase + 0x350) & ~BIT(0);
+	if (selector)
+		select |= BIT(0);
+	writel(select, pctl->membase + 0x350);
+	/* Flush the posted writes before MMC's voltage-switch settling delay. */
+	select = readl(pctl->membase + 0x350);
+	mode = readl(pctl->membase + 0x340);
+	raw_spin_unlock_irqrestore(&pctl->lock, flags);
+
+	if (!!(select & BIT(0)) != selector || (!selector && !(mode & BIT(5))))
+		return -EIO;
+	return 0;
+}
+
+static const struct regulator_ops sunxi_a133_pf_ops = {
+	.list_voltage = regulator_list_voltage_table,
+	.map_voltage = regulator_map_voltage_iterate,
+	.get_voltage_sel = sunxi_a133_pf_get_voltage_sel,
+	.set_voltage_sel = sunxi_a133_pf_set_voltage_sel,
+};
+
+static const struct regulator_desc sunxi_a133_pf_desc = {
+	.name = "sun50i-a133-pf",
+	.type = REGULATOR_VOLTAGE,
+	.owner = THIS_MODULE,
+	.ops = &sunxi_a133_pf_ops,
+	.n_voltages = ARRAY_SIZE(sunxi_a133_pf_voltages),
+	.volt_table = sunxi_a133_pf_voltages,
+};
+
+static void sunxi_a133_pf_disable_rails(void *data)
+{
+	regulator_bulk_disable(2, data);
+}
+
+static int sunxi_a133_pf_regulator_register(struct sunxi_pinctrl *pctl)
+{
+	struct regulator_config config = { .dev = pctl->dev, .driver_data = pctl };
+	struct regulator_bulk_data *rails;
+	struct regulator_init_data *init_data;
+	struct regulator_dev *rdev;
+	struct device_node *node;
+	int ret, i;
+
+	if (!pctl->desc->pf_voltage_selector)
+		return 0;
+
+	node = of_get_child_by_name(pctl->dev->of_node, "pf-regulator");
+	if (!node)
+		return -EINVAL;
+	of_node_put(node);
+	rails = devm_kcalloc(pctl->dev, 2, sizeof(*rails), GFP_KERNEL);
+	if (!rails)
+		return -ENOMEM;
+	rails[0].supply = "vcc-pf18";
+	rails[1].supply = "vcc-pf33";
+	ret = devm_regulator_bulk_get(pctl->dev, 2, rails);
+	if (ret)
+		return dev_err_probe(pctl->dev, ret, "PF input supplies unavailable\n");
+	for (i = 0; i < 2; i++) {
+		ret = regulator_get_voltage(rails[i].consumer);
+		if (ret < 0)
+			return ret;
+		if (ret != sunxi_a133_pf_voltages[i])
+			return -ERANGE;
+	}
+	ret = regulator_bulk_enable(2, rails);
+	if (ret)
+		return ret;
+	ret = devm_add_action_or_reset(pctl->dev, sunxi_a133_pf_disable_rails, rails);
+	if (ret)
+		return ret;
+
+	/* Registered before pinctrl consumers, with input rails already voted on. */
+	node = of_get_child_by_name(pctl->dev->of_node, "pf-regulator");
+	init_data = of_get_regulator_init_data(pctl->dev, node,
+						    &sunxi_a133_pf_desc);
+	if (!init_data) {
+		of_node_put(node);
+		return -EINVAL;
+	}
+	/* Do not apply DT voltage constraints before MMC has gated its clock. */
+	init_data->constraints.apply_uV = false;
+	config.init_data = init_data;
+	config.of_node = node;
+	rdev = devm_regulator_register(pctl->dev, &sunxi_a133_pf_desc, &config);
+	of_node_put(node);
+	return PTR_ERR_OR_ZERO(rdev);
+}
+
+#else
+static int sunxi_a133_pf_regulator_register(struct sunxi_pinctrl *pctl)
+{
+	return pctl->desc->pf_voltage_selector ? -EOPNOTSUPP : 0;
+}
+#endif
 static int sunxi_pinctrl_set_io_bias_cfg(struct sunxi_pinctrl *pctl,
 					 unsigned pin,
 					 struct regulator *supply)
@@ -731,6 +866,10 @@ static int sunxi_pinctrl_set_io_bias_cfg(struct sunxi_pinctrl *pctl,
 	bool inverted = false;
 	u32 val, reg;
 	int uV;
+
+	/* PF is supplied by the A133 selector, never the generic bias path. */
+	if (pctl->desc->pf_voltage_selector && pin / PINS_PER_BANK == 5)
+		return 0;
 
 	if (!pctl->desc->io_bias_cfg_variant)
 		return 0;
@@ -916,6 +1055,9 @@ static int sunxi_pmx_request(struct pinctrl_dev *pctldev, unsigned offset)
 	char supply[16];
 	int ret;
 
+	if (pctl->desc->pf_voltage_selector && bank == 5)
+		return 0;
+
 	if (WARN_ON_ONCE(bank_offset >= ARRAY_SIZE(pctl->regulators)))
 		return -EINVAL;
 
@@ -958,6 +1100,9 @@ static int sunxi_pmx_free(struct pinctrl_dev *pctldev, unsigned offset)
 	unsigned short bank_offset = bank - pctl->desc->pin_base /
 					    PINS_PER_BANK;
 	struct sunxi_pinctrl_regulator *s_reg = &pctl->regulators[bank_offset];
+
+	if (pctl->desc->pf_voltage_selector && bank == 5)
+		return 0;
 
 	if (!refcount_dec_and_test(&s_reg->refcount))
 		return 0;
@@ -1647,6 +1792,10 @@ int sunxi_pinctrl_init_with_flags(struct platform_device *pdev,
 	clk = devm_clk_get_enabled(&pdev->dev, ret == 1 ? NULL : "apb");
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
+
+	ret = sunxi_a133_pf_regulator_register(pctl);
+	if (ret)
+		return ret;
 
 	/*
 	 * Seed the output latch shadow from the hardware so pins the

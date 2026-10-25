@@ -16,6 +16,7 @@
 #define AXP2202_KEY_RELEASE	14
 #define AXP2202_LDO_EN1		0x91
 #define AXP2202_CLDO1_VSEL	0x9b
+#define AXP2202_CLDO3_VSEL	0x9d
 #define AXP2202_CLDO4_VSEL	0x9e
 #define AXP2202_GAUGE_CONFIG	0xa2
 #define AXP2202_GAUGE_SOC		0xa4
@@ -37,6 +38,7 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 	case 0x97:
 	case AXP2202_LDO_EN1:
 	case AXP2202_CLDO1_VSEL:
+	case AXP2202_CLDO3_VSEL:
 	case AXP2202_CLDO4_VSEL:
 	case AXP2202_GAUGE_CONFIG:
 	case AXP2202_GAUGE_SOC:
@@ -137,6 +139,7 @@ static const struct {
 	unsigned int vsel, selector, enable, mask;
 } brick_shared_rails[] = {
 	{ "cldo1", AXP2202_CLDO1_VSEL, 13, AXP2202_LDO_EN1, BIT(0) },
+	{ "cldo3", AXP2202_CLDO3_VSEL, 28, AXP2202_LDO_EN1, BIT(2) },
 	{ "aldo3", 0x95, 28, 0x90, BIT(2) },
 	{ "aldo4", 0x96, 13, 0x90, BIT(3) },
 	{ "bldo1", 0x97, 28, 0x90, BIT(4) },

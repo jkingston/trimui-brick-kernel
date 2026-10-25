@@ -168,15 +168,7 @@
 		default-brightness-level = <1>;
 	};
 
-	/* SPL establishes CLDO3; no voltage switching is supported. */
-	reg_sd_3v3: regulator-sd-3v3 {
-		compatible = "regulator-fixed";
-		regulator-name = "sd-cldo3-boot-3v3";
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-		regulator-boot-on;
-		regulator-always-on;
-	};
+
 };
 
 &display_engine {
@@ -239,14 +231,18 @@
 };
 
 &mmc0 {
-	vmmc-supply = <&reg_sd_3v3>;
+	compatible = "allwinner,sun50i-a133-mmc";
+	vmmc-supply = <&cldo3>;
+	vqmmc-supply = <&pf_vqmmc>;
 	bus-width = <4>;
 	cd-gpios = <&pio 5 6 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 	cd-debounce-delay-ms = <200>;
 	no-mmc;
 	no-sdio;
-	max-frequency = <25000000>;
-	no-1-8-v;
+	max-frequency = <150000000>;
+	sd-uhs-sdr50;
+	sd-uhs-ddr50;
+	sd-uhs-sdr104;
 	status = "okay";
 };
 
@@ -284,6 +280,16 @@
 
 &pio {
 	vcc-pg-supply = <&aldo3>;
+	compatible = "allwinner,sun50i-a133-pinctrl";
+	vcc-pf18-supply = <&cldo1>;
+	vcc-pf33-supply = <&cldo3>;
+
+	pf_vqmmc: pf-regulator {
+		regulator-name = "brick-pf-vqmmc";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
 
 	brick_bt_uart_pins: uart1-pg-pins {
 		pins = "PG6", "PG7", "PG8", "PG9";
@@ -359,6 +365,10 @@
 
 			cldo1: cldo1 {
 				regulator-name = "brick-panel-cldo1";
+				regulator-always-on;
+			};
+			cldo3: cldo3 {
+				regulator-name = "brick-cldo3";
 				regulator-always-on;
 			};
 			cldo4: cldo4 {

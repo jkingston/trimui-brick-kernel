@@ -43,6 +43,13 @@ static const struct regulator_ops panel_ops = {
 };
 static const struct regulator_desc supplies[] = {
 	{
+		.name = "brick-cldo3", .of_match = "cldo3", .regulators_node = "regulators",
+		.id = 5, .type = REGULATOR_VOLTAGE, .owner = THIS_MODULE,
+		.n_voltages = 1, .fixed_uV = 3300000,
+		.ops = &shared_ops, .of_parse_cb = retain_shared,
+		.enable_reg = ENABLE, .enable_mask = BIT(2), .vsel_reg = 0x9d,
+	},
+	{
 		.name = "brick-cldo1", .of_match = "cldo1", .regulators_node = "regulators",
 		.id = 0, .type = REGULATOR_VOLTAGE, .owner = THIS_MODULE,
 		.n_voltages = 1, .fixed_uV = 1800000,

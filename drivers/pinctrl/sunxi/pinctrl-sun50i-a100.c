@@ -708,13 +708,23 @@ static const struct sunxi_pinctrl_desc a100_pinctrl_data = {
 	.io_bias_cfg_variant = BIAS_VOLTAGE_PIO_POW_MODE_CTL,
 };
 
+static const struct sunxi_pinctrl_desc a133_pinctrl_data = {
+	.pins = a100_pins,
+	.npins = ARRAY_SIZE(a100_pins),
+	.irq_banks = 7,
+	.irq_bank_map = a100_irq_bank_map,
+	.io_bias_cfg_variant = BIAS_VOLTAGE_PIO_POW_MODE_CTL,
+	.pf_voltage_selector = true,
+};
+
 static int a100_pinctrl_probe(struct platform_device *pdev)
 {
-	return sunxi_pinctrl_init(pdev, &a100_pinctrl_data);
+	return sunxi_pinctrl_init(pdev, device_get_match_data(&pdev->dev));
 }
 
 static const struct of_device_id a100_pinctrl_match[] = {
-	{ .compatible = "allwinner,sun50i-a100-pinctrl", },
+	{ .compatible = "allwinner,sun50i-a133-pinctrl", .data = &a133_pinctrl_data },
+	{ .compatible = "allwinner,sun50i-a100-pinctrl", .data = &a100_pinctrl_data },
 	{}
 };
 MODULE_DEVICE_TABLE(of, a100_pinctrl_match);

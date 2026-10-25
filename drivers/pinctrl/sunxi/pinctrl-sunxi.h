@@ -146,6 +146,7 @@ struct sunxi_pinctrl_desc {
 	bool				irq_read_needs_mux;
 	bool				disable_strict_mode;
 	enum sunxi_desc_bias_voltage	io_bias_cfg_variant;
+	bool				pf_voltage_selector;
 };
 
 struct sunxi_pinctrl_function {

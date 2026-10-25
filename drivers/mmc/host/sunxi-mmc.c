@@ -263,6 +263,7 @@ struct sunxi_mmc_cfg {
 
 	/* clock hardware can switch between old and new timing modes */
 	bool ccu_has_timings_switch;
+	bool a133_coarse_tuning;
 };
 
 struct sunxi_mmc_host {
@@ -300,6 +301,9 @@ struct sunxi_mmc_host {
 
 	/* timings */
 	bool		use_new_timings;
+	bool module_clk_enabled;
+	u32 a133_drive, a133_phase, a133_tuned_rate, a133_tuned_timing;
+	struct mmc_host_ops a133_ops;
 };
 
 static int sunxi_mmc_reset_host(struct sunxi_mmc_host *host)
@@ -518,10 +522,12 @@ static irqreturn_t sunxi_mmc_finalize_request(struct sunxi_mmc_host *host)
 
 	if (host->int_sum & SDXC_INTERRUPT_ERROR_BIT) {
 		sunxi_mmc_dump_errinfo(host);
-		mrq->cmd->error = -ETIMEDOUT;
+		mrq->cmd->error = host->cfg->a133_coarse_tuning &&
+			(host->int_sum & (SDXC_RESP_CRC_ERROR | SDXC_DATA_CRC_ERROR)) ?
+			-EILSEQ : -ETIMEDOUT;
 
 		if (data) {
-			data->error = -ETIMEDOUT;
+			data->error = mrq->cmd->error;
 			host->manual_stop_mrq = mrq;
 		}
 
@@ -699,6 +705,138 @@ static int sunxi_mmc_oclk_onoff(struct sunxi_mmc_host *host, u32 oclk_en)
 	return 0;
 }
 
+/* Track module clock votes across phase-switch failures and teardown. */
+static int sunxi_mmc_module_enable(struct sunxi_mmc_host *host)
+{
+	int ret;
+
+	if (host->module_clk_enabled)
+		return 0;
+	ret = clk_prepare_enable(host->clk_mmc);
+	if (!ret)
+		host->module_clk_enabled = true;
+	return ret;
+}
+
+static void sunxi_mmc_module_disable(struct sunxi_mmc_host *host)
+{
+	if (!host->module_clk_enabled)
+		return;
+	clk_disable_unprepare(host->clk_mmc);
+	host->module_clk_enabled = false;
+}
+
+/* Four coarse sample selectors are exercised by the shipped A133 driver. */
+static int sunxi_mmc_a133_phase(struct sunxi_mmc_host *host, u32 drive,
+			       unsigned int phase)
+{
+	u32 value;
+	int ret;
+
+	if (phase > 3 || drive & ~GENMASK(17, 16))
+		return -EINVAL;
+	/* Caller has stopped card output. Preserve the BSP module-clock sequence. */
+	disable_irq(host->irq);
+	sunxi_mmc_module_disable(host);
+	value = mmc_readl(host, REG_DRV_DL) & ~GENMASK(17, 16);
+	mmc_writel(host, REG_DRV_DL, value | drive);
+	ret = sunxi_mmc_module_enable(host);
+	if (!ret) {
+		value = mmc_readl(host, REG_SD_NTSR);
+		value &= ~(GENMASK(5, 4) | GENMASK(9, 8) | SDXC_2X_TIMING_MODE);
+		value |= phase << 4 | phase << 8;
+		mmc_writel(host, REG_SD_NTSR, value);
+		mmc_writel(host, REG_SD_NTSR, value | SDXC_2X_TIMING_MODE);
+	}
+	if (ret)
+		host->ferror = ret;
+	enable_irq(host->irq);
+	return ret;
+}
+
+/* No evidence establishes wraparound order; do not join phase 3 to phase 0. */
+static int sunxi_mmc_a133_window(unsigned int mask)
+{
+	int start, length, best_start = 0, best_length = 0;
+
+	for (start = 0; start < 4; start++) {
+		for (length = 0; start + length < 4 &&
+		     (mask & BIT(start + length)); length++)
+			;
+		if (length > best_length) {
+			best_start = start;
+			best_length = length;
+		}
+	}
+	return best_length ? best_start + (best_length - 1) / 2 : -EIO;
+}
+
+static int sunxi_mmc_a133_execute_tuning(struct mmc_host *mmc, u32 opcode)
+{
+	struct sunxi_mmc_host *host = mmc_priv(mmc);
+	unsigned int mask = 0, phase, attempt;
+	int ret, selected;
+	u32 old_phase = host->a133_phase;
+
+	if (opcode != MMC_SEND_TUNING_BLOCK || !mmc->actual_clock ||
+	    mmc->ios.signal_voltage != MMC_SIGNAL_VOLTAGE_180)
+		return -EINVAL;
+	ret = sunxi_mmc_module_enable(host);
+	if (ret)
+		goto fail;
+	host->ferror = 0;
+	host->a133_tuned_rate = 0;
+	for (phase = 0; phase < 4; phase++) {
+		ret = sunxi_mmc_oclk_onoff(host, 0);
+		if (ret)
+			goto fail;
+		ret = sunxi_mmc_a133_phase(host, host->a133_drive, phase);
+		if (ret)
+			goto fail;
+		ret = sunxi_mmc_oclk_onoff(host, 1);
+		if (ret)
+			goto fail;
+		for (attempt = 0; attempt < 3; attempt++) {
+			ret = mmc_send_tuning(mmc, opcode, NULL);
+			if (ret)
+				break;
+		}
+		if (!ret)
+			mask |= BIT(phase);
+	}
+	selected = sunxi_mmc_a133_window(mask);
+	dev_info(mmc_dev(mmc), "A133 CMD19 mask=%#x selected=%d clock=%u\n",
+		 mask, selected, mmc->actual_clock);
+	ret = sunxi_mmc_oclk_onoff(host, 0);
+	if (ret)
+		goto fail;
+	ret = sunxi_mmc_a133_phase(host, host->a133_drive,
+				 selected < 0 ? old_phase : (unsigned int)selected);
+	if (ret)
+		goto fail;
+	ret = sunxi_mmc_oclk_onoff(host, 1);
+	if (ret)
+		goto fail;
+	if (selected < 0) {
+		ret = selected;
+		goto fail;
+	}
+	/* Keep the software phase truthful even if the final pattern fails. */
+	host->a133_phase = selected;
+	/* Recheck selected phase, never report success based only on the mask. */
+	ret = mmc_send_tuning(mmc, opcode, NULL);
+	if (ret)
+		goto fail;
+	host->a133_tuned_rate = mmc->actual_clock;
+	host->a133_tuned_timing = mmc->ios.timing;
+	return 0;
+
+fail:
+	host->a133_tuned_rate = 0;
+	host->ferror = ret;
+	return ret;
+}
+
 static int sunxi_mmc_calibrate(struct sunxi_mmc_host *host, int reg_off)
 {
 	if (!host->cfg->can_calibrate)
@@ -722,6 +860,22 @@ static int sunxi_mmc_clk_set_phase(struct sunxi_mmc_host *host,
 				   struct mmc_ios *ios, u32 rate)
 {
 	int index;
+
+	if (host->cfg->a133_coarse_tuning) {
+		if (!host->a133_tuned_rate || host->a133_tuned_rate != rate ||
+		    host->a133_tuned_timing != ios->timing) {
+			host->a133_tuned_rate = 0;
+			/* Exact shipped v5p3x initializer defaults. */
+			host->a133_drive = BIT(16);
+			host->a133_phase = 0;
+			if (rate > 26000000 && rate <= 52000000) {
+				host->a133_drive |= BIT(17);
+				host->a133_phase = 1;
+			}
+		}
+		return sunxi_mmc_a133_phase(host, host->a133_drive,
+					    host->a133_phase);
+	}
 
 	/* clk controller delays not used under new timings mode */
 	if (host->use_new_timings)
@@ -764,6 +918,9 @@ static int sunxi_mmc_clk_set_rate(struct sunxi_mmc_host *host,
 	u32 rval, clock = ios->clock, div = 1;
 	int ret;
 
+	ret = sunxi_mmc_module_enable(host);
+	if (ret)
+		return ret;
 	ret = sunxi_mmc_oclk_onoff(host, 0);
 	if (ret)
 		return ret;
@@ -779,11 +936,10 @@ static int sunxi_mmc_clk_set_rate(struct sunxi_mmc_host *host,
 	 * clock to be double the card clock. Under the new timing
 	 * mode, all DDR modes require a doubled module clock.
 	 *
-	 * We currently only support the standard MMC DDR52 mode.
-	 * This block should be updated once support for other DDR
-	 * modes is added.
+	 * DDR50 uses the same doubling and internal divider as DDR52.
 	 */
-	if (ios->timing == MMC_TIMING_MMC_DDR52 &&
+	if ((ios->timing == MMC_TIMING_MMC_DDR52 ||
+	     ios->timing == MMC_TIMING_UHS_DDR50) &&
 	    (host->use_new_timings ||
 	     ios->bus_width == MMC_BUS_WIDTH_8)) {
 		div = 2;
@@ -927,6 +1083,7 @@ static void sunxi_mmc_card_power(struct sunxi_mmc_host *host,
 		break;
 
 	case MMC_POWER_OFF:
+		host->a133_tuned_rate = 0;
 		dev_dbg(mmc_dev(mmc), "Powering card off\n");
 
 		if (!IS_ERR(mmc->supply.vmmc))
@@ -1206,7 +1363,17 @@ static const struct sunxi_mmc_cfg sun50i_a100_emmc_cfg = {
 	.needs_new_timings = true,
 };
 
+static const struct sunxi_mmc_cfg sun50i_a133_sd_cfg = {
+	.idma_des_size_bits = 13,
+	.idma_des_shift = 2,
+	.can_calibrate = true,
+	.mask_data0 = true,
+	.needs_new_timings = true,
+	.a133_coarse_tuning = true,
+};
+
 static const struct of_device_id sunxi_mmc_of_match[] = {
+	{ .compatible = "allwinner,sun50i-a133-mmc", .data = &sun50i_a133_sd_cfg },
 	{ .compatible = "allwinner,sun4i-a10-mmc", .data = &sun4i_a10_cfg },
 	{ .compatible = "allwinner,sun5i-a13-mmc", .data = &sun5i_a13_cfg },
 	{ .compatible = "allwinner,sun7i-a20-mmc", .data = &sun7i_a20_cfg },
@@ -1241,7 +1408,7 @@ static int sunxi_mmc_enable(struct sunxi_mmc_host *host)
 		goto error_assert_reset;
 	}
 
-	ret = clk_prepare_enable(host->clk_mmc);
+	ret = sunxi_mmc_module_enable(host);
 	if (ret) {
 		dev_err(host->dev, "Enable mmc clk err %d\n", ret);
 		goto error_disable_clk_ahb;
@@ -1274,7 +1441,7 @@ error_disable_clk_sample:
 error_disable_clk_output:
 	clk_disable_unprepare(host->clk_output);
 error_disable_clk_mmc:
-	clk_disable_unprepare(host->clk_mmc);
+	sunxi_mmc_module_disable(host);
 error_disable_clk_ahb:
 	clk_disable_unprepare(host->clk_ahb);
 error_assert_reset:
@@ -1289,7 +1456,7 @@ static void sunxi_mmc_disable(struct sunxi_mmc_host *host)
 
 	clk_disable_unprepare(host->clk_sample);
 	clk_disable_unprepare(host->clk_output);
-	clk_disable_unprepare(host->clk_mmc);
+	sunxi_mmc_module_disable(host);
 	clk_disable_unprepare(host->clk_ahb);
 
 	if (!IS_ERR(host->reset))
@@ -1414,6 +1581,11 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 	}
 
 	mmc->ops		= &sunxi_mmc_ops;
+	if (host->cfg->a133_coarse_tuning) {
+		host->a133_ops = sunxi_mmc_ops;
+		host->a133_ops.execute_tuning = sunxi_mmc_a133_execute_tuning;
+		mmc->ops = &host->a133_ops;
+	}
 	mmc->max_blk_count	= 8192;
 	mmc->max_blk_size	= 4096;
 	mmc->max_segs		= PAGE_SIZE / sizeof(struct sunxi_idma_des);
