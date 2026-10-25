@@ -15,6 +15,7 @@ properties:
       - allwinner,sun8i-h3-crypto
       - allwinner,sun8i-r40-crypto
       - allwinner,sun20i-d1-crypto
+      - allwinner,sun50i-a133-crypto
       - allwinner,sun50i-a64-crypto
       - allwinner,sun50i-h5-crypto
       - allwinner,sun50i-h6-crypto
@@ -61,7 +62,9 @@ else:
   if:
     properties:
       compatible:
-        const: allwinner,sun50i-h6-crypto
+        enum:
+          - allwinner,sun50i-a133-crypto
+          - allwinner,sun50i-h6-crypto
   then:
     properties:
       clocks:
