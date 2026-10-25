@@ -335,6 +335,16 @@ IMG_BOOL PVRSRVIsDevicePowered(PPVRSRV_DEVICE_NODE psDeviceNode);
                 PVRSRV_ERROR on failure, power lock not held on exit, do not
                              call PVRSRVDevicePostClockSpeedChange().
 */ /**************************************************************************/
+/* Checked transaction: prepare rejects without a change; apply publishes only
+ * confirmed timing. Any failure after idle/pre must latch a platform fault
+ * before unlock. Legacy pre/post users retain their existing contract.
+ */
+typedef PVRSRV_ERROR (*PFN_CHECKED_CLOCK_STEP)(IMG_HANDLE data);
+typedef void (*PFN_CHECKED_CLOCK_FAULT)(IMG_HANDLE data, PVRSRV_ERROR error);
+PVRSRV_ERROR PVRSRVDeviceClockSpeedChangeChecked(PPVRSRV_DEVICE_NODE node,
+	PFN_CHECKED_CLOCK_STEP prepare, PFN_CHECKED_CLOCK_STEP apply,
+	PFN_CHECKED_CLOCK_FAULT fault, IMG_HANDLE data);
+
 PVRSRV_ERROR PVRSRVDevicePreClockSpeedChange(PPVRSRV_DEVICE_NODE psDeviceNode,
 											 IMG_BOOL	bIdleDevice,
 											 void	*pvInfo);

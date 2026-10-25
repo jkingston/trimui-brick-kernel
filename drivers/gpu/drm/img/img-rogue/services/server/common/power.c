@@ -1132,6 +1132,56 @@ IMG_BOOL PVRSRVIsDevicePowered(PPVRSRV_DEVICE_NODE psDeviceNode)
 	return (ePowerState == PVRSRV_DEV_POWER_STATE_ON);
 }
 
+PVRSRV_ERROR PVRSRVDeviceClockSpeedChangeChecked(PPVRSRV_DEVICE_NODE node,
+	PFN_CHECKED_CLOCK_STEP prepare, PFN_CHECKED_CLOCK_STEP apply,
+	PFN_CHECKED_CLOCK_FAULT fault, IMG_HANDLE data)
+{
+	PVRSRV_POWER_DEV *power = node->psPowerDev;
+	PVRSRV_DEV_POWER_STATE state;
+	PVRSRV_ERROR error;
+
+	if (!power || !prepare || !apply || !fault)
+		return PVRSRV_ERROR_INVALID_PARAMS;
+	error = PVRSRVPowerLock(node);
+	if (error != PVRSRV_OK)
+		return error;
+	error = prepare(data);
+	if (error != PVRSRV_OK)
+		goto unlock;
+	state = OSAtomicRead(&power->eCurrentPowerState);
+	if (state == PVRSRV_DEV_POWER_STATE_ON) {
+		error = PVRSRVDeviceIdleRequestKM(node, NULL, IMG_TRUE);
+		if (error == PVRSRV_ERROR_PWLOCK_RELEASED_REACQ_FAILED)
+			return error;
+		if (error != PVRSRV_OK)
+			goto unlock;
+	}
+	/* Idle retries may drop the mutex and permit APM to reach OFF. */
+	state = OSAtomicRead(&power->eCurrentPowerState);
+	error = power->pfnPreClockSpeedChange(power->hDevCookie, state);
+	if (error != PVRSRV_OK)
+		goto failed;
+	error = apply(data);
+	if (error != PVRSRV_OK)
+		goto failed;
+	error = power->pfnPostClockSpeedChange(power->hDevCookie, state);
+	if (error != PVRSRV_OK)
+		goto failed;
+	if (state == PVRSRV_DEV_POWER_STATE_ON) {
+		error = PVRSRVDeviceIdleCancelRequestKM(node);
+		if (error != PVRSRV_OK)
+			goto failed;
+	}
+	OSAtomicIncrement(&node->iNumClockSpeedChanges);
+	goto unlock;
+failed:
+	/* Do not release forced idle or allow work with inconsistent timing. */
+	fault(data, error);
+unlock:
+	PVRSRVPowerUnlock(node);
+	return error;
+}
+
 PVRSRV_ERROR
 PVRSRVDevicePreClockSpeedChange(PPVRSRV_DEVICE_NODE psDeviceNode,
                                 IMG_BOOL            bIdleDevice,
