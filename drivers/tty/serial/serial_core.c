@@ -2426,6 +2426,7 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
 	struct device *tty_dev;
 	struct uart_match match = {uport, drv};
 	struct ktermios termios;
+	int ret = 0;
 
 	guard(mutex)(&port->mutex);
 
@@ -2470,7 +2471,6 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
 
 	if (tty_port_suspended(port)) {
 		const struct uart_ops *ops = uport->ops;
-		int ret;
 
 		uart_change_pm(state, UART_PM_STATE_ON);
 		scoped_guard(uart_port_lock_irq, uport)
@@ -2504,7 +2504,7 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
 		tty_port_set_suspended(port, false);
 	}
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(uart_resume_port);
 

@@ -803,9 +803,7 @@ static int dw8250_resume(struct device *dev)
 {
 	struct dw8250_data *data = dev_get_drvdata(dev);
 
-	serial8250_resume_port(data->data.line);
-
-	return 0;
+	return serial8250_resume_port(data->data.line);
 }
 
 static int dw8250_runtime_suspend(struct device *dev)

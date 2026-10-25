@@ -189,7 +189,7 @@ static inline struct uart_8250_port *up_to_u8250p(struct uart_port *up)
 int serial8250_register_8250_port(const struct uart_8250_port *);
 void serial8250_unregister_port(int line);
 void serial8250_suspend_port(int line);
-void serial8250_resume_port(int line);
+int serial8250_resume_port(int line);
 
 int early_serial_setup(struct uart_port *port);
 int early_serial8250_setup(struct earlycon_device *device, const char *options);

@@ -632,12 +632,13 @@ EXPORT_SYMBOL(serial8250_suspend_port);
  *	serial8250_resume_port - resume one serial port
  *	@line:  serial line number
  *
- *	Resume one serial port.
+ *	Resume one serial port. Return zero on success or the startup error.
  */
-void serial8250_resume_port(int line)
+int serial8250_resume_port(int line)
 {
 	struct uart_8250_port *up = &serial8250_ports[line];
 	struct uart_port *port = &up->port;
+	int ret;
 
 	up->canary = 0;
 
@@ -650,7 +651,9 @@ void serial8250_resume_port(int line)
 		serial_port_out(port, UART_LCR, 0);
 		port->uartclk = 921600*16;
 	}
-	uart_resume_port(&serial8250_reg, port);
+	ret = uart_resume_port(&serial8250_reg, port);
+	if (ret)
+		return ret;
 
 	if (uart_console(port)) {
 
@@ -663,6 +666,8 @@ void serial8250_resume_port(int line)
 		if (up->msr_saved_flags)
 			serial8250_modem_status(up);
 	}
+
+	return 0;
 }
 EXPORT_SYMBOL(serial8250_resume_port);
 
