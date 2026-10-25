@@ -576,11 +576,22 @@ static void DevicesWatchdogThread_ForEachVaCb(PVRSRV_DEVICE_NODE *psDeviceNode,
 		return;
 	}
 
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
+		return;
+	}
+
 	if (psDeviceNode->pfnUpdateHealthStatus != NULL)
 	{
 		eError = psDeviceNode->pfnUpdateHealthStatus(psDeviceNode, bCheckAfterTimePassed);
 		PVR_WARN_IF_ERROR(eError, "pfnUpdateHealthStatus");
 	}
+	/* Health handling may have encountered a physical transition failure. */
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
+		return;
+	}
+
 	eHealthStatus = OSAtomicRead(&psDeviceNode->eHealthStatus);
 
 	if (eHealthStatus != PVRSRV_DEVICE_HEALTH_STATUS_OK)

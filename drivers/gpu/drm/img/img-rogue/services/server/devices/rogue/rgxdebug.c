@@ -5303,6 +5303,15 @@ void RGXDebugRequestProcess(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
 		}
 	}
 
+	/* Logical ON can survive a failed physical transition. Do not inspect
+	 * GPU registers or enter subordinate dumps in that state.
+	 */
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
+		PVR_DUMPDEBUG_LOG("Physical GPU power fault latched; GPU diagnostics skipped");
+		goto Exit;
+	}
+
 	ui8FwOsCount = psDevInfo->psRGXFWIfOsInit->sRGXCompChecks.sInitOptions.ui8OsCountSupport;
 
 	eError = PVRSRVGetDevicePowerState(psDeviceNode, &ePowerState);

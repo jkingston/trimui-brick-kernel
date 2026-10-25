@@ -633,6 +633,7 @@ PVRSRV_ERROR PVRSRVDeviceIdleCancelRequestKM(PPVRSRV_DEVICE_NODE psDeviceNode)
 ******************************************************************************/
 static
 PVRSRV_ERROR PVRSRVDevicePrePowerStateKM(PVRSRV_POWER_DEV		*psPowerDevice,
+	const PVRSRV_DEVICE_CONFIG *psDevConfig,
 										 PVRSRV_DEV_POWER_STATE	eNewPowerState,
 										 PVRSRV_POWER_FLAGS		ePwrFlags)
 {
@@ -690,6 +691,16 @@ PVRSRV_ERROR PVRSRVDevicePrePowerStateKM(PVRSRV_POWER_DEV		*psPowerDevice,
 	return PVRSRV_OK;
 
 ErrRestorePowerState:
+	/* A failed physical restore must not invoke reverse device callbacks,
+	 * which can access the unavailable GPU. Preserve the primary error and
+	 * logical state; this is a fail gate, not a recovery transition.
+	 */
+	if (psDevConfig->pfnGpuPowerFault &&
+	    psDevConfig->pfnGpuPowerFault(psDevConfig->hSysData))
+	{
+		return eError;
+	}
+
 	/* In a situation where pfnDevicePrePower() succeeded but pfnSystemPrePower()
 	 * failed we need to restore the device's power state from before the current
 	 * request. Otherwise it will result in an inconsistency between the device's
@@ -805,6 +816,14 @@ PVRSRV_ERROR PVRSRVSetDevicePowerStateKM(PPVRSRV_DEVICE_NODE psDeviceNode,
 	PVRSRV_DATA*    psPVRSRVData = PVRSRVGetPVRSRVData();
 	PVRSRV_POWER_DEV *psPowerDevice;
 
+	/* Check before same-state success and before any device callback. */
+	if (psDeviceNode->psDevConfig->pfnGpuPowerFault &&
+	    psDeviceNode->psDevConfig->pfnGpuPowerFault(
+		psDeviceNode->psDevConfig->hSysData))
+	{
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	}
+
 	psPowerDevice = psDeviceNode->psPowerDev;
 	if (!psPowerDevice)
 	{
@@ -821,6 +840,7 @@ PVRSRV_ERROR PVRSRVSetDevicePowerStateKM(PPVRSRV_DEVICE_NODE psDeviceNode,
 	    BITMASK_ANY(ePwrFlags, PVRSRV_POWER_FLAGS_SUSPEND_REQ | PVRSRV_POWER_FLAGS_RESUME_REQ))
 	{
 		eError = PVRSRVDevicePrePowerStateKM(psPowerDevice,
+		psDeviceNode->psDevConfig,
 											 eNewPowerState,
 											 ePwrFlags);
 		PVR_GOTO_IF_ERROR(eError, ErrorExit);

@@ -166,6 +166,16 @@ static INLINE PVRSRV_ERROR RGXDoStop(PVRSRV_DEVICE_NODE *psDeviceNode)
 	return eError;
 }
 
+/* Stop transaction: 0 begins/invalidates, 1 records drain, 2 records stop. */
+static void RGXStopEvidence(PVRSRV_DEVICE_NODE *node, IMG_UINT32 event,
+	PVRSRV_DEV_POWER_STATE next, PVRSRV_DEV_POWER_STATE old,
+	PVRSRV_POWER_FLAGS flags, PVRSRV_ERROR result)
+{
+	if (node->psDevConfig->pfnStopEvidence)
+		node->psDevConfig->pfnStopEvidence(node->psDevConfig->hSysData,
+			event, next, old, flags, result);
+}
+
 /*
 	RGXPrePowerState
 */
@@ -177,6 +187,7 @@ PVRSRV_ERROR RGXPrePowerState(IMG_HANDLE				hDevHandle,
 	PVRSRV_ERROR eError = PVRSRV_OK;
 	PVRSRV_DEVICE_NODE    *psDeviceNode = hDevHandle;
 
+	RGXStopEvidence(psDeviceNode, 0, eNewPowerState, eCurrentPowerState, ePwrFlags, PVRSRV_OK);
 	if ((eNewPowerState != eCurrentPowerState) &&
 	    (eNewPowerState != PVRSRV_DEV_POWER_STATE_ON))
 	{
@@ -246,6 +257,8 @@ PVRSRV_ERROR RGXPrePowerState(IMG_HANDLE				hDevHandle,
 					                              0xffffffff,
 					                              POLL_FLAG_LOG_ERROR);
 
+					RGXStopEvidence(psDeviceNode, 1, eNewPowerState,
+							eCurrentPowerState, ePwrFlags, eError);
 					if (eError != PVRSRV_OK)
 					{
 						PVR_DPF((PVR_DBG_ERROR,
@@ -279,6 +292,8 @@ PVRSRV_ERROR RGXPrePowerState(IMG_HANDLE				hDevHandle,
 				psDevInfo->bRGXPowered = IMG_FALSE;
 
 				eError = RGXDoStop(psDeviceNode);
+				RGXStopEvidence(psDeviceNode, 2, eNewPowerState,
+						eCurrentPowerState, ePwrFlags, eError);
 				if (eError != PVRSRV_OK)
 				{
 					/* Power down failures are treated as successful since the power was removed but logged. */
@@ -1424,6 +1439,13 @@ PVRSRV_ERROR RGXActivePowerRequest(IMG_HANDLE hDevHandle)
 			psDevInfo->ui32ActivePMReqRetry++;
 		}
 		goto _RGXActivePowerRequest_PowerLock_failed;
+	}
+
+	/* Statistics can read the GPU timer before the state-change gate. */
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
+		PVRSRVPowerUnlock(psDeviceNode);
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 	}
 
 	/* Check again for IDLE once we have the power lock */

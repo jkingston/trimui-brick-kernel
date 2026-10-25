@@ -74,6 +74,9 @@ static PVRSRV_ERROR _SetClock(const PVRSRV_DEVICE_NODE *psDeviceNode,
 		"mono", "mono_raw", "sched"
 	};
 	PVRSRV_RGXDEV_INFO *psDevInfo = psDeviceNode->pvDevice;
+	PVRSRV_DEVICE_NODE *psMutableNode = (PVRSRV_DEVICE_NODE *)psDeviceNode;
+	PVRSRV_DEV_POWER_STATE ePowerState;
+	PVRSRV_ERROR eError;
 
 	PVR_ASSERT(psDeviceNode->pvDevice != NULL);
 
@@ -85,8 +88,20 @@ static PVRSRV_ERROR _SetClock(const PVRSRV_DEVICE_NODE *psDeviceNode,
 		return PVRSRV_ERROR_INVALID_PARAMS;
 	}
 
-	RGXTimeCorrEnd((PVRSRV_DEVICE_NODE *) psDeviceNode,
-	               RGXTIMECORR_EVENT_CLOCK_CHANGE);
+	eError = PVRSRVPowerLock(psMutableNode);
+	if (eError != PVRSRV_OK)
+		return eError;
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
+		eError = PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+		goto unlock;
+	}
+	eError = PVRSRVGetDevicePowerState(psMutableNode, &ePowerState);
+	if (eError != PVRSRV_OK)
+		goto unlock;
+	/* OFF changes only the host selection; next power-on creates correlation. */
+	if (ePowerState == PVRSRV_DEV_POWER_STATE_ON)
+		RGXTimeCorrEnd(psMutableNode, RGXTIMECORR_EVENT_CLOCK_CHANGE);
 
 	PVR_DPF((PVR_DBG_WARNING, "Setting time correlation clock from \"%s\" to \"%s\"",
 			apszClocks[psDevInfo->ui32ClockSource],
@@ -94,10 +109,11 @@ static PVRSRV_ERROR _SetClock(const PVRSRV_DEVICE_NODE *psDeviceNode,
 
 	psDevInfo->ui32ClockSource = ui32Value;
 
-	RGXTimeCorrBegin((PVRSRV_DEVICE_NODE *) psDeviceNode,
-	                 RGXTIMECORR_EVENT_CLOCK_CHANGE);
-
-	return PVRSRV_OK;
+	if (ePowerState == PVRSRV_DEV_POWER_STATE_ON)
+		RGXTimeCorrBegin(psMutableNode, RGXTIMECORR_EVENT_CLOCK_CHANGE);
+unlock:
+	PVRSRVPowerUnlock(psMutableNode);
+	return eError;
 }
 
 static PVRSRV_ERROR _GetClock(const PVRSRV_DEVICE_NODE *psDeviceNode,
@@ -601,6 +617,13 @@ void RGXTimeCorrRestartPeriodic(IMG_HANDLE hDevHandle)
 
 	/* Try to acquire the powerlock, if not possible then don't wait */
 	if (PVRSRVPowerTryLock(psDeviceNode) != PVRSRV_OK) return;
+
+	/* Check under the existing power lock before either GPU timer reader. */
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
+		PVRSRVPowerUnlock(psDeviceNode);
+		return;
+	}
 
 	/* If the GPU is off then we can't do anything */
 	PVRSRVGetDevicePowerState(psDeviceNode, &ePowerState);

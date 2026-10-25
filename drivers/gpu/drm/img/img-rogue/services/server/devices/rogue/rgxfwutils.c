@@ -3832,6 +3832,12 @@ static PVRSRV_ERROR RGXSendCommandRaw(PVRSRV_RGXDEV_INFO  *psDevInfo,
 	IMG_UINT32			ui32OldWriteOffset = psKCCBCtl->ui32WriteOffset;
 	IMG_UINT32			ui32CmdMemCopySize;
 
+	PVR_ASSERT(PVRSRVPwrLockIsLockedByMe(psDeviceNode));
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	}
+
 #if !defined(PDUMP)
 	PVR_UNREFERENCED_PARAMETER(uiPDumpFlags);
 #else
@@ -4079,6 +4085,11 @@ PVRSRV_ERROR RGXSendCommandsFromDeferredList(PVRSRV_RGXDEV_INFO *psDevInfo, IMG_
 	OS_SPINLOCK_FLAGS uiFlags;
 
 	PVR_ASSERT(PVRSRVPwrLockIsLockedByMe(psDevInfo->psDeviceNode));
+	/* Keep all deferred ownership untouched for an already-latched fault. */
+	if (PVRSRVGpuPowerFault(psDevInfo->psDeviceNode->psDevConfig))
+	{
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	}
 
 	/* !!! Important !!!
 	 *
@@ -4119,6 +4130,13 @@ PVRSRV_ERROR RGXSendCommandsFromDeferredList(PVRSRV_RGXDEV_INFO *psDevInfo, IMG_
 			                           NULL /* We surely aren't interested in kCCB slot number of deferred command */);
 			if (eError != PVRSRV_OK)
 			{
+				/* Preserve the primary fault and reattach unsent commands.
+				 * It is not queue pressure and must never poll or defer.
+				 */
+				if (eError == PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE)
+				{
+					goto cleanup_;
+				}
 				if (!bPoll)
 				{
 					eError = PVRSRV_ERROR_KERNEL_CCB_FULL;
@@ -4368,6 +4386,13 @@ static void RGX_MISRHandler_ScheduleProcessQueues(void *pvData)
 		PVR_DPF((PVR_DBG_WARNING, "%s: failed to transition Rogue to ON (%s)",
 				__func__, PVRSRVGetErrorString(eError)));
 
+		PVRSRVPowerUnlock(psDeviceNode);
+		return;
+	}
+
+	/* The shared fault query is not an access lease or a reader barrier. */
+	if (PVRSRVGpuPowerFault(psDeviceNode->psDevConfig))
+	{
 		PVRSRVPowerUnlock(psDeviceNode);
 		return;
 	}
@@ -5866,6 +5891,14 @@ PVRSRV_ERROR RGXUpdateHealthStatus(PVRSRV_DEVICE_NODE* psDevNode,
 	IMG_BOOL                     bKCCBCmdsWaiting;
 
 	PVR_ASSERT(psDevNode != NULL);
+	/* This unlocked gate rejects an already latched fault; it does not
+	 * synchronize a reader already executing with a physical power cut.
+	 */
+	if (PVRSRVGpuPowerFault(psDevNode->psDevConfig))
+	{
+		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
+	}
+
 	psDevInfo = psDevNode->pvDevice;
 
 	/* If the firmware is not yet initialised or has already deinitialised, stop here */

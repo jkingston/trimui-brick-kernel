@@ -296,6 +296,19 @@ struct _PVRSRV_DEVICE_CONFIG_
 	 *! Callbacks to change system device power state at the beginning and end
 	 *! of a power state change (optional).
 	 */
+	/* Research-only evidence, called under the DDK power mutex. */
+	void (*pfnStopEvidence)(IMG_HANDLE hSysData, IMG_UINT32 event,
+		PVRSRV_DEV_POWER_STATE next, PVRSRV_DEV_POWER_STATE old,
+		PVRSRV_POWER_FLAGS flags, PVRSRV_ERROR result);
+	/* Optional sticky physical GPU-access fault, distinct from logical power.
+	 * Queried both with and without DDK power mutex: RAM-only, nonblocking,
+	 * no GPU MMIO, provider locks, power callbacks or power-lock recursion.
+	 * Callback/context lifetime follows device-config lifetime; published latch
+	 * must be safe for concurrent unlocked readers. NULL keeps legacy policy.
+	 * The platform must latch before returning a failed physical transition;
+	 * this query must never clear the fault or attempt recovery.
+	 */
+	IMG_BOOL (*pfnGpuPowerFault)(IMG_HANDLE hSysData);
 	PFN_SYS_PRE_POWER pfnPrePowerState;
 	PFN_SYS_POST_POWER pfnPostPowerState;
 	PFN_SYS_GET_POWER  pfnGpuDomainPower;
@@ -399,5 +412,12 @@ struct _PVRSRV_DEVICE_CONFIG_
 	IMG_BOOL bHasDma;
 
 };
+
+/* A fault query is not an access lease or a logical power-state test. */
+static INLINE IMG_BOOL PVRSRVGpuPowerFault(const PVRSRV_DEVICE_CONFIG *psConfig)
+{
+	return psConfig->pfnGpuPowerFault &&
+	       psConfig->pfnGpuPowerFault(psConfig->hSysData);
+}
 
 #endif /* PVRSRV_DEVICE_H*/
