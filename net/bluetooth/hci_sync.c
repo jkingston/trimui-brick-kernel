@@ -2687,7 +2687,7 @@ static int hci_pause_advertising_sync(struct hci_dev *hdev)
 static int hci_resume_advertising_sync(struct hci_dev *hdev)
 {
 	struct adv_info *adv, *tmp;
-	int err;
+	int err = 0, ret;
 
 	/* If advertising has not been paused there is nothing  to do. */
 	if (!hdev->advertising_paused)
@@ -2705,10 +2705,12 @@ static int hci_resume_advertising_sync(struct hci_dev *hdev)
 	if (ext_adv_capable(hdev)) {
 		/* Call for each tracked instance to be re-enabled */
 		list_for_each_entry_safe(adv, tmp, &hdev->adv_instances, list) {
-			err = hci_enable_ext_advertising_sync(hdev,
+			ret = hci_enable_ext_advertising_sync(hdev,
 							      adv->instance);
-			if (!err)
+			if (!ret)
 				continue;
+			if (!err)
+				err = ret;
 
 			/* If the instance cannot be resumed remove it */
 			hci_remove_ext_adv_instance_sync(hdev, adv->instance,
@@ -2718,8 +2720,11 @@ static int hci_resume_advertising_sync(struct hci_dev *hdev)
 		/* If current advertising instance is set to instance 0x00
 		 * then we need to re-enable it.
 		 */
-		if (hci_dev_test_and_clear_flag(hdev, HCI_LE_ADV_0))
-			err = hci_enable_ext_advertising_sync(hdev, 0x00);
+		if (hci_dev_test_and_clear_flag(hdev, HCI_LE_ADV_0)) {
+			ret = hci_enable_ext_advertising_sync(hdev, 0x00);
+			if (!err)
+				err = ret;
+		}
 	} else {
 		/* Schedule for most recent instance to be restarted and begin
 		 * the software rotation loop
@@ -6632,17 +6637,19 @@ static void hci_resume_monitor_sync(struct hci_dev *hdev)
 /* This function resume scan and reset paused flag */
 static int hci_resume_scan_sync(struct hci_dev *hdev)
 {
+	int err, ret;
+
 	if (!hdev->scanning_paused)
 		return 0;
 
 	hdev->scanning_paused = false;
 
-	hci_update_scan_sync(hdev);
+	err = hci_update_scan_sync(hdev);
 
 	/* Reset passive scanning to normal */
-	hci_update_passive_scan_sync(hdev);
+	ret = hci_update_passive_scan_sync(hdev);
 
-	return 0;
+	return err ? err : ret;
 }
 
 /* This function performs the HCI suspend procedures in the follow order:
@@ -6655,31 +6662,46 @@ static int hci_resume_scan_sync(struct hci_dev *hdev)
  */
 int hci_resume_sync(struct hci_dev *hdev)
 {
+	int err = 0, ret;
+
 	/* If not marked as suspended there nothing to do */
 	if (!hdev->suspended)
 		return 0;
 
+	/* Restore helpers need normal policy; report failures to the caller
+	 * while still attempting the remaining independent restore steps.
+	 */
 	hdev->suspended = false;
 
 	/* Restore event mask */
-	hci_set_event_mask_sync(hdev);
+	ret = hci_set_event_mask_sync(hdev);
+	if (!err)
+		err = ret;
 
 	/* Clear any event filters and restore scan state */
-	hci_clear_event_filter_sync(hdev);
+	ret = hci_clear_event_filter_sync(hdev);
+	if (!err)
+		err = ret;
 
 	/* Resume scanning */
-	hci_resume_scan_sync(hdev);
+	ret = hci_resume_scan_sync(hdev);
+	if (!err)
+		err = ret;
 
 	/* Resume monitor filters */
 	hci_resume_monitor_sync(hdev);
 
 	/* Resume other advertisements */
-	hci_resume_advertising_sync(hdev);
+	ret = hci_resume_advertising_sync(hdev);
+	if (!err)
+		err = ret;
 
 	/* Resume discovery */
-	hci_resume_discovery_sync(hdev);
+	ret = hci_resume_discovery_sync(hdev);
+	if (!err)
+		err = ret;
 
-	return 0;
+	return err;
 }
 
 static bool conn_use_rpa(struct hci_conn *conn)
