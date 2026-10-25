@@ -14,6 +14,7 @@
 #include <linux/timekeeping.h>
 #include <linux/spinlock.h>
 #include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 
 #include "brick_radio_clocks.h"
 
@@ -49,7 +50,18 @@ struct brick_rtc {
 	bool time_uncertain;
 	bool alarm_untrusted;
 	bool irq_ready;
+	bool pm_suspended, mmio_blocked, pm_fault, sleep_deep;
 };
+
+/* Client callbacks own lock; noirq/IRQ state is protected by alarm_lock. */
+static int brick_rtc_client_error(struct brick_rtc *chip)
+{
+	if (chip->stopping)
+		return -ENODEV;
+	if (chip->pm_fault)
+		return -EIO;
+	return chip->pm_suspended || chip->mmio_blocked ? -EBUSY : 0;
+}
 
 static int brick_rtc_decode(u32 day, u32 hms, time64_t *seconds)
 {
@@ -113,8 +125,9 @@ static int brick_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	int ret;
 
 	mutex_lock(&chip->lock);
-	ret = chip->stopping ? -ENODEV : chip->time_uncertain ? -EIO :
-		brick_rtc_snapshot(chip, &seconds);
+	ret = brick_rtc_client_error(chip);
+	if (!ret)
+		ret = chip->time_uncertain ? -EIO : brick_rtc_snapshot(chip, &seconds);
 	mutex_unlock(&chip->lock);
 	if (!ret)
 		rtc_time64_to_tm(seconds, tm);
@@ -160,10 +173,9 @@ static int brick_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	if (ret)
 		return ret;
 	mutex_lock(&chip->lock);
-	if (chip->stopping) {
-		ret = -ENODEV;
+	ret = brick_rtc_client_error(chip);
+	if (ret)
 		goto unlock;
-	}
 	if (chip->alarm_untrusted) {
 		ret = -EBUSY;
 		goto unlock;
@@ -246,7 +258,8 @@ static void brick_rtc_maybe_enable_irq(struct brick_rtc *chip)
 
 	spin_lock_irqsave(&chip->alarm_lock, flags);
 	enable = chip->irq_ready && chip->irq_masked && !chip->stopping &&
-		!chip->alarm_fault && !chip->alarm_untrusted && !chip->time_uncertain;
+		!chip->alarm_fault && !chip->alarm_untrusted && !chip->time_uncertain &&
+		!chip->mmio_blocked && !chip->pm_fault;
 	if (enable)
 		chip->irq_masked = false;
 	spin_unlock_irqrestore(&chip->alarm_lock, flags);
@@ -351,12 +364,15 @@ static int brick_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alarm)
 
 	mutex_lock(&chip->lock);
 	spin_lock_irqsave(&chip->alarm_lock, flags);
-	ret = chip->stopping ? -ENODEV :
-		(chip->alarm_untrusted || chip->time_uncertain) ? -EIO :
+	ret = brick_rtc_client_error(chip);
+	if (ret)
+		goto unlock;
+	ret = (chip->alarm_untrusted || chip->time_uncertain) ? -EIO :
 		brick_rtc_alarm_snapshot(chip, &seconds);
 	alarm->enabled = !!(readl(chip->base + BRICK_RTC_ALARM_ENABLE) & BIT(0)) &&
 		!!(readl(chip->base + BRICK_RTC_ALARM_IRQ_ENABLE) & BIT(0));
 	alarm->pending = !!(readl(chip->base + BRICK_RTC_ALARM_PENDING) & BIT(0));
+unlock:
 	spin_unlock_irqrestore(&chip->alarm_lock, flags);
 	mutex_unlock(&chip->lock);
 	if (!ret)
@@ -386,8 +402,9 @@ static int brick_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alarm)
 	if (ret)
 		return ret;
 	mutex_lock(&chip->lock);
-	if (chip->stopping || chip->time_uncertain || chip->alarm_untrusted) {
-		ret = chip->stopping ? -ENODEV : -EIO;
+	ret = brick_rtc_client_error(chip);
+	if (ret || chip->time_uncertain || chip->alarm_untrusted) {
+		ret = ret ?: -EIO;
 		goto unlock;
 	}
 	if (alarm->enabled) {
@@ -467,10 +484,9 @@ static int brick_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
 
 	mutex_lock(&chip->lock);
 	spin_lock_irqsave(&chip->alarm_lock, flags);
-	if (chip->stopping) {
-		ret = -ENODEV;
+	ret = brick_rtc_client_error(chip);
+	if (ret)
 		goto unlock;
-	}
 	if (!enabled) {
 		chip->alarm_owned = true;
 		ret = brick_rtc_disarm(chip);
@@ -518,7 +534,8 @@ static irqreturn_t brick_rtc_irq(int irq, void *data)
 	bool pending;
 
 	spin_lock_irqsave(&chip->alarm_lock, flags);
-	if (chip->stopping || chip->time_uncertain || chip->alarm_untrusted) {
+	if (chip->stopping || chip->time_uncertain || chip->alarm_untrusted ||
+	    chip->mmio_blocked || chip->pm_fault) {
 		spin_unlock_irqrestore(&chip->alarm_lock, flags);
 		return IRQ_NONE;
 	}
@@ -547,7 +564,8 @@ static void brick_rtc_quiesce(void *data)
 	chip->stopping = true;
 	brick_rtc_mask_irq(chip);
 	/* Preserve an inherited alarm that userspace never took over. */
-	if (chip->alarm_owned && !brick_rtc_disarm(chip))
+	if (!chip->mmio_blocked && !chip->pm_fault &&
+	    chip->alarm_owned && !brick_rtc_disarm(chip))
 		brick_rtc_ack_alarm(chip);
 	spin_unlock_irqrestore(&chip->alarm_lock, flags);
 	mutex_unlock(&chip->lock);
@@ -698,7 +716,8 @@ static void brick_rtc_sync_state(struct device *dev)
 
 static int brick_rtc_prepare(struct device *dev)
 {
-	/* No bus-off shadow or deep-memory resume protocol is implemented. */
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		return sun50i_a133_ccu_deep_ready();
 	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
 }
 
@@ -710,8 +729,8 @@ static int brick_rtc_suspend(struct device *dev)
 	bool arm;
 
 	mutex_lock(&chip->lock);
-	if (chip->wake_armed) {
-		ret = -EBUSY;
+	if (chip->wake_armed || chip->pm_suspended || chip->pm_fault) {
+		ret = chip->pm_fault ? -EIO : -EBUSY;
 		goto out;
 	}
 	/* Retain the bus clock and every shared radio clock vote. */
@@ -730,14 +749,72 @@ static int brick_rtc_suspend(struct device *dev)
 		if (!ret)
 			chip->wake_armed = true;
 	}
+	if (!ret) {
+		chip->sleep_deep = pm_suspend_target_state == PM_SUSPEND_MEM;
+		chip->pm_suspended = true;
+	}
 out:
 	mutex_unlock(&chip->lock);
+	return ret;
+}
+
+/* Device IRQs are suspended by the PM core before suspend_noirq, and are
+ * restored only after resume_noirq. Keep pending alarm/counter state intact.
+ * CCU readiness is non-sleeping and syscore restoration precedes this phase.
+ */
+static int brick_rtc_suspend_noirq(struct device *dev)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+	unsigned long flags;
+	int ret;
+
+	if (!chip->sleep_deep)
+		return 0;
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		return ret;
+	if (reset_control_status(chip->reset) != 0 || !__clk_is_enabled(chip->bus))
+		return -EIO;
+	ret = brick_radio_clocks_suspend(chip->radio_clocks);
+	if (ret)
+		return ret;
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	chip->mmio_blocked = true;
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	return 0;
+}
+
+static int brick_rtc_resume_noirq(struct device *dev)
+{
+	struct brick_rtc *chip = dev_get_drvdata(dev);
+	unsigned long flags;
+	int ret;
+
+	if (!chip->mmio_blocked)
+		return 0;
+	ret = chip->pm_fault ? -EIO : sun50i_a133_ccu_deep_ready();
+	if (!ret && (reset_control_status(chip->reset) != 0 ||
+		     !__clk_is_enabled(chip->bus)))
+		ret = -EIO;
+	if (!ret)
+		ret = brick_radio_clocks_resume(chip->radio_clocks);
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	if (ret) {
+		chip->pm_fault = true;
+		brick_rtc_mask_irq(chip);
+	} else {
+		chip->mmio_blocked = false;
+	}
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
+	if (ret)
+		brick_radio_clocks_fault(chip->radio_clocks);
 	return ret;
 }
 
 static int brick_rtc_resume(struct device *dev)
 {
 	struct brick_rtc *chip = dev_get_drvdata(dev);
+	unsigned long flags;
 	int ret = 0;
 
 	mutex_lock(&chip->lock);
@@ -746,6 +823,16 @@ static int brick_rtc_resume(struct device *dev)
 		if (!ret)
 			chip->wake_armed = false;
 	}
+	spin_lock_irqsave(&chip->alarm_lock, flags);
+	if (ret || chip->mmio_blocked) {
+		chip->pm_fault = true;
+		brick_rtc_mask_irq(chip);
+	}
+	if (chip->pm_fault)
+		ret = ret ?: -EIO;
+	else
+		chip->pm_suspended = false;
+	spin_unlock_irqrestore(&chip->alarm_lock, flags);
 	mutex_unlock(&chip->lock);
 	return ret;
 }
@@ -753,6 +840,8 @@ static int brick_rtc_resume(struct device *dev)
 static const struct dev_pm_ops brick_rtc_pm_ops = {
 	.prepare = brick_rtc_prepare,
 	.suspend = brick_rtc_suspend,
+	.suspend_noirq = brick_rtc_suspend_noirq,
+	.resume_noirq = brick_rtc_resume_noirq,
 	.resume = brick_rtc_resume,
 };
 

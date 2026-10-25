@@ -20,6 +20,8 @@ struct brick_radio_clocks {
 	struct clk_bulk_data boot[2];
 	struct mutex boot_lock;
 	bool boot_held, published, handoff_done;
+	bool blocked, fault, enabled[2];
+	u32 sleep_lpo, sleep_dcxo;
 };
 struct radio_output {
 	struct clk_hw hw;
@@ -40,6 +42,10 @@ static int radio_enable(struct clk_hw *hw)
 	int ret = 0;
 
 	spin_lock_irqsave(&clocks->lock, flags);
+	if (clocks->blocked || clocks->fault) {
+		ret = clocks->fault ? -EIO : -EBUSY;
+		goto unlock;
+	}
 	/* Refuse changed source instead of programming mux/divider/calibration. */
 	if ((readl(clocks->base + LPO_REG) & LPO_SOURCE) != clocks->source) {
 		ret = -EIO;
@@ -54,6 +60,8 @@ static int radio_enable(struct clk_hw *hw)
 		writel((check & ~mask) | (old & mask), clocks->base + reg);
 		ret = -EIO;
 	}
+	if (!ret)
+		clocks->enabled[out->index] = true;
 unlock:
 	spin_unlock_irqrestore(&clocks->lock, flags);
 	return ret;
@@ -66,6 +74,14 @@ static void radio_disable(struct clk_hw *hw)
 	u32 reg = out->index ? DCXO_REG : LPO_REG, val;
 
 	spin_lock_irqsave(&clocks->lock, flags);
+	if (clocks->blocked || clocks->fault) {
+		/* CCF disable cannot report failure. Keep MMIO fenced and reject
+		 * resume rather than pretend the now-released vote was applied.
+		 */
+		clocks->fault = true;
+		spin_unlock_irqrestore(&clocks->lock, flags);
+		return;
+	}
 	if (!clocks->handoff_done) {
 		spin_unlock_irqrestore(&clocks->lock, flags);
 		return;
@@ -73,17 +89,94 @@ static void radio_disable(struct clk_hw *hw)
 	val = readl(clocks->base + reg);
 	val = out->index ? val | BIT(31) : val & ~BIT(0);
 	writel(val, clocks->base + reg);
-	readl(clocks->base + reg);
+	clocks->enabled[out->index] = false;
+	if ((readl(clocks->base + reg) ^ val) & (out->index ? BIT(31) : BIT(0)))
+		clocks->fault = true;
 	spin_unlock_irqrestore(&clocks->lock, flags);
 }
 static int radio_is_enabled(struct clk_hw *hw)
 {
 	struct radio_output *out = to_output(hw);
+	struct brick_radio_clocks *clocks = out->owner;
+	unsigned long flags;
+	int enabled;
 
-	if (out->index)
-		return !(readl(out->owner->base + DCXO_REG) & BIT(31));
-	return !!(readl(out->owner->base + LPO_REG) & BIT(0));
+	spin_lock_irqsave(&clocks->lock, flags);
+	if (clocks->fault)
+		enabled = 0;
+	else if (clocks->blocked)
+		enabled = clocks->enabled[out->index];
+	else if (out->index)
+		enabled = !(readl(clocks->base + DCXO_REG) & BIT(31));
+	else
+		enabled = !!(readl(clocks->base + LPO_REG) & BIT(0));
+	spin_unlock_irqrestore(&clocks->lock, flags);
+	return enabled;
 }
+
+/* The RTC has checked parent bus/reset accessibility before either call.
+ * Clock consumers suspend before this supplier's noirq callback. A surprise
+ * transition while blocked cannot authorize MMIO or silently alter ownership.
+ */
+int brick_radio_clocks_suspend(struct brick_radio_clocks *clocks)
+{
+	unsigned long flags;
+	u32 lpo, dcxo;
+	int ret = 0;
+
+	spin_lock_irqsave(&clocks->lock, flags);
+	if (clocks->fault || clocks->blocked) {
+		ret = -EIO;
+		goto out;
+	}
+	lpo = readl(clocks->base + LPO_REG);
+	dcxo = readl(clocks->base + DCXO_REG);
+	if ((lpo & LPO_SOURCE) != clocks->source ||
+	    !!(lpo & BIT(0)) != clocks->enabled[0] ||
+	    !(dcxo & BIT(31)) != clocks->enabled[1]) {
+		clocks->fault = true;
+		ret = -EIO;
+		goto out;
+	}
+	clocks->sleep_lpo = lpo & (LPO_SOURCE | BIT(0));
+	clocks->sleep_dcxo = dcxo & BIT(31);
+	clocks->blocked = true;
+out:
+	spin_unlock_irqrestore(&clocks->lock, flags);
+	return ret;
+}
+
+int brick_radio_clocks_resume(struct brick_radio_clocks *clocks)
+{
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&clocks->lock, flags);
+	if (clocks->fault || !clocks->blocked) {
+		ret = -EIO;
+		goto out;
+	}
+	if ((readl(clocks->base + LPO_REG) & (LPO_SOURCE | BIT(0))) != clocks->sleep_lpo ||
+	    (readl(clocks->base + DCXO_REG) & BIT(31)) != clocks->sleep_dcxo) {
+		clocks->fault = true;
+		ret = -EIO;
+		goto out;
+	}
+	clocks->blocked = false;
+out:
+	spin_unlock_irqrestore(&clocks->lock, flags);
+	return ret;
+}
+
+void brick_radio_clocks_fault(struct brick_radio_clocks *clocks)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&clocks->lock, flags);
+	clocks->fault = true;
+	spin_unlock_irqrestore(&clocks->lock, flags);
+}
+
 static unsigned long radio_rate(struct clk_hw *hw, unsigned long parent_rate)
 {
 	/* No physical rate measurement or programmable divisor established. */
