@@ -273,6 +273,15 @@
 	status = "disabled";
 };
 
+/* Match the shipped Brick MMC bank drive setting (raw value 3). */
+&mmc0_pins {
+	drive-strength = <40>;
+};
+
+&mmc1_pins {
+	drive-strength = <40>;
+};
+
 &pio {
 	vcc-pg-supply = <&aldo3>;
 
