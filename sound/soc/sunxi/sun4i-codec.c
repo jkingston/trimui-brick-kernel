@@ -2339,7 +2339,7 @@ static int a133_component_probe(struct snd_soc_component *c)
 		{ SUN50I_A133_DAC_VOL, GENMASK(16, 0), 0x1a0a0 },
 		{ SUN50I_A133_DAC_ANALOG, GENMASK(30, 28), 0 },
 		{ SUN50I_A133_DAC_ANALOG, GENMASK(4, 0) | BIT(13) | BIT(12), 0 },
-		{ SUN50I_A133_DAC_DEBUG, BIT(6), BIT(6) }, /* Vendor L/R swap. Verify physically. */
+		{ SUN50I_A133_DAC_DEBUG, BIT(6), 0 }, /* Preserve PCM channel order. */
 		{ SUN50I_A133_HEADPHONE, GENMASK(7, 6), 3 << 6 },
 		{ SUN50I_A133_HEADPHONE, BIT(3), BIT(3) },
 		{ SUN50I_A133_HEADPHONE, GENMASK(9, 8), 3 << 8 },
