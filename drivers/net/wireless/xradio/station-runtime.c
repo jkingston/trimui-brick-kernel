@@ -19,9 +19,9 @@
 #include "key-transaction.h"
 #include "ccmp-rx.h"
 
-bool allow_ht;
+bool allow_ht = true;
 module_param(allow_ht,bool,0400);
-MODULE_PARM_DESC(allow_ht,"Opt in to experimental single-stream HT20 long-GI station mode");
+MODULE_PARM_DESC(allow_ht, "Enable single-stream HT20 long-GI station mode");
 const bool allow_station = true;
 #define XRS_SLOTS 16
 #define XRS_BUS_BUFFER 4096
@@ -60,6 +60,7 @@ struct xrs_runtime {
  unsigned int next_slot;
  int sending;
  struct xrs_ht_link ht;
+	struct xrs_ba_state ba;
  struct wsm_edca_params edca;
  struct xrs_station_settings settings;
  struct xrs_address address;
@@ -259,6 +260,9 @@ void xrs_runtime_stop(struct xradio_common *hw)
  spin_lock_irqsave(&s->lock,flags);
  s->joined=false;s->associated=false;
  spin_unlock_irqrestore(&s->lock,flags);
+	ret = wsm_set_block_ack_policy(hw, 0, 0, 0);
+	if (ret)
+		goto failed;
  /* Explicitly remove every live key; RESET is not assumed to erase keys. */
  for(i=0;i<11;i++)if(s->keyconf[i]) {
   ret=xrs_key_remove(&s->keys,i,s->keys.slots[i].owner,station_key_send,hw);
@@ -272,7 +276,10 @@ void xrs_runtime_stop(struct xradio_common *hw)
  ret=wsm_write_mib(hw,0x1009,rcpi,sizeof(rcpi),0);if(ret)goto failed;
  spin_lock_irqsave(&s->lock,flags);
  ret=xpc_reset(&s->policies);
- memset(&s->settings,0,sizeof(s->settings));memset(&s->ht,0,sizeof(s->ht));s->keychanging=false;
+	memset(&s->settings, 0, sizeof(s->settings));
+	memset(&s->ht, 0, sizeof(s->ht));
+	memset(&s->ba, 0, sizeof(s->ba));
+	s->keychanging = false;
  spin_unlock_irqrestore(&s->lock,flags);
  if(ret)goto failed;
  /* Retain TX generations and key owner counter across reconnects. */
@@ -442,14 +449,27 @@ void xrs_runtime_tx(struct xradio_common *hw,struct ieee80211_sta *sta,struct sk
  /* CCMP requires a confirmed key and mac80211-generated IV. */
  if(skb_linearize(skb)) goto drop;
  if(skb->len<24)goto drop;
+	/* Firmware owns ADDBA/DELBA exchange, including its own responses.
+	 * Do not send mac80211's duplicate BA action frames to the controller.
+	 */
+	if ((skb->data[0] & 0xfc) == 0xd0 && skb->len >= 25 &&
+	    skb->data[24] == WLAN_CATEGORY_BACK)
+		goto drop;
  ac=skb_get_queue_mapping(skb);if(ac>=4)goto drop;
  tx.queue=wsm_queue_id_to_wsm(ac);
  protected=!!(skb->data[1]&0x40);
  if(protected != !!key)goto drop;
- if((skb->data[0]&0x0c)==8) {
-  data_frame=true;
-  if(!smp_load_acquire(&s->associated) || !sta)goto drop;
-  tx.priority=ac==IEEE80211_AC_VO?6:ac==IEEE80211_AC_VI?5:4;
+	if ((skb->data[0] & 0x0c) == 8) {
+		int header;
+
+		data_frame = true;
+		if (!smp_load_acquire(&s->associated) || !sta)
+			goto drop;
+		header = xrs_data_header_size(skb->data, skb->len);
+
+		if (header < 0)
+			goto drop;
+		tx.priority = header == 26 ? skb->data[24] & 7 : 0;
   if(sta) {
    struct ieee80211_tx_rate selected[XRS_SELECTED_RATES];unsigned int j;
    const u16 represented=IEEE80211_TX_RC_MCS|IEEE80211_TX_RC_40_MHZ_WIDTH|
@@ -690,6 +710,16 @@ int xrs_runtime_rx(struct xradio_common *hw,const u8 *data,size_t size)
   dev_info(hw->pdev,"XR829 beacon accepted rate=%04x flags=%08x len=%zu\n",
            view.radio.rate,view.radio.flags,size);
  if(view.amsdu && !s->ht.enabled)goto out;
+	if (view.radio.flags & 0x08) {
+		unsigned int tid;
+
+		if (!s->ba.enabled || !view.rate.ht || (data[16] & 0xfc) != 0x88 ||
+		    size < 16 + 26 || (data[16 + 4] & 1))
+			goto out;
+		tid = data[16 + 24] & 15;
+		if (tid >= 8 || !(s->ba.rx & BIT(tid)))
+			goto out;
+	}
  if(view.radio.channel!=s->settings.channel || !xrs_ht_rx_allowed(&s->ht,&view.rate))goto out;
  skb=dev_alloc_skb(view.frame_size);if(!skb)goto out;
  skb_put_data(skb,data+16,view.frame_size);status=IEEE80211_SKB_RXCB(skb);
@@ -902,12 +932,54 @@ void xrs_bss_changed(struct ieee80211_hw *dev,struct ieee80211_vif *vif,
  ret=wsm_set_bss_params(hw,&params,0);if(ret)goto out;
  /* Match the current BSS slot timing; HT protection was set above. */
  ret=station_mib32(hw,0x0003,info->use_short_slot?9:20);if(ret)goto out;
- spin_lock_irqsave(&s->lock,irqflags);s->ht=negotiated;
+	ret = wsm_set_block_ack_policy(hw, negotiated.enabled ? XRS_BA_TIDS : 0,
+				       negotiated.enabled ? XRS_BA_TIDS : 0, 0);
+	if (ret)
+		goto out;
+	spin_lock_irqsave(&s->lock, irqflags);
+	s->ht = negotiated;
+	s->ba.enabled = negotiated.enabled;
+	if (!negotiated.enabled)
+		s->ba.rx = 0;
  smp_store_release(&s->associated,true);spin_unlock_irqrestore(&s->lock,irqflags);
 out:
  if(ret) {WRITE_ONCE(s->poisoned,true);WRITE_ONCE(hw->bh_error,1);dev_err(hw->pdev,"XR829 association setup failed%d\n",ret);}
  mutex_unlock(&s->control_lock);
  if(ret)ieee80211_connection_loss(vif);
+}
+
+/* Firmware owns TX sessions; RX callbacks only install/remove host reorder
+ * state. SSN and window are consumed by mac80211, not a fictitious WSM command.
+ */
+int xrs_ampdu_action(struct ieee80211_hw *dev, struct ieee80211_vif *vif,
+		     struct ieee80211_ampdu_params *params)
+{
+	struct xradio_common *hw = dev->priv;
+	struct xrs_runtime *s = hw->station;
+	unsigned long flags;
+	int ret = -EOPNOTSUPP;
+
+	if (!s || !params->sta || vif->type != NL80211_IFTYPE_STATION)
+		return -EINVAL;
+	mutex_lock(&s->control_lock);
+	spin_lock_irqsave(&s->lock, flags);
+	if (params->action == IEEE80211_AMPDU_RX_STOP) {
+		/* A late stop for an old AP must not clear the replacement BSS. */
+		ret = 0;
+		if (!s->associated ||
+		    !memcmp(params->sta->addr, s->settings.bssid, ETH_ALEN))
+			ret = xrs_ba_stop(&s->ba, params->tid);
+	} else if (params->action == IEEE80211_AMPDU_RX_START &&
+		   s->joined && s->associated && !s->poisoned && !s->closing &&
+		   READ_ONCE(hw->recovery_state) == XRS_RUNNING &&
+		   !READ_ONCE(hw->bh_error) &&
+		   !memcmp(params->sta->addr, s->settings.bssid, ETH_ALEN)) {
+		ret = xrs_ba_start(&s->ba, params->tid, params->ssn,
+				   params->buf_size);
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	mutex_unlock(&s->control_lock);
+	return ret;
 }
 
 /* Caller holds control_lock. Stop new frames; let BH finish prior frames.
@@ -1085,7 +1157,8 @@ void xrs_runtime_new_epoch(struct xradio_common *hw)
  memset(s->policy_ready,0,sizeof(s->policy_ready));
  memset(&s->keys,0,sizeof(s->keys));
  memset(&s->settings,0,sizeof(s->settings));
- memset(&s->ht,0,sizeof(s->ht));
+	memset(&s->ht, 0, sizeof(s->ht));
+	memset(&s->ba, 0, sizeof(s->ba));
  memset(&s->address,0,sizeof(s->address));
  xpc_init(&s->policies);
  s->enqueue_order=0;s->next_slot=0;s->sending=-1;

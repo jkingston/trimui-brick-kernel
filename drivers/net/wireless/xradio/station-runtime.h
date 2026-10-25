@@ -7,6 +7,8 @@ struct xradio_common; struct sk_buff; struct ieee80211_vif; struct ieee80211_hw;
 struct ieee80211_prep_tx_info; struct ieee80211_bss_conf;
 extern const bool allow_station;
 extern bool allow_ht;
+int xrs_ampdu_action(struct ieee80211_hw *dev, struct ieee80211_vif *vif,
+		     struct ieee80211_ampdu_params *params);
 u8 *xrs_runtime_command_buffer(struct xradio_common *hw);
 int xrs_runtime_init(struct xradio_common *hw);
 void xrs_runtime_free(struct xradio_common *hw);

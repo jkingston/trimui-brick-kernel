@@ -27,7 +27,9 @@ static inline int xrs_feedback_decode(struct xrs_feedback *out,const struct xrs_
 {
  struct xrs_feedback f={0};unsigned int i;int ret;
  /* Do not invent attempts from the final-rate field when firmware reports
-  * success without explicit ACK feedback. Keep every status rate invalid. */
+  * success without explicit ACK or with firmware-owned aggregation. Keep
+  * every status rate invalid rather than inventing per-MPDU attempts.
+  */
  if(xrs_tx_success_no_rate(c)) {*out=f;return 0;}
  if(c->flags)return -EOPNOTSUPP;
  for(i=0;i<6;i++) {

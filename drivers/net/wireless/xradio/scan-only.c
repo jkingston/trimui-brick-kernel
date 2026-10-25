@@ -514,15 +514,6 @@ static void scan_filter(struct ieee80211_hw *dev, unsigned int changed,
 	*total = 0;
 }
 
-/* mac80211 checks callback presence before the hardware AMPDU flag when
- * rate control requests BA. Explicitly decline until firmware/host BA
- * ownership and RX reorder are implemented; firmware BA masks stay zero. */
-static int xrs_ampdu_action(struct ieee80211_hw *hw,struct ieee80211_vif *vif,
-                            struct ieee80211_ampdu_params *params)
-{
- return -EOPNOTSUPP;
-}
-
 const struct ieee80211_ops xr829_scan_ops = {
  .ampdu_action = xrs_ampdu_action,
 	.set_key = xrs_set_key,

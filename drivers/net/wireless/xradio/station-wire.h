@@ -2,6 +2,7 @@
 #ifndef XR829_STATION_WIRE_H
 #define XR829_STATION_WIRE_H
 #include "xr829-wire.h"
+#include "station-ba.h"
 #include "rate-entry.h"
 /* All offsets in this file are explicit wire offsets, never native bitfields.
  * TX request includes WSM header. TX confirmation excludes WSM header.
@@ -107,10 +108,14 @@ struct xrs_tx_confirm {
 };
 /* Vendor XR829 and cw1200 report status-success NO_EXPLICIT_ACK completions
  * as successful TX. This is an ABI compatibility mapping, not proof that an
- * on-air ACK was observed. Rate feedback for this class remains unknown. */
+ * on-air ACK was observed. Firmware-owned aggregate/BlockAck completions also
+ * succeed, but do not expose enough per-MPDU retry information for rate feedback.
+ */
 static inline int xrs_tx_success_no_rate(const struct xrs_tx_confirm *c)
 {
- return !c->status && c->flags==0x08;
+	return !c->status && (c->flags == 0x08 ||
+		(!(c->flags & ~0x0d) && (c->flags & 0x0c) != 0x04 &&
+		 ((c->flags & 1) || (c->flags & 0x0c) == 0x0c)));
 }
 static inline int xrs_tx_success(const struct xrs_tx_confirm *c)
 {
@@ -197,8 +202,10 @@ static inline int xrs_rx_open_decode(struct xrs_rx_view *out, const u8 *data,
  u16 fc;
  if (size < 16 + 24 || size > 16 + 26 + 3839) return -EMSGSIZE;
  xrw_rx_decode(&v.radio, data, size);
- if (v.radio.status || v.radio.channel < 1 || v.radio.channel > 14 ||
-     xrs_rate_entry_decode(&v.rate,v.radio.rate) || (v.radio.flags & 0x7f)) return -EOPNOTSUPP;
+	if (v.radio.status || v.radio.channel < 1 || v.radio.channel > 14 ||
+	    xrs_rate_entry_decode(&v.rate, v.radio.rate) || (v.radio.flags & 7) ||
+	    xrs_ba_rx_flags(v.radio.flags))
+		return -EOPNOTSUPP;
  frame = data + 16; fc = xrw_get16(frame);
  if ((fc & 3) || (fc & 0x4400) || (xrw_get16(frame + 22) & 15))
   return -EOPNOTSUPP; /* version, more fragments, protected, fragment number */

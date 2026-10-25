@@ -230,10 +230,11 @@ static struct ieee80211_hw *xradio_init_common(size_t hw_priv_data_len)
 	hw->wiphy->flags &= ~(WIPHY_FLAG_AP_UAPSD |
 		WIPHY_FLAG_AP_PROBE_RESP_OFFLOAD | WIPHY_FLAG_PS_ON_BY_DEFAULT);
 	xradio_band_2ghz.ht_cap.ht_supported = allow_station && allow_ht;
-	/* First HT runtime qualification: one stream, HT20 long GI, 3839-byte
-	 * A-MSDU RX; no STBC/GF/HT40/SGI or block-ack aggregation yet. */
+	/* One stream, HT20 long GI and firmware-owned BA negotiation.
+	 * mac80211 reorders received MPDUs; no STBC/GF/HT40/SGI.
+	 */
 	xradio_band_2ghz.ht_cap.cap = 0;
-	xradio_band_2ghz.ht_cap.ampdu_factor = IEEE80211_HT_MAX_AMPDU_8K;
+	xradio_band_2ghz.ht_cap.ampdu_factor = IEEE80211_HT_MAX_AMPDU_32K;
 	xradio_band_2ghz.ht_cap.mcs.rx_highest = cpu_to_le16(65);
 	if (allow_station) { hw->queues = 4; hw->max_rates=4; hw->max_rate_tries=4; } /* Dynamic policies cover negotiated legacy and optional HT20 rates. */
 	xr829_scan_init(hw_priv);

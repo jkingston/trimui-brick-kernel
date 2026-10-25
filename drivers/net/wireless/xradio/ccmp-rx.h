@@ -20,10 +20,11 @@ static inline int xrs_ccmp_rx_decode(struct xrs_ccmp_rx_view *out,const u8 *data
  if(size<16+24+8+8 || size>16+26+8+3839+8)return -EMSGSIZE;
  xrw_rx_decode(&v.frame.radio,data,size);
  /* NO_KEY_FOUND/MIC failure are errors, regardless of the encryption flags. */
- if(v.frame.radio.status || v.frame.radio.channel<1 || v.frame.radio.channel>14 ||
-    xrs_rate_entry_decode(&v.frame.rate,v.frame.radio.rate) ||
-    (v.frame.radio.flags&7)!=3 || (v.frame.radio.flags&0x78))
-  return -EOPNOTSUPP; /* aggregate/defragmented unsupported */
+	if (v.frame.radio.status || v.frame.radio.channel < 1 ||
+	    v.frame.radio.channel > 14 ||
+	    xrs_rate_entry_decode(&v.frame.rate, v.frame.radio.rate) ||
+	    (v.frame.radio.flags & 7) != 3 || xrs_ba_rx_flags(v.frame.radio.flags))
+		return -EOPNOTSUPP;
  frame=data+16;fc=xrw_get16(frame);
  header=xrs_rx_data_header_size(frame,size-16);
  if(header<0)return header;
