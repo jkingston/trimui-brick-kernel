@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/interrupt-controller/allwinner,sun50i-a133-wakeupgen.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Allwinner A133 vendor firmware wakeup interrupt routing
+
+maintainers:
+  - Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+description: |
+  An interrupt domain above the GIC routes wake enable/disable requests to
+  the vendor secure monitor and its SCP. Ordinary interrupt operations are
+  forwarded to the GIC. The boot loader must initialize the matching monitor,
+  SCP firmware, DRAM parameters and service device tree before entering Linux.
+  This interface is not provided by native mainline Trusted Firmware-A.
+
+allOf:
+  - $ref: /schemas/interrupt-controller.yaml#
+
+properties:
+  compatible:
+    const: allwinner,sun50i-a133-wakeupgen
+
+  interrupt-controller: true
+
+  interrupt-parent: true
+
+  "#interrupt-cells":
+    const: 3
+    description: |
+      First cell is GIC_SPI (0); second is the SPI index, without the GIC
+      INTID offset of 32; third is the GIC interrupt trigger type.
+      PPIs must be connected directly to the GIC.
+
+required:
+  - compatible
+  - interrupt-controller
+  - interrupt-parent
+  - "#interrupt-cells"
+
+additionalProperties: false
+
+examples:
+  - |
+    interrupt-controller {
+        compatible = "allwinner,sun50i-a133-wakeupgen";
+        interrupt-controller;
+        interrupt-parent = <&gic>;
+        #interrupt-cells = <3>;
+    };
