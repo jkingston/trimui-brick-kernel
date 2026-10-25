@@ -10,6 +10,7 @@
 #include <linux/pwm.h>
 #include <linux/reset.h>
 #include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 #include "pwm-sun50i-a133-arith.h"
 #include "pwm-sun50i-a133-lifecycle.h"
 
@@ -257,8 +258,9 @@ MODULE_DEVICE_TABLE(of, brick_match);
 /* Hibernation is not a supported firmware or controller lifecycle. */
 static int brick_pm_prepare(struct device *dev)
 {
-	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ||
-	       pm_suspend_target_state == PM_SUSPEND_MEM ? 0 : -EBUSY;
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		return sun50i_a133_ccu_deep_ready();
+	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
 }
 static int brick_pm_suspend(struct device *dev)
 {
@@ -314,6 +316,10 @@ static int brick_pm_resume(struct device *dev)
 	if (!p->suspended)
 		goto out;
 	if (p->sleep_deep) {
+		/* A failed syscore restore must not be hidden by clock refcounts. */
+		ret = sun50i_a133_ccu_deep_ready();
+		if (ret)
+			goto fault;
 		ret = brick_bus_enable(p);
 		if (ret)
 			goto fault;
