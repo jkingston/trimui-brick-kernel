@@ -670,7 +670,9 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 		ret = PTR_ERR(mixer->bus_clk);
 		goto err_assert_reset;
 	}
-	clk_prepare_enable(mixer->bus_clk);
+	ret = clk_prepare_enable(mixer->bus_clk);
+	if (ret)
+		goto err_assert_reset;
 
 	mixer->mod_clk = devm_clk_get(dev, "mod");
 	if (IS_ERR(mixer->mod_clk)) {
@@ -684,10 +686,15 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 	 * reason for the mixer to be functional. Make sure it's the
 	 * case.
 	 */
-	if (mixer->cfg->mod_rate)
-		clk_set_rate(mixer->mod_clk, mixer->cfg->mod_rate);
+	if (mixer->cfg->mod_rate) {
+		ret = clk_set_rate(mixer->mod_clk, mixer->cfg->mod_rate);
+		if (ret)
+			goto err_disable_bus_clk;
+	}
 
-	clk_prepare_enable(mixer->mod_clk);
+	ret = clk_prepare_enable(mixer->mod_clk);
+	if (ret)
+		goto err_disable_bus_clk;
 
 	ret = sun8i_mixer_brick_de_init(dev);
 	if (ret) {
