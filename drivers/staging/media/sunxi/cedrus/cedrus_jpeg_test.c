@@ -2,6 +2,9 @@
 
 #include <kunit/test.h>
 
+#include <linux/sizes.h>
+#include <linux/videodev2.h>
+
 #include <media/v4l2-jpeg.h>
 
 #include "cedrus_jpeg.h"
@@ -112,10 +115,148 @@ static void cedrus_jpeg_header_is_standard_baseline(struct kunit *test)
 			   CEDRUS_JPEG_QUANT_SIZE);
 }
 
+static int cedrus_jpeg_test_prepare_source(struct cedrus_jpeg_source *source,
+					   u32 pixelformat,
+					   unsigned int width,
+					   unsigned int stride,
+					   size_t sizeimage)
+{
+	return cedrus_jpeg_prepare_source(source, pixelformat, width, 240,
+					  stride, sizeimage, 0xfbbe0000);
+}
+
+static int prepare_capture(struct cedrus_jpeg_capture *capture,
+			   dma_addr_t address, size_t capacity)
+{
+	return cedrus_jpeg_prepare_capture(capture, address, capacity,
+					   CEDRUS_JPEG_HEADER_SIZE);
+}
+
+static int finish_capture(void *buffer,
+			  const struct cedrus_jpeg_capture *capture,
+			  u32 status, u32 produced_bits, size_t *bytesused)
+{
+	return cedrus_jpeg_finish_capture(buffer, capture, status,
+					  produced_bits, bytesused);
+}
+
+static void cedrus_jpeg_nv12_source_contract(struct kunit *test)
+{
+	struct cedrus_jpeg_source source;
+	int ret;
+
+	ret = cedrus_jpeg_test_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					      320, 320, 320 * 240 * 3 / 2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, source.luma, (dma_addr_t)0xfbbe0000);
+	KUNIT_EXPECT_EQ(test, source.chroma, (dma_addr_t)0xfbbf2c00);
+	KUNIT_EXPECT_EQ(test, source.luma_size, (size_t)76800);
+	KUNIT_EXPECT_EQ(test, source.chroma_size, (size_t)38400);
+	KUNIT_EXPECT_EQ(test, source.stride, 320U);
+
+	ret = cedrus_jpeg_test_prepare_source(&source, V4L2_PIX_FMT_YUV420,
+					      320, 320, 320 * 240 * 3 / 2);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = cedrus_jpeg_test_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					      320, 336, 336 * 240 * 3 / 2);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = cedrus_jpeg_test_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					      318, 318, 318 * 240 * 3 / 2);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = cedrus_jpeg_test_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					      320, 320, 320 * 240);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	ret = cedrus_jpeg_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					 320, 240, 320, 320 * 240 * 3 / 2,
+					 0xfbbe0001);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = cedrus_jpeg_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					 320, 240, 320, 320 * 240 * 3 / 2,
+					 0xffff0000);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+	ret = cedrus_jpeg_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					 320, 240, 320, 320 * 240 * 3 / 2,
+					 0x100000000ULL);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+}
+
+static void cedrus_jpeg_capture_contract(struct kunit *test)
+{
+	struct cedrus_jpeg_capture capture;
+	int ret;
+
+	ret = prepare_capture(&capture, 0xfbc00000, SZ_4M);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, capture.start, 0x00fbc000U);
+	KUNIT_EXPECT_EQ(test, capture.end, 0x00ffffffU);
+	KUNIT_EXPECT_EQ(test, capture.offset,
+			CEDRUS_JPEG_HEADER_SIZE * 8U);
+	KUNIT_EXPECT_EQ(test, capture.limit, 0x02000000U);
+
+	ret = prepare_capture(&capture, 0xfbc00001, SZ_4M);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = prepare_capture(&capture, 0xfbc00000, SZ_4M - 1);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = cedrus_jpeg_prepare_capture(&capture, 0xfbc00000, 512, 511);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	ret = prepare_capture(&capture, 0xffff0000, SZ_1M);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+	ret = prepare_capture(&capture, 0x10000000,
+			      CEDRUS_JPEG_BITSTREAM_MAX_BITS / 8 + 256);
+	KUNIT_EXPECT_EQ(test, ret, -E2BIG);
+}
+
+static void cedrus_jpeg_capture_completion(struct kunit *test)
+{
+	struct cedrus_jpeg_capture capture;
+	u8 *buffer;
+	size_t bytesused = 0;
+	u32 status;
+	int ret;
+
+	buffer = kunit_kzalloc(test, 4096, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	ret = prepare_capture(&capture, 0x10000000, 4096);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = finish_capture(buffer, &capture, CEDRUS_JPEG_STATUS_FINISH,
+			     (CEDRUS_JPEG_HEADER_SIZE + 100) * 8, &bytesused);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, bytesused,
+			(size_t)CEDRUS_JPEG_HEADER_SIZE + 102);
+	KUNIT_EXPECT_EQ(test, buffer[CEDRUS_JPEG_HEADER_SIZE + 100],
+			(u8)0xff);
+	KUNIT_EXPECT_EQ(test, buffer[CEDRUS_JPEG_HEADER_SIZE + 101],
+			(u8)0xd9);
+
+	status = CEDRUS_JPEG_STATUS_FINISH | CEDRUS_JPEG_STATUS_BUFFER_FULL;
+	ret = finish_capture(buffer, &capture, status,
+			     (CEDRUS_JPEG_HEADER_SIZE + 100) * 8, &bytesused);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	status = CEDRUS_JPEG_STATUS_FINISH | CEDRUS_JPEG_STATUS_MB_OVERFLOW;
+	ret = finish_capture(buffer, &capture, status,
+			     (CEDRUS_JPEG_HEADER_SIZE + 100) * 8, &bytesused);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	ret = finish_capture(buffer, &capture, 0,
+			     (CEDRUS_JPEG_HEADER_SIZE + 100) * 8, &bytesused);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	ret = finish_capture(buffer, &capture, CEDRUS_JPEG_STATUS_FINISH,
+			     CEDRUS_JPEG_HEADER_SIZE * 8 + 1, &bytesused);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	ret = finish_capture(buffer, &capture, CEDRUS_JPEG_STATUS_FINISH,
+			     (CEDRUS_JPEG_HEADER_SIZE - 1) * 8, &bytesused);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	ret = finish_capture(buffer, &capture, CEDRUS_JPEG_STATUS_FINISH,
+			     (capture.capacity - 1) * 8, &bytesused);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+}
+
 static struct kunit_case cedrus_jpeg_test_cases[] = {
 	KUNIT_CASE(cedrus_jpeg_tables_match_stock),
 	KUNIT_CASE(cedrus_jpeg_quality_bounds),
 	KUNIT_CASE(cedrus_jpeg_header_is_standard_baseline),
+	KUNIT_CASE(cedrus_jpeg_nv12_source_contract),
+	KUNIT_CASE(cedrus_jpeg_capture_contract),
+	KUNIT_CASE(cedrus_jpeg_capture_completion),
 	{},
 };
 

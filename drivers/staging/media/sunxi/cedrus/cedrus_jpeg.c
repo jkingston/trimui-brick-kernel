@@ -10,8 +10,10 @@
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/overflow.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
+#include <linux/videodev2.h>
 
 #include <media/v4l2-jpeg.h>
 
@@ -217,4 +219,124 @@ int cedrus_jpeg_write_header(void *buffer, size_t size, unsigned int width,
 		return -EIO;
 
 	return CEDRUS_JPEG_HEADER_SIZE;
+}
+
+int cedrus_jpeg_prepare_source(struct cedrus_jpeg_source *source, u32 pixelformat,
+			       unsigned int width, unsigned int height,
+			       unsigned int bytesperline, size_t sizeimage,
+			       dma_addr_t address)
+{
+	size_t luma_size;
+	size_t chroma_size;
+	size_t required;
+
+	if (!source || pixelformat != V4L2_PIX_FMT_NV12)
+		return -EINVAL;
+
+	/*
+	 * Stock proves the A133 JPEG path with NV12 at 320x240.
+	 * Keep the initial contract on complete 16x16 MCU boundaries and tightly
+	 * packed lines. In particular, stock silently programmed a 320-pixel line
+	 * for a requested 336-pixel stride, so padded input must fail closed. The
+	 * 4096-pixel upper bound is the declared A133 JPEG dimension limit.
+	 */
+	if (width < 16 || height < 16 || width > 4096 || height > 4096 ||
+	    !IS_ALIGNED(width, 16) || !IS_ALIGNED(height, 16) ||
+	    bytesperline != width)
+		return -EINVAL;
+
+	if (!IS_ALIGNED(address, 16))
+		return -EINVAL;
+	if (address > U32_MAX)
+		return -ERANGE;
+
+	if (check_mul_overflow((size_t)bytesperline, (size_t)height,
+			       &luma_size))
+		return -EOVERFLOW;
+
+	chroma_size = luma_size / 2;
+	if (check_add_overflow(luma_size, chroma_size, &required))
+		return -EOVERFLOW;
+	if (sizeimage < required)
+		return -ENOSPC;
+	if (required - 1 > U32_MAX - (u32)address)
+		return -ERANGE;
+
+	source->luma = address;
+	source->chroma = address + luma_size;
+	source->luma_size = luma_size;
+	source->chroma_size = chroma_size;
+	source->width = width;
+	source->height = height;
+	source->stride = bytesperline;
+
+	return 0;
+}
+
+int cedrus_jpeg_prepare_capture(struct cedrus_jpeg_capture *capture,
+				dma_addr_t address, size_t capacity,
+				size_t prefix)
+{
+	dma_addr_t end;
+	u32 limit;
+
+	if (!capture || !capacity ||
+	    !IS_ALIGNED(address, CEDRUS_JPEG_BITSTREAM_ALIGNMENT) ||
+	    !IS_ALIGNED(capacity, CEDRUS_JPEG_BITSTREAM_ALIGNMENT))
+		return -EINVAL;
+	if (address > U32_MAX || capacity - 1 > U32_MAX - (u32)address)
+		return -ERANGE;
+	if (capacity < 2 || prefix > capacity - 2)
+		return -ENOSPC;
+	/* Stock caps this bit count for the Brick's low IC version 0x12010. */
+	if (capacity > CEDRUS_JPEG_BITSTREAM_MAX_BITS / 8)
+		return -E2BIG;
+	if (check_mul_overflow((u32)capacity, 8U, &limit))
+		return -EOVERFLOW;
+
+	end = address + capacity - 1;
+	capture->start = address >> 8;
+	capture->end = end >> 8;
+	capture->offset = prefix << 3;
+	capture->limit = limit;
+	capture->prefix = prefix;
+	capture->capacity = capacity;
+
+	return 0;
+}
+
+int cedrus_jpeg_finish_capture(void *buffer,
+			       const struct cedrus_jpeg_capture *capture,
+			       u32 status, u32 produced_bits, size_t *bytesused)
+{
+	size_t produced;
+	u8 *data = buffer;
+
+	if (!buffer || !capture || !bytesused)
+		return -EINVAL;
+	if (capture->capacity < 2 || capture->prefix > capture->capacity - 2)
+		return -EINVAL;
+	if (status & CEDRUS_JPEG_STATUS_BUFFER_FULL)
+		return -ENOSPC;
+	if (status & CEDRUS_JPEG_STATUS_MB_OVERFLOW)
+		return -EIO;
+	if (!(status & CEDRUS_JPEG_STATUS_FINISH))
+		return -EIO;
+	if (produced_bits > capture->limit)
+		return -ENOSPC;
+	if (produced_bits & 7)
+		return -EIO;
+
+	produced = produced_bits >> 3;
+	if (produced < capture->prefix)
+		return -EIO;
+	if (produced > capture->capacity - 2)
+		return -ENOSPC;
+
+	/* The A133 encoder reports entropy bytes without the EOI marker. */
+	data[produced] = 0xff;
+	data[produced + 1] = 0xd9;
+	*bytesused = produced + 2;
+
+	return 0;
 }
