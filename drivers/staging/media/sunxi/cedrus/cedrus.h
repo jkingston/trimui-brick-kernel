@@ -25,6 +25,7 @@
 #include <linux/atomic.h>
 #include <linux/iopoll.h>
 #include <linux/platform_device.h>
+#include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
 #define CEDRUS_NAME			"cedrus"
@@ -209,6 +210,8 @@ struct cedrus_dev {
 	bool		requires_iommu;
 	int		irq;
 	atomic_t	iommu_fault_state;
+	/* Serialize IOMMU fault publication against job completion. */
+	spinlock_t	iommu_completion_lock;
 
 	struct delayed_work	watchdog_work;
 	struct work_struct	iommu_fault_work;

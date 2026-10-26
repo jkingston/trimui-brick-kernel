@@ -466,6 +466,7 @@ static int cedrus_probe(struct platform_device *pdev)
 	dev->vfd = cedrus_video_device;
 	dev->dev = &pdev->dev;
 	dev->pdev = pdev;
+	spin_lock_init(&dev->iommu_completion_lock);
 
 	ret = cedrus_hw_probe(dev);
 	if (ret) {

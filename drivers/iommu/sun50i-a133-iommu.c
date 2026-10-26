@@ -671,6 +671,20 @@ static irqreturn_t a133_irq(int irq, void *data)
 	writel(0, iommu->base + A133_INT_ENABLE);
 	iommu->faulted |= masters;
 	writel(~iommu->faulted, iommu->base + A133_RESET);
+
+	/* Publish the fault to each consumer immediately after quarantine. This
+	 * lets a separate completion IRQ yield ownership before the slower
+	 * diagnostics and generic fault reporting below.
+	 */
+	for (master = 0; master < A133_MASTERS; master++) {
+		if (!(masters & BIT(master)))
+			continue;
+		client = iommu->clients[master];
+		if (client && client->fault_handler)
+			client->fault_handler(client->dev, &faults[master],
+					      client->fault_data);
+	}
+
 	/* The blamed interfaces are now unable to retry. Clear the captured
 	 * status and continue reporting independent faults from other masters.
 	 */
@@ -692,10 +706,7 @@ static irqreturn_t a133_irq(int irq, void *data)
 			report_iommu_fault(&iommu->installed->domain, client->dev,
 					   faults[master].iova,
 					   faults[master].flags);
-		if (client && client->fault_handler)
-			client->fault_handler(client->dev, &faults[master],
-					      client->fault_data);
-		else
+		if (!client || !client->fault_handler)
 			dev_err(iommu->dev,
 				"master %u remains quarantined: no recovery handler\n",
 				master);

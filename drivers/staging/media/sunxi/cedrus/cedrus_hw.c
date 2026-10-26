@@ -138,23 +138,27 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 	enum vb2_buffer_state state;
 	enum cedrus_irq_status status;
 	unsigned long deadline = dev->watchdog_work.timer.expires;
+	unsigned long flags;
+	irqreturn_t ret = IRQ_HANDLED;
 
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
 	if (unlikely(atomic_read(&dev->iommu_fault_state) !=
 		     CEDRUS_IOMMU_READY))
-		return IRQ_HANDLED;
+		goto out;
 
 	/*
 	 * If cancel_delayed_work returns false it means watchdog already
 	 * executed and finished the job.
 	 */
 	if (!cancel_delayed_work(&dev->watchdog_work))
-		return IRQ_HANDLED;
+		goto out;
 
 	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
 	if (!ctx) {
 		v4l2_err(&dev->v4l2_dev,
 			 "Instance released before the end of transaction\n");
-		return IRQ_NONE;
+		ret = IRQ_NONE;
+		goto out;
 	}
 
 	status = ctx->current_codec->irq_status(ctx);
@@ -167,7 +171,8 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 		 */
 		schedule_delayed_work(&dev->watchdog_work,
 				      time_after(deadline, now) ? deadline - now : 1);
-		return IRQ_NONE;
+		ret = IRQ_NONE;
+		goto out;
 	}
 
 	ctx->current_codec->irq_disable(ctx);
@@ -178,16 +183,25 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 	else
 		state = VB2_BUF_STATE_DONE;
 
-	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev, ctx->fh.m2m_ctx,
-					 state);
+	/* The IOMMU callback publishes FAULT_PENDING before taking this lock.
+	 * Recheck after acknowledging the VE source so a fault always owns the
+	 * completion when the two interrupts overlap.
+	 */
+	if (likely(atomic_read(&dev->iommu_fault_state) ==
+		   CEDRUS_IOMMU_READY))
+		v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev,
+						 ctx->fh.m2m_ctx, state);
 
-	return IRQ_HANDLED;
+out:
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+	return ret;
 }
 
 void cedrus_watchdog(struct work_struct *work)
 {
 	struct cedrus_dev *dev;
 	struct cedrus_ctx *ctx;
+	unsigned long flags;
 	int ret;
 
 	dev = container_of(to_delayed_work(work),
@@ -205,8 +219,15 @@ void cedrus_watchdog(struct work_struct *work)
 	if (ret && dev->requires_iommu)
 		panic("%s: VE reset failed (%d); DMA buffers remain owned",
 		      dev_name(dev->dev), ret);
-	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev, ctx->fh.m2m_ctx,
-					 VB2_BUF_STATE_ERROR);
+
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	if (likely(atomic_read(&dev->iommu_fault_state) ==
+		   CEDRUS_IOMMU_READY) &&
+	    ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev))
+		v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev,
+						 ctx->fh.m2m_ctx,
+						 VB2_BUF_STATE_ERROR);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 }
 
 static void cedrus_iommu_fault(struct device *device,
@@ -214,10 +235,18 @@ static void cedrus_iommu_fault(struct device *device,
 			       void *data)
 {
 	struct cedrus_dev *dev = data;
+	unsigned long flags;
 
 	if (atomic_cmpxchg(&dev->iommu_fault_state, CEDRUS_IOMMU_READY,
 			   CEDRUS_IOMMU_FAULT_PENDING) != CEDRUS_IOMMU_READY)
 		return;
+
+	/* Pair with the VE IRQ and watchdog completion critical sections. The
+	 * state is published first so an already-running completion recheck also
+	 * yields ownership to the fault path.
+	 */
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 
 	v4l2_err(&dev->v4l2_dev,
 		 "IOMMU fault at %pad (master %u, %s%s, status %#x)\n",
@@ -260,9 +289,10 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 		}
 	}
 
-	enable_irq(dev->irq);
-	if (recovered)
+	if (recovered) {
 		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
+		enable_irq(dev->irq);
+	}
 
 	/* A racing VE interrupt or watchdog may already have retired the job. */
 	if (ctx && ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev))
