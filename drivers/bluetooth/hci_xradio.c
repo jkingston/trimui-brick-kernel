@@ -403,6 +403,51 @@ static int xr_hci_cmd(struct hci_dev *hdev, u16 opcode, const void *params,
 	kfree_skb(skb);
 	return err;
 }
+
+/* FC0A changes the controller's public address in RAM.  Stock follows it with
+ * Reset, so require that sequence and an independent Read BD_ADDR before the
+ * Bluetooth core is allowed to publish the new identity.
+ */
+static int xr_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+{
+	u8 params[9] = { 0x02, 0x00, 0x06 };
+	u8 reply[7];
+	struct sk_buff *skb;
+	int err;
+
+	memcpy(params + 3, bdaddr->b, sizeof(bdaddr->b));
+	skb = __hci_cmd_sync(hdev, 0xfc0a, sizeof(params), params,
+			     HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+	err = skb->len == 1 && !skb->data[0] ? 0 : -EPROTO;
+	kfree_skb(skb);
+	if (err)
+		return err;
+
+	skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+	err = skb->len == 1 && !skb->data[0] ? 0 : -EPROTO;
+	kfree_skb(skb);
+	if (err)
+		return err;
+
+	skb = __hci_cmd_sync(hdev, HCI_OP_READ_BD_ADDR, 0, NULL,
+			     HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+	if (skb->len != sizeof(reply) || skb->data[0]) {
+		err = -EPROTO;
+	} else {
+		memcpy(reply, skb->data, sizeof(reply));
+		err = memcmp(reply + 1, bdaddr->b, sizeof(bdaddr->b)) ?
+			-EADDRNOTAVAIL : 0;
+	}
+	kfree_skb(skb);
+	return err;
+}
+
 static int xr_setup(struct hci_uart *hu)
 {
 	struct xr *xr = xr_of(hu);
@@ -413,6 +458,7 @@ static int xr_setup(struct hci_uart *hu)
 	unsigned long flags;
 	int err;
 
+	hdev->set_bdaddr = xr_set_bdaddr;
 	hdev->shutdown = xr_shutdown;
 	hdev->wakeup = xr_wakeup;
 	hci_set_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
