@@ -18,13 +18,13 @@ config VIDEO_SUNXI_CEDRUS
 	  will be called sunxi-cedrus.
 
 config VIDEO_SUNXI_CEDRUS_ENCODER_CORE
-	bool "Allwinner Cedrus encoder contract helpers"
+	bool "Allwinner Cedrus encoder frontend and contract helpers"
 	depends on VIDEO_SUNXI_CEDRUS
 	help
-	  Build the hardware-contract helpers used by a future stateful Cedrus
-	  encoder.  The helpers cover only register fields and behavior established
-	  from SoC documentation, vendor source and runtime traces.  Selecting this
-	  option does not register or advertise an encoder video node.
+	  Build the stateful V4L2 mem2mem encoder frontend and hardware-contract
+	  helpers. The frontend remains hidden unless a SoC backend supplies every
+	  required lifecycle callback, standard format and standard control, and
+	  satisfies the complete encoder contract. No current variant does so.
 
 config VIDEO_SUNXI_CEDRUS_ENCODER_CORE_KUNIT_TEST
 	bool "KUnit tests for Cedrus encoder contract helpers" if !KUNIT_ALL_TESTS
@@ -32,8 +32,8 @@ config VIDEO_SUNXI_CEDRUS_ENCODER_CORE_KUNIT_TEST
 	depends on VIDEO_SUNXI_CEDRUS_ENCODER_CORE
 	default KUNIT_ALL_TESTS
 	help
-	  Run tests for the fail-closed encoder backend gate and the proven
-	  A133 source, bitstream, interrupt and QP-field register contracts.
+	  Run tests for the fail-closed encoder backend/frontend gate and the
+	  proven A133 source, bitstream, interrupt and QP-field register contracts.
 	  The tests exercise only pure contract helpers.  They do not access
 	  encoder hardware or register an encoder video node.
 

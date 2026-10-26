@@ -28,6 +28,9 @@
 #include "cedrus_video.h"
 #include "cedrus_dec.h"
 #include "cedrus_hw.h"
+#include "cedrus_job.h"
+#include "cedrus_enc_video.h"
+#include "cedrus_enc.h"
 
 static int cedrus_try_ctrl(struct v4l2_ctrl *ctrl)
 {
@@ -444,6 +447,7 @@ static const struct video_device cedrus_video_device = {
 
 static const struct v4l2_m2m_ops cedrus_m2m_ops = {
 	.device_run	= cedrus_device_run,
+	.job_abort	= cedrus_job_abort,
 };
 
 static const struct media_device_ops cedrus_m2m_media_ops = {
@@ -526,6 +530,10 @@ static int cedrus_probe(struct platform_device *pdev)
 	v4l2_info(&dev->v4l2_dev,
 		  "Device registered as /dev/video%d\n", vfd->num);
 
+	ret = cedrus_enc_video_register(dev);
+	if (ret)
+		goto err_video;
+
 	ret = v4l2_m2m_register_media_controller(dev->m2m_dev, vfd,
 						 MEDIA_ENT_F_PROC_VIDEO_DECODER);
 	if (ret) {
@@ -545,6 +553,7 @@ static int cedrus_probe(struct platform_device *pdev)
 err_m2m_mc:
 	v4l2_m2m_unregister_media_controller(dev->m2m_dev);
 err_video:
+	cedrus_enc_video_unregister(dev);
 	video_unregister_device(&dev->vfd);
 err_media:
 	media_device_cleanup(&dev->mdev);
@@ -563,7 +572,9 @@ static void cedrus_remove(struct platform_device *pdev)
 {
 	struct cedrus_dev *dev = platform_get_drvdata(pdev);
 
+	v4l2_m2m_suspend(dev->m2m_dev);
 	cancel_delayed_work_sync(&dev->watchdog_work);
+	cedrus_enc_video_unregister(dev);
 	if (media_devnode_is_registered(dev->mdev.devnode)) {
 		media_device_unregister(&dev->mdev);
 		v4l2_m2m_unregister_media_controller(dev->m2m_dev);
@@ -744,13 +755,19 @@ static int cedrus_suspend(struct device *device)
 	 */
 	v4l2_m2m_suspend(dev->m2m_dev);
 	ret = cedrus_iommu_fault_flush(dev);
+	if (!ret && IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE) &&
+	    dev->enc_ops)
+		ret = dev->enc_ops->suspend(dev);
 	if (ret) {
 		v4l2_m2m_resume(dev->m2m_dev);
 		return ret;
 	}
 	ret = pm_runtime_force_suspend(device);
-	if (ret)
+	if (ret) {
+		if (dev->enc_ops)
+			dev->enc_ops->resume(dev);
 		v4l2_m2m_resume(dev->m2m_dev);
+	}
 
 	return ret;
 }
@@ -763,6 +780,13 @@ static int cedrus_resume(struct device *device)
 	ret = pm_runtime_force_resume(device);
 	if (ret)
 		return ret;
+	if (IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE) && dev->enc_ops) {
+		ret = dev->enc_ops->resume(dev);
+		if (ret) {
+			pm_runtime_force_suspend(device);
+			return ret;
+		}
+	}
 
 	v4l2_m2m_resume(dev->m2m_dev);
 

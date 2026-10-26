@@ -121,6 +121,7 @@ struct cedrus_buffer {
 };
 
 struct cedrus_ctx {
+	bool				is_encoder;
 	struct v4l2_fh			fh;
 	struct cedrus_dev		*dev;
 
@@ -186,14 +187,20 @@ struct cedrus_variant {
 	unsigned int	capabilities;
 	unsigned int	mod_rate;
 	bool		requires_iommu;
-#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
 	const struct cedrus_enc_backend_ops *enc_ops;
-#endif
 };
 
 struct cedrus_dev {
 	struct v4l2_device	v4l2_dev;
 	struct video_device	vfd;
+	struct video_device	enc_vfd;
+	struct media_pad	enc_source_pad;
+	struct media_entity	enc_sink;
+	struct media_pad	enc_sink_pad;
+	struct media_entity	enc_proc;
+	struct media_pad	enc_proc_pads[2];
+	struct media_intf_devnode *enc_intf;
+	bool			enc_media_registered;
 	struct media_device	mdev;
 	struct media_pad	pad[2];
 	struct platform_device	*pdev;
@@ -213,15 +220,16 @@ struct cedrus_dev {
 
 	unsigned int		capabilities;
 	bool		requires_iommu;
-#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
 	const struct cedrus_enc_backend_ops *enc_ops;
-#endif
 	int		irq;
 	atomic_t	iommu_fault_state;
 	/* Keep process-context VE programming inside fault recovery. */
 	struct mutex		iommu_fault_mutex;
 	/* Serialize IOMMU fault publication against job completion. */
 	spinlock_t	iommu_completion_lock;
+	/* Owned by exactly one context from the shared mem2mem scheduler. */
+	struct cedrus_ctx	*job_ctx;
+	bool			job_running;
 
 	struct delayed_work	watchdog_work;
 	struct work_struct	iommu_fault_work;

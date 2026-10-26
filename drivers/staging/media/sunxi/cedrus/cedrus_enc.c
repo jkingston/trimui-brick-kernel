@@ -9,6 +9,7 @@
 
 #include <linux/errno.h>
 #include <linux/limits.h>
+#include <linux/log2.h>
 #include <linux/overflow.h>
 
 #include <linux/videodev2.h>
@@ -21,6 +22,62 @@
 #define CEDRUS_A133_ENC_ADDR_UNIT	256U
 #define CEDRUS_A133_ENC_MAX_DIMENSION	4096U
 
+bool cedrus_enc_control_is_standard(u32 id)
+{
+	switch (id) {
+	case V4L2_CID_MPEG_VIDEO_BITRATE:
+	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
+	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+	case V4L2_CID_MPEG_VIDEO_B_FRAMES:
+	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
+	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
+	case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
+	case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
+	case V4L2_CID_MPEG_VIDEO_H264_MAX_QP:
+	case V4L2_CID_JPEG_COMPRESSION_QUALITY:
+		return true;
+	default:
+		return false;
+	}
+}
+
+int cedrus_enc_format_validate(const struct cedrus_enc_format *format)
+{
+	if (!format || !format->pixelformat ||
+	    (format->direction != CEDRUS_ENC_FORMAT_RAW &&
+	     format->direction != CEDRUS_ENC_FORMAT_CODED) ||
+	    !format->min_width || format->min_width > format->max_width ||
+	    !format->min_height || format->min_height > format->max_height ||
+	    !is_power_of_2(format->width_align) ||
+	    !is_power_of_2(format->height_align) ||
+	    !is_power_of_2(format->buffer_align) ||
+	    !IS_ALIGNED(format->max_width, format->width_align) ||
+	    !IS_ALIGNED(format->max_height, format->height_align))
+		return -EINVAL;
+
+	if (format->direction == CEDRUS_ENC_FORMAT_RAW) {
+		u64 max_size;
+
+		if (format->pixelformat != V4L2_PIX_FMT_NV12 &&
+		    format->pixelformat != V4L2_PIX_FMT_YUV420)
+			return -EOPNOTSUPP;
+		if (!is_power_of_2(format->stride_align))
+			return -EINVAL;
+		max_size = (u64)ALIGN(format->max_width, format->stride_align) *
+			   format->max_height * 3 / 2;
+		if (max_size > U32_MAX)
+			return -ERANGE;
+	} else {
+		if (format->pixelformat != V4L2_PIX_FMT_H264 &&
+		    format->pixelformat != V4L2_PIX_FMT_JPEG)
+			return -EOPNOTSUPP;
+		if (format->stride_align || !format->min_sizeimage)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 {
 	if (!ops)
@@ -30,11 +87,46 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 	    CEDRUS_ENC_CONTRACT_REQUIRED)
 		return -EOPNOTSUPP;
 
-	if (!ops->start_streaming || !ops->stop_streaming ||
-	    !ops->prepare_job || !ops->trigger || !ops->irq_status ||
-	    !ops->irq_ack || !ops->abort || !ops->iommu_fault ||
-	    !ops->suspend || !ops->resume)
+	if (!ops->formats || !ops->num_formats || !ops->controls ||
+	    !ops->num_controls || !ops->s_ctrl || !ops->supports_pair ||
+	    !ops->start_streaming ||
+	    !ops->stop_streaming || !ops->prepare_job || !ops->trigger ||
+	    !ops->irq_status || !ops->irq_ack || !ops->abort ||
+	    !ops->iommu_fault || !ops->suspend || !ops->resume)
 		return -EINVAL;
+
+	{
+		bool raw = false, coded = false;
+		unsigned int i;
+
+		for (i = 0; i < ops->num_formats; i++) {
+			int ret = cedrus_enc_format_validate(&ops->formats[i]);
+
+			if (ret)
+				return ret;
+			raw |= ops->formats[i].direction == CEDRUS_ENC_FORMAT_RAW;
+			coded |= ops->formats[i].direction == CEDRUS_ENC_FORMAT_CODED;
+		}
+		if (!raw || !coded)
+			return -EINVAL;
+		for (i = 0; i < ops->num_formats; i++) {
+			unsigned int j;
+
+			if (ops->formats[i].direction != CEDRUS_ENC_FORMAT_RAW)
+				continue;
+			for (j = 0; j < ops->num_formats; j++) {
+				if (ops->formats[j].direction != CEDRUS_ENC_FORMAT_CODED)
+					continue;
+				if (!ops->supports_pair(ops->formats[i].pixelformat,
+						ops->formats[j].pixelformat))
+					return -EINVAL;
+			}
+		}
+		for (i = 0; i < ops->num_controls; i++)
+			if (!cedrus_enc_control_is_standard(ops->controls[i].id) ||
+			    ops->controls[i].ops)
+				return -EINVAL;
+	}
 
 	return 0;
 }

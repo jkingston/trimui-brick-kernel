@@ -14,6 +14,11 @@
 #include <linux/bits.h>
 #include <linux/types.h>
 
+#include <media/v4l2-ctrls.h>
+
+struct cedrus_ctx;
+struct cedrus_dev;
+
 enum cedrus_enc_contract {
 	CEDRUS_ENC_CONTRACT_ENGINE_ARBITRATION = BIT_ULL(0),
 	CEDRUS_ENC_CONTRACT_SOURCE_LAYOUT      = BIT_ULL(1),
@@ -58,18 +63,41 @@ enum cedrus_enc_irq_status {
 	CEDRUS_ENC_IRQ_OK,
 };
 
+#define CEDRUS_ENC_FORMAT_RAW		BIT(0)
+#define CEDRUS_ENC_FORMAT_CODED	BIT(1)
+
+struct cedrus_enc_format {
+	u32 pixelformat;
+	u32 direction;
+	u32 min_width;
+	u32 max_width;
+	u32 min_height;
+	u32 max_height;
+	u32 width_align;
+	u32 height_align;
+	u32 stride_align;
+	u32 buffer_align;
+	u32 min_sizeimage;
+};
+
 struct cedrus_enc_backend_ops {
 	u64 contract;
-	int (*start_streaming)(void *priv);
-	void (*stop_streaming)(void *priv);
-	int (*prepare_job)(void *priv);
-	void (*trigger)(void *priv);
-	enum cedrus_enc_irq_status (*irq_status)(void *priv);
-	void (*irq_ack)(void *priv);
-	int (*abort)(void *priv);
-	void (*iommu_fault)(void *priv);
-	int (*suspend)(void *priv);
-	void (*resume)(void *priv);
+	const struct cedrus_enc_format *formats;
+	unsigned int num_formats;
+	const struct v4l2_ctrl_config *controls;
+	unsigned int num_controls;
+	int (*s_ctrl)(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl);
+	bool (*supports_pair)(u32 raw_pixelformat, u32 coded_pixelformat);
+	int (*start_streaming)(struct cedrus_ctx *ctx);
+	void (*stop_streaming)(struct cedrus_ctx *ctx);
+	int (*prepare_job)(struct cedrus_ctx *ctx);
+	void (*trigger)(struct cedrus_ctx *ctx);
+	enum cedrus_enc_irq_status (*irq_status)(struct cedrus_ctx *ctx);
+	void (*irq_ack)(struct cedrus_ctx *ctx);
+	int (*abort)(struct cedrus_ctx *ctx);
+	void (*iommu_fault)(struct cedrus_ctx *ctx);
+	int (*suspend)(struct cedrus_dev *dev);
+	int (*resume)(struct cedrus_dev *dev);
 };
 
 /* Values to program into the A133 input preprocessor for one raw frame. */
@@ -93,6 +121,8 @@ struct cedrus_a133_enc_bitstream {
 };
 
 int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops);
+int cedrus_enc_format_validate(const struct cedrus_enc_format *format);
+bool cedrus_enc_control_is_standard(u32 id);
 
 int cedrus_a133_h264_enc_source_prepare(u32 pixelformat, u32 width,
 					u32 height, u32 bytesperline,

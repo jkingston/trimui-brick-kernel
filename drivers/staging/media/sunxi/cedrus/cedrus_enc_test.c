@@ -9,39 +9,78 @@
 
 #include "cedrus_enc.h"
 
-static int cedrus_enc_test_start(void *priv)
+static const struct cedrus_enc_format cedrus_enc_test_formats[] = {
+	{
+		.pixelformat = V4L2_PIX_FMT_NV12,
+		.direction = CEDRUS_ENC_FORMAT_RAW,
+		.min_width = 16, .max_width = 4096,
+		.min_height = 16, .max_height = 4096,
+		.width_align = 16, .height_align = 16,
+		.stride_align = 16, .buffer_align = 1,
+	},
+	{
+		.pixelformat = V4L2_PIX_FMT_H264,
+		.direction = CEDRUS_ENC_FORMAT_CODED,
+		.min_width = 16, .max_width = 4096,
+		.min_height = 16, .max_height = 4096,
+		.width_align = 16, .height_align = 16,
+		.buffer_align = 256, .min_sizeimage = 256,
+	},
+};
+
+static const struct v4l2_ctrl_config cedrus_enc_test_controls[] = {
+	{ .id = V4L2_CID_MPEG_VIDEO_BITRATE },
+};
+
+static bool cedrus_enc_test_pair(u32 raw_pixelformat, u32 coded_pixelformat)
+{
+	return raw_pixelformat == V4L2_PIX_FMT_NV12 &&
+	       coded_pixelformat == V4L2_PIX_FMT_H264;
+}
+
+static int cedrus_enc_test_s_ctrl(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl)
 {
 	return 0;
 }
 
-static void cedrus_enc_test_stop(void *priv)
-{
-}
-
-static int cedrus_enc_test_prepare(void *priv)
+static int cedrus_enc_test_start(struct cedrus_ctx *ctx)
 {
 	return 0;
 }
 
-static void cedrus_enc_test_trigger(void *priv)
+static void cedrus_enc_test_stop(struct cedrus_ctx *ctx)
 {
 }
 
-static enum cedrus_enc_irq_status cedrus_enc_test_status(void *priv)
+static int cedrus_enc_test_prepare(struct cedrus_ctx *ctx)
+{
+	return 0;
+}
+
+static void cedrus_enc_test_trigger(struct cedrus_ctx *ctx)
+{
+}
+
+static enum cedrus_enc_irq_status cedrus_enc_test_status(struct cedrus_ctx *ctx)
 {
 	return CEDRUS_ENC_IRQ_NONE;
 }
 
-static int cedrus_enc_test_abort(void *priv)
+static int cedrus_enc_test_abort(struct cedrus_ctx *ctx)
 {
 	return 0;
 }
 
-static void cedrus_enc_test_fault(void *priv)
+static void cedrus_enc_test_fault(struct cedrus_ctx *ctx)
 {
 }
 
-static int cedrus_enc_test_suspend(void *priv)
+static int cedrus_enc_test_suspend(struct cedrus_dev *dev)
+{
+	return 0;
+}
+
+static int cedrus_enc_test_resume(struct cedrus_dev *dev)
 {
 	return 0;
 }
@@ -57,6 +96,12 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 {
 	struct cedrus_enc_backend_ops ops = {
 		.contract = CEDRUS_A133_H264_ENC_CONTRACT,
+		.formats = cedrus_enc_test_formats,
+		.num_formats = ARRAY_SIZE(cedrus_enc_test_formats),
+		.controls = cedrus_enc_test_controls,
+		.num_controls = ARRAY_SIZE(cedrus_enc_test_controls),
+		.s_ctrl = cedrus_enc_test_s_ctrl,
+		.supports_pair = cedrus_enc_test_pair,
 		.start_streaming = cedrus_enc_test_start,
 		.stop_streaming = cedrus_enc_test_stop,
 		.prepare_job = cedrus_enc_test_prepare,
@@ -66,7 +111,7 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 		.abort = cedrus_enc_test_abort,
 		.iommu_fault = cedrus_enc_test_fault,
 		.suspend = cedrus_enc_test_suspend,
-		.resume = cedrus_enc_test_stop,
+		.resume = cedrus_enc_test_resume,
 	};
 
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(NULL), -EINVAL);
@@ -76,6 +121,9 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), 0);
 
 	ops.abort = NULL;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+	ops.abort = cedrus_enc_test_abort;
+	ops.formats = NULL;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
 }
 
@@ -186,7 +234,25 @@ static void cedrus_enc_test_qp_field(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
+static void cedrus_enc_test_frontend_contract(struct kunit *test)
+{
+	struct cedrus_enc_format format = cedrus_enc_test_formats[0];
+	bool standard;
+
+	KUNIT_EXPECT_EQ(test, cedrus_enc_format_validate(&format), 0);
+	standard = cedrus_enc_control_is_standard(V4L2_CID_MPEG_VIDEO_BITRATE);
+	KUNIT_EXPECT_TRUE(test, standard);
+	KUNIT_EXPECT_FALSE(test, cedrus_enc_control_is_standard(V4L2_CID_PRIVATE_BASE));
+
+	format.stride_align = 3;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_format_validate(&format), -EINVAL);
+	format = cedrus_enc_test_formats[1];
+	format.stride_align = 16;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_format_validate(&format), -EINVAL);
+}
+
 static struct kunit_case cedrus_enc_test_cases[] = {
+	KUNIT_CASE(cedrus_enc_test_frontend_contract),
 	KUNIT_CASE(cedrus_enc_test_backend_gate),
 	KUNIT_CASE(cedrus_enc_test_planar_source),
 	KUNIT_CASE(cedrus_enc_test_nv12_source),
