@@ -9,8 +9,11 @@
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/slab.h>
 #include <linux/sizes.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
+#include <linux/suspend.h>
 
 #define A133_MASTERS 7
 #define A133_ALL GENMASK(6, 0)
@@ -435,6 +438,80 @@ static irqreturn_t a133_irq(int irq, void *data)
 	      dev_name(iommu->dev), status);
 }
 
+static int a133_restore(struct a133_iommu *iommu)
+{
+	unsigned long flags;
+	dma_addr_t root;
+	u32 bypass;
+	int ret;
+
+	spin_lock_irqsave(&iommu->lock, flags);
+	root = iommu->installed ? iommu->installed->dt_dma : iommu->empty_dma;
+	bypass = iommu->installed ? A133_ALL & ~iommu->attached : A133_ALL;
+
+	/* Stock rebuilds the IOMMU root after system sleep. Keep every master
+	 * bypassed until the retained root has been published and flushed.
+	 */
+	writel(0, iommu->base + A133_INT_ENABLE);
+	writel(A133_ALL, iommu->base + A133_BYPASS);
+	dma_wmb();
+	writel(lower_32_bits(root), iommu->base + A133_TTB);
+	writel(0x5f, iommu->base + A133_PREFETCH);
+	writel(0, iommu->base + A133_MODE);
+	ret = a133_flush(iommu);
+	if (ret)
+		goto failed;
+	writel(0x3003f, iommu->base + A133_INT_CLEAR);
+	writel(0x3003f, iommu->base + A133_INT_ENABLE);
+	writel(1, iommu->base + A133_GATING);
+	writel(1, iommu->base + A133_ENABLE);
+	writel(bypass, iommu->base + A133_BYPASS);
+
+	if (readl(iommu->base + A133_TTB) != lower_32_bits(root) ||
+	    readl(iommu->base + A133_PREFETCH) != 0x5f ||
+	    readl(iommu->base + A133_MODE) != 0 ||
+	    !(readl(iommu->base + A133_ENABLE) & 1) ||
+	    (readl(iommu->base + A133_BYPASS) & A133_ALL) != bypass)
+		ret = -EIO;
+failed:
+	if (ret) {
+		writel(0, iommu->base + A133_INT_ENABLE);
+		/* With attached masters, returning would let consumer resume race
+		 * an unknown translation state. Existing timeout containment uses
+		 * the same terminal policy and retains every page table.
+		 */
+		if (iommu->attached)
+			a133_timeout(iommu, ret);
+	}
+	spin_unlock_irqrestore(&iommu->lock, flags);
+	return ret;
+}
+
+static int a133_prepare(struct device *dev)
+{
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		return sun50i_a133_ccu_deep_ready();
+	return 0;
+}
+
+static int a133_resume_noirq(struct device *dev)
+{
+	struct a133_iommu *iommu = dev_get_drvdata(dev);
+	int ret;
+
+	if (pm_suspend_target_state != PM_SUSPEND_MEM)
+		return 0;
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		return ret;
+	return a133_restore(iommu);
+}
+
+static const struct dev_pm_ops a133_pm_ops = {
+	.prepare = a133_prepare,
+	.resume_noirq = a133_resume_noirq,
+};
+
 static int a133_probe(struct platform_device *pdev)
 {
 	struct a133_iommu *iommu;
@@ -516,6 +593,7 @@ static struct platform_driver a133_driver = {
 	.driver = {
 		.name = "sun50i-a133-iommu",
 		.of_match_table = a133_match,
+		.pm = &a133_pm_ops,
 		.suppress_bind_attrs = true,
 	},
 };
