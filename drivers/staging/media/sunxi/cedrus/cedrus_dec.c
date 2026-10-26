@@ -22,6 +22,20 @@
 #include "cedrus_dec.h"
 #include "cedrus_hw.h"
 
+static void cedrus_finish_job(struct cedrus_ctx *ctx,
+			      enum vb2_buffer_state state, bool fault_owner)
+{
+	struct cedrus_dev *dev = ctx->dev;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	if ((fault_owner || !cedrus_iommu_fault_pending(dev)) &&
+	    ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev))
+		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
+						 ctx->fh.m2m_ctx, state);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+}
+
 void cedrus_device_run(void *priv)
 {
 	struct cedrus_ctx *ctx = priv;
@@ -31,9 +45,12 @@ void cedrus_device_run(void *priv)
 	int error;
 
 	if (unlikely(cedrus_iommu_fault_pending(dev))) {
-		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
-						 ctx->fh.m2m_ctx,
-						 VB2_BUF_STATE_ERROR);
+		/* FAULT_PENDING is completed by the recovery worker. DEAD has no
+		 * worker left, so drain later queued jobs without touching hardware.
+		 */
+		if (atomic_read(&dev->iommu_fault_state) ==
+		    CEDRUS_IOMMU_FAULT_DEAD)
+			cedrus_finish_job(ctx, VB2_BUF_STATE_ERROR, true);
 		return;
 	}
 
@@ -119,8 +136,7 @@ void cedrus_device_run(void *priv)
 
 		ctx->current_codec->trigger(ctx);
 	} else {
-		v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev,
-						 ctx->fh.m2m_ctx,
-						 VB2_BUF_STATE_ERROR);
+		/* A fault which overlaps setup owns this completion. */
+		cedrus_finish_job(ctx, VB2_BUF_STATE_ERROR, false);
 	}
 }

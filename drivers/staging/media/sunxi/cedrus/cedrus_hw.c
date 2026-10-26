@@ -267,6 +267,7 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 	struct cedrus_dev *dev = container_of(work, struct cedrus_dev,
 					      iommu_fault_work);
 	struct cedrus_ctx *ctx;
+	unsigned long flags;
 	bool recovered = false;
 	int ret;
 
@@ -275,7 +276,6 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 	 */
 	disable_irq(dev->irq);
 	cancel_delayed_work_sync(&dev->watchdog_work);
-	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
 
 	ret = reset_control_reset(dev->rstc);
 	if (ret) {
@@ -294,16 +294,28 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 		}
 	}
 
-	if (recovered) {
-		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
-		enable_irq(dev->irq);
-	}
+	/* Snapshot the job which overlapped FAULT_PENDING before reopening either
+	 * IRQ delivery or admission. This also covers a fault that arrived while
+	 * the VE was idle and raced a queued device_run().
+	 */
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 
-	/* A racing VE interrupt or watchdog may already have retired the job. */
+	if (recovered)
+		enable_irq(dev->irq);
+
+	/* Serialize with process-context setup/error completion as well as the VE
+	 * IRQ and watchdog. Compare before dereferencing the captured context.
+	 */
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	if (recovered)
+		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
 	if (ctx && ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev))
 		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
 						 ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_ERROR);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 }
 
 int cedrus_iommu_fault_init(struct cedrus_dev *dev)
