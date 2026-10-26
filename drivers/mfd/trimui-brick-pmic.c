@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Boot-established AXP2202 interface for TrimUI Brick. */
+#include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/core.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regmap.h>
+#include <linux/reboot.h>
+
+#define AXP2202_SOFT_PWROFF	0x27
 
 #define AXP2202_STATUS		0x00
 #define AXP2202_CHARGE_STATUS	0x01
@@ -29,6 +33,7 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 	    (reg >= AXP2202_IRQ_STATUS && reg < AXP2202_IRQ_STATUS + 5))
 		return true;
 	switch (reg) {
+	case AXP2202_SOFT_PWROFF:
 	case 0x0f: /* VBUS implementation selector */
 	case 0x13: /* VBUS output switch */
 	case 0x17: /* USB input current limit */
@@ -56,7 +61,8 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 
 static bool brick_writeable(struct device *dev, unsigned int reg)
 {
-	return reg == 0x17 || reg == 0x62 || reg == 0x13 || reg == AXP2202_MODULE_EN ||
+	return reg == AXP2202_SOFT_PWROFF ||
+	       reg == 0x17 || reg == 0x62 || reg == 0x13 || reg == AXP2202_MODULE_EN ||
 	       reg == AXP2202_LDO_EN1 ||
 	       (reg >= AXP2202_IRQ_ENABLE && reg < AXP2202_IRQ_ENABLE + 5) ||
 	       (reg >= AXP2202_IRQ_STATUS && reg < AXP2202_IRQ_STATUS + 5);
@@ -150,6 +156,25 @@ static const struct {
 	{ "bldo1", 0x97, 28, 0x90, BIT(4) },
 };
 
+/* I2C may sleep: run after device shutdown but before syscore shutdown. */
+static int brick_pmic_power_off_prepare(struct sys_off_data *data)
+{
+	struct regmap *map = data->cb_data;
+	int ret;
+
+	/* Allwinner AXP2202 PMU code preserves the other OFF_CTL bits. */
+	ret = regmap_write_bits(map, AXP2202_SOFT_PWROFF, BIT(0), BIT(0));
+	if (ret) {
+		dev_err(data->dev, "power-off request failed: %d\n", ret);
+		return NOTIFY_DONE;
+	}
+
+	/* Allow the request to take effect; this is not a completion test. */
+	msleep(1000);
+	dev_err(data->dev, "power-off request returned; trying firmware fallback\n");
+	return NOTIFY_DONE;
+}
+
 static int brick_pmic_probe(struct i2c_client *client)
 {
 	struct regmap_irq_chip_data *irq_data;
@@ -208,6 +233,19 @@ static int brick_pmic_probe(struct i2c_client *client)
 				       IRQF_ONESHOT, 0, &brick_irq_chip, &irq_data);
 	if (ret)
 		return dev_err_probe(&client->dev, ret, "Cannot register PMIC IRQs\n");
+
+	if (of_property_read_bool(client->dev.of_node, "system-power-controller")) {
+		/* The existing PSCI final handler also makes POWER_OFF available. */
+		if (!kernel_can_power_off())
+			return dev_err_probe(&client->dev, -ENODEV,
+					     "requires firmware power-off fallback\n");
+		ret = devm_register_sys_off_handler(&client->dev,
+						    SYS_OFF_MODE_POWER_OFF_PREPARE,
+						    SYS_OFF_PRIO_LOW,
+						   brick_pmic_power_off_prepare, map);
+		if (ret)
+			return ret;
+	}
 
 	return devm_mfd_add_devices(&client->dev, PLATFORM_DEVID_AUTO,
 				   brick_cells, ARRAY_SIZE(brick_cells),
