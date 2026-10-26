@@ -19,6 +19,7 @@
 #include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
 
@@ -240,6 +241,31 @@ static const struct watchdog_ops sunxi_wdt_ops = {
 	.restart	= sunxi_wdt_restart,
 };
 
+static int sunxi_wdt_suspend(struct device *dev)
+{
+	struct sunxi_wdt_dev *sunxi_wdt = dev_get_drvdata(dev);
+
+	if (watchdog_active(&sunxi_wdt->wdt_dev) ||
+	    watchdog_hw_running(&sunxi_wdt->wdt_dev))
+		return sunxi_wdt_stop(&sunxi_wdt->wdt_dev);
+
+	return 0;
+}
+
+static int sunxi_wdt_resume(struct device *dev)
+{
+	struct sunxi_wdt_dev *sunxi_wdt = dev_get_drvdata(dev);
+
+	if (watchdog_active(&sunxi_wdt->wdt_dev) ||
+	    watchdog_hw_running(&sunxi_wdt->wdt_dev))
+		return sunxi_wdt_start(&sunxi_wdt->wdt_dev);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(sunxi_wdt_pm_ops, sunxi_wdt_suspend,
+				sunxi_wdt_resume);
+
 static const struct sunxi_wdt_reg sun4i_wdt_reg = {
 	.wdt_ctrl = 0x00,
 	.wdt_cfg = 0x04,
@@ -316,8 +342,10 @@ static int sunxi_wdt_probe(struct platform_device *pdev)
 	watchdog_init_timeout(&sunxi_wdt->wdt_dev, timeout, dev);
 	watchdog_set_nowayout(&sunxi_wdt->wdt_dev, nowayout);
 	watchdog_set_restart_priority(&sunxi_wdt->wdt_dev, 128);
+	watchdog_stop_ping_on_suspend(&sunxi_wdt->wdt_dev);
 
 	watchdog_set_drvdata(&sunxi_wdt->wdt_dev, sunxi_wdt);
+	platform_set_drvdata(pdev, sunxi_wdt);
 
 	if (sunxi_wdt_is_running(&sunxi_wdt->wdt_dev)) {
 		running_timeout = sunxi_wdt_get_timeout(&sunxi_wdt->wdt_dev);
@@ -347,6 +375,7 @@ static struct platform_driver sunxi_wdt_driver = {
 	.driver		= {
 		.name		= DRV_NAME,
 		.of_match_table	= sunxi_wdt_dt_ids,
+		.pm		= pm_sleep_ptr(&sunxi_wdt_pm_ops),
 	},
 };
 
