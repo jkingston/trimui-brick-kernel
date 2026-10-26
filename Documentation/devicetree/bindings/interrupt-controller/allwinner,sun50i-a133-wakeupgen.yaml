@@ -4,24 +4,29 @@
 $id: http://devicetree.org/schemas/interrupt-controller/allwinner,sun50i-a133-wakeupgen.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner A133 vendor firmware wakeup interrupt routing
+title: Allwinner A133 firmware wakeup interrupt routing
 
 maintainers:
   - Jack Kingston <998656+jkingston@users.noreply.github.com>
 
 description: |
   An interrupt domain above the GIC routes wake enable/disable requests to
-  the vendor secure monitor and its SCP. Ordinary interrupt operations are
-  forwarded to the GIC. The boot loader must initialize the matching monitor,
-  SCP firmware, DRAM parameters and service device tree before entering Linux.
-  This interface is not provided by native mainline Trusted Firmware-A.
+  firmware and its SCP. Ordinary interrupt operations are forwarded to the
+  GIC. The boot loader must initialize the matching firmware, SCP firmware,
+  DRAM parameters and service device tree before entering Linux. The native
+  compatible requires service UUID 2052c028-f921-540c-8330-bba08ba2c772,
+  ABI major 1, and both wake-source and raw-SPI-index capabilities.
 
 allOf:
   - $ref: /schemas/interrupt-controller.yaml#
 
 properties:
   compatible:
-    const: allwinner,sun50i-a133-wakeupgen
+    oneOf:
+      - const: allwinner,sun50i-a133-wakeupgen
+        description: Stock secure-monitor wake service.
+      - const: allwinner,sun50i-a133-native-wakeupgen
+        description: Versioned native A133 wake service.
 
   interrupt-controller: true
 
