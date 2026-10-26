@@ -15,6 +15,10 @@
 #include "cedrus_enc_video.h"
 #include "cedrus_hw.h"
 
+static const struct v4l2_event cedrus_enc_eos_event = {
+	.type = V4L2_EVENT_EOS,
+};
+
 static const struct cedrus_enc_format *
 cedrus_enc_find_format(struct cedrus_ctx *ctx, u32 pixelformat, u32 direction)
 {
@@ -224,8 +228,36 @@ static int cedrus_enc_buf_out_validate(struct vb2_buffer *vb)
 static void cedrus_enc_buf_queue(struct vb2_buffer *vb)
 {
 	struct cedrus_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 
-	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, to_vb2_v4l2_buffer(vb));
+	if (V4L2_TYPE_IS_CAPTURE(vb->type) &&
+	    v4l2_m2m_dst_buf_is_last(ctx->fh.m2m_ctx)) {
+		vbuf->sequence = ctx->sequence_cap++;
+		v4l2_m2m_last_buffer_done(ctx->fh.m2m_ctx, vbuf);
+		v4l2_event_queue_fh(&ctx->fh, &cedrus_enc_eos_event);
+		return;
+	}
+
+	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, vbuf);
+}
+
+void cedrus_enc_job_finish(struct cedrus_ctx *ctx)
+{
+	struct vb2_v4l2_buffer *src;
+	struct vb2_v4l2_buffer *dst;
+
+	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	if (!src || !dst)
+		return;
+
+	src->sequence = ctx->sequence_out++;
+	dst->sequence = ctx->sequence_cap++;
+	if (v4l2_m2m_is_last_draining_src_buf(ctx->fh.m2m_ctx, src)) {
+		dst->flags |= V4L2_BUF_FLAG_LAST;
+		v4l2_m2m_mark_stopped(ctx->fh.m2m_ctx);
+		v4l2_event_queue_fh(&ctx->fh, &cedrus_enc_eos_event);
+	}
 }
 
 static void cedrus_enc_return_buffers(struct vb2_queue *vq,
@@ -248,6 +280,10 @@ static int cedrus_enc_start_streaming(struct vb2_queue *vq,
 	int ret;
 
 	v4l2_m2m_update_start_streaming_state(ctx->fh.m2m_ctx, vq);
+	if (V4L2_TYPE_IS_OUTPUT(vq->type))
+		ctx->sequence_out = 0;
+	else
+		ctx->sequence_cap = 0;
 	if (!V4L2_TYPE_IS_OUTPUT(vq->type))
 		return 0;
 	if (unlikely(cedrus_iommu_fault_pending(dev))) {
@@ -341,9 +377,12 @@ static int cedrus_enc_open(struct file *file)
 	unsigned int i;
 	int ret;
 
+	if (mutex_lock_interruptible(&dev->dev_mutex))
+		return -ERESTARTSYS;
+
 	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
-		return -ENOMEM;
+		goto err_unlock;
 	ctx->dev = dev;
 	ctx->is_encoder = true;
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
@@ -382,6 +421,7 @@ static int cedrus_enc_open(struct file *file)
 	ctx->fh.ctrl_handler = &ctx->hdl;
 
 	v4l2_fh_add(&ctx->fh, file);
+	mutex_unlock(&dev->dev_mutex);
 	return 0;
 
 err_m2m:
@@ -390,19 +430,64 @@ err_m2m:
 err_fh:
 	v4l2_fh_exit(&ctx->fh);
 	kfree(ctx);
+	mutex_unlock(&dev->dev_mutex);
 	return ret;
+
+err_unlock:
+	mutex_unlock(&dev->dev_mutex);
+	return -ENOMEM;
 }
 
 static int cedrus_enc_release(struct file *file)
 {
 	struct cedrus_ctx *ctx = cedrus_file2ctx(file);
+	struct cedrus_dev *dev = ctx->dev;
 
+	mutex_lock(&dev->dev_mutex);
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	v4l2_ctrl_handler_free(&ctx->hdl);
 	v4l2_fh_exit(&ctx->fh);
 	kfree(ctx);
+	mutex_unlock(&dev->dev_mutex);
 	return 0;
+}
+
+static int cedrus_enc_cmd(struct file *file, void *priv,
+			  struct v4l2_encoder_cmd *cmd)
+{
+	struct cedrus_ctx *ctx = cedrus_file2ctx(file);
+	struct vb2_queue *src = v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx);
+	struct vb2_queue *dst = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
+	int ret;
+
+	ret = v4l2_m2m_ioctl_try_encoder_cmd(file, priv, cmd);
+	if (ret)
+		return ret;
+
+	if (!vb2_is_streaming(src) || !vb2_is_streaming(dst))
+		return 0;
+
+	ret = v4l2_m2m_ioctl_encoder_cmd(file, priv, cmd);
+	if (ret)
+		return ret;
+
+	if (cmd->cmd == V4L2_ENC_CMD_STOP &&
+	    v4l2_m2m_has_stopped(ctx->fh.m2m_ctx))
+		v4l2_event_queue_fh(&ctx->fh, &cedrus_enc_eos_event);
+	if (cmd->cmd == V4L2_ENC_CMD_START)
+		vb2_clear_last_buffer_dequeued(dst);
+
+	return 0;
+}
+
+static int cedrus_enc_subscribe_event(struct v4l2_fh *fh,
+				      const struct v4l2_event_subscription *sub)
+{
+	if (sub->type == V4L2_EVENT_EOS)
+		return v4l2_event_subscribe(fh, sub, 0, NULL);
+
+	return v4l2_ctrl_subscribe_event(fh, sub);
 }
 
 static const struct v4l2_file_operations cedrus_enc_fops = {
@@ -434,8 +519,8 @@ static const struct v4l2_ioctl_ops cedrus_enc_ioctl_ops = {
 	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
 	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
 	.vidioc_try_encoder_cmd = v4l2_m2m_ioctl_try_encoder_cmd,
-	.vidioc_encoder_cmd = v4l2_m2m_ioctl_encoder_cmd,
-	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
+	.vidioc_encoder_cmd = cedrus_enc_cmd,
+	.vidioc_subscribe_event = cedrus_enc_subscribe_event,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 };
 

@@ -8,6 +8,7 @@
 
 #include "cedrus.h"
 #include "cedrus_enc.h"
+#include "cedrus_enc_video.h"
 #include "cedrus_hw.h"
 #include "cedrus_job.h"
 
@@ -65,6 +66,8 @@ void cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
 	if ((fault_owner || !cedrus_iommu_fault_pending(dev)) &&
 	    (dev->job_ctx == ctx || (fault_owner && !dev->job_ctx)) &&
 	    ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev)) {
+		if (ctx->is_encoder)
+			cedrus_enc_job_finish(ctx);
 		dev->job_ctx = NULL;
 		dev->job_running = false;
 		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,

@@ -127,6 +127,8 @@ struct cedrus_ctx {
 
 	struct v4l2_pix_format		src_fmt;
 	struct v4l2_pix_format		dst_fmt;
+	u32				sequence_out;
+	u32				sequence_cap;
 	struct cedrus_dec_ops		*current_codec;
 	unsigned int			bit_depth;
 
