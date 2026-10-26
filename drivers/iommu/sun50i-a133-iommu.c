@@ -138,16 +138,16 @@ static void a133_invalidate(struct a133_iommu *iommu, u32 iova)
 	a133_timeout(iommu, a133_poll(iommu, A133_PTW_TRIGGER));
 }
 
-/* Fault retirement uses the driver's address/mask invalidation mode. This is
- * equivalent to stock's A133 range invalidation without changing the live
- * invalidation mode as part of an error path.
+/* Fault retirement uses the driver's address/mask invalidation mode. Cover
+ * every 4 KiB page in stock A133's inclusive fault..fault+16 KiB range without
+ * changing the live invalidation mode as part of an error path.
  */
 static int a133_fault_invalidate(struct a133_iommu *iommu, u32 iova)
 {
 	unsigned int offset;
 	int ret;
 
-	for (offset = 0; offset <= SZ_8K; offset += SZ_8K) {
+	for (offset = 0; offset <= SZ_16K; offset += SZ_4K) {
 		writel(iova + offset, iommu->base + A133_TLB_ADDR);
 		writel(GENMASK(31, 12), iommu->base + A133_TLB_MASK);
 		writel(1, iommu->base + A133_TLB_TRIGGER);
