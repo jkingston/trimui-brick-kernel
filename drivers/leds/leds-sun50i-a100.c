@@ -306,15 +306,23 @@ static u32 sun50i_a100_ledc_ns_to_cycles(u32 timing_ns,
 	return cycles - 1;
 }
 
-static void sun50i_a100_ledc_set_timing(struct sun50i_a100_ledc *priv)
+static int sun50i_a100_ledc_set_timing(struct sun50i_a100_ledc *priv)
 {
 	const struct sun50i_a100_ledc_timing *timing = &priv->timing;
 	unsigned long mod_freq = clk_get_rate(priv->mod_clk);
+	u64 reset_cycles;
 	u32 t0h, t0l, t1h, t1l, treset;
 	u32 control;
 
 	if (!mod_freq)
-		return;
+		return -EINVAL;
+
+	reset_cycles = DIV_ROUND_UP_ULL((u64)timing->treset_ns * mod_freq,
+					NSEC_PER_SEC);
+	if (reset_cycles > FIELD_MAX(LEDC_RESET_TIMING_CTRL_REG_TR) + 1)
+		return dev_err_probe(priv->dev, -ERANGE,
+				     "reset timing %u ns is not representable at %lu Hz\n",
+				     timing->treset_ns, mod_freq);
 
 	t1h = sun50i_a100_ledc_ns_to_cycles(timing->t1h_ns, mod_freq,
 					    LEDC_T01_TIMING_CTRL_REG_T1H, false);
@@ -336,6 +344,8 @@ static void sun50i_a100_ledc_set_timing(struct sun50i_a100_ledc *priv)
 	control = FIELD_PREP(LEDC_RESET_TIMING_CTRL_REG_TR, treset) |
 		  FIELD_PREP(LEDC_RESET_TIMING_CTRL_REG_LED_NUM, priv->max_addr);
 	writel(control, priv->base + LEDC_RESET_TIMING_CTRL_REG);
+
+	return 0;
 }
 
 static int sun50i_a100_ledc_resume(struct device *dev)
@@ -359,9 +369,12 @@ static int sun50i_a100_ledc_resume(struct device *dev)
 	if (ret)
 		goto err_disable_bus_clk;
 
-	priv->powered = true;
+	ret = sun50i_a100_ledc_set_timing(priv);
+	if (ret)
+		goto err_disable_mod_clk;
+
 	sun50i_a100_ledc_set_format(priv);
-	sun50i_a100_ledc_set_timing(priv);
+	priv->powered = true;
 
 	/* Clear stale status before replay, while the IRQ is still disabled. */
 	writel(readl(priv->base + LEDC_INT_STS_REG),
@@ -381,6 +394,8 @@ static int sun50i_a100_ledc_resume(struct device *dev)
 	}
 	return 0;
 
+err_disable_mod_clk:
+	clk_disable_unprepare(priv->mod_clk);
 err_disable_bus_clk:
 	clk_disable_unprepare(priv->bus_clk);
 err_assert_reset:
