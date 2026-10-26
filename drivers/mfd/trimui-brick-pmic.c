@@ -4,10 +4,12 @@
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/core.h>
+#include <linux/mfd/trimui-brick-pmic.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/reboot.h>
+#include <linux/slab.h>
 
 #define AXP2202_SOFT_PWROFF	0x27
 
@@ -135,10 +137,16 @@ static const struct resource brick_key_resources[] = {
 	DEFINE_RES_IRQ_NAMED(AXP2202_KEY_RELEASE, "release"),
 };
 
+enum brick_cell_index {
+	BRICK_CELL_REGULATOR,
+	BRICK_CELL_TELEMETRY,
+	BRICK_CELL_PEK,
+};
+
 static const struct mfd_cell brick_cells[] = {
-	{ .name = "trimui-brick-regulator" },
-	{ .name = "axp2202-telemetry" },
-	{
+	[BRICK_CELL_REGULATOR] = { .name = "trimui-brick-regulator" },
+	[BRICK_CELL_TELEMETRY] = { .name = "axp2202-telemetry" },
+	[BRICK_CELL_PEK] = {
 		.name = "axp2202-pek",
 		.resources = brick_key_resources,
 		.num_resources = ARRAY_SIZE(brick_key_resources),
@@ -177,7 +185,9 @@ static int brick_pmic_power_off_prepare(struct sys_off_data *data)
 
 static int brick_pmic_probe(struct i2c_client *client)
 {
+	struct trimui_brick_pmic_pek_pdata *pek_pdata;
 	struct regmap_irq_chip_data *irq_data;
+	struct mfd_cell *cells;
 	struct regmap *map;
 	struct device_node *regs, *child;
 	unsigned int value;
@@ -229,6 +239,16 @@ static int brick_pmic_probe(struct i2c_client *client)
 
 	if (client->irq <= 0)
 		return -EINVAL;
+	cells = devm_kmemdup(&client->dev, brick_cells, sizeof(brick_cells),
+			     GFP_KERNEL);
+	if (!cells)
+		return -ENOMEM;
+	pek_pdata = devm_kzalloc(&client->dev, sizeof(*pek_pdata), GFP_KERNEL);
+	if (!pek_pdata)
+		return -ENOMEM;
+	pek_pdata->parent_irq = client->irq;
+	cells[BRICK_CELL_PEK].platform_data = pek_pdata;
+	cells[BRICK_CELL_PEK].pdata_size = sizeof(*pek_pdata);
 	ret = devm_regmap_add_irq_chip(&client->dev, map, client->irq,
 				       IRQF_ONESHOT, 0, &brick_irq_chip, &irq_data);
 	if (ret)
@@ -248,7 +268,7 @@ static int brick_pmic_probe(struct i2c_client *client)
 	}
 
 	return devm_mfd_add_devices(&client->dev, PLATFORM_DEVID_AUTO,
-				   brick_cells, ARRAY_SIZE(brick_cells),
+				   cells, ARRAY_SIZE(brick_cells),
 				   NULL, 0, regmap_irq_get_domain(irq_data));
 }
 

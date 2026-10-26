@@ -4,6 +4,7 @@
 #include <linux/errno.h>
 #include <linux/irq.h>
 #include <linux/irqchip.h>
+#include <linux/irqchip/irq-sun50i-a133-wakeupgen.h>
 #include <linux/irqdomain.h>
 #include <linux/of.h>
 
@@ -50,6 +51,20 @@ static struct irq_chip a133_wakeupgen_chip = {
 	.irq_set_wake = a133_wakeupgen_set_wake,
 	.flags = IRQCHIP_SET_TYPE_MASKED,
 };
+
+bool sun50i_a133_wakeupgen_irq_ready(unsigned int irq)
+{
+	struct irq_data *data = irq_get_irq_data(irq);
+
+	while (data) {
+		if (irq_data_get_irq_chip(data) == &a133_wakeupgen_chip)
+			return true;
+		data = data->parent_data;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(sun50i_a133_wakeupgen_irq_ready);
 
 static int a133_wakeupgen_translate(struct irq_domain *domain,
 				   struct irq_fwspec *fwspec,

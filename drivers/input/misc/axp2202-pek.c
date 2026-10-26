@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/input.h>
 #include <linux/interrupt.h>
+#include <linux/irqchip/irq-sun50i-a133-wakeupgen.h>
+#include <linux/mfd/trimui-brick-pmic.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 
 struct axp2202_key {
 	struct input_dev *input;
 	struct device *dev;
 	bool wake_armed;
+	int parent_irq;
 	int press_irq;
 };
 
@@ -28,13 +32,14 @@ static void axp2202_key_wakeup_cleanup(void *data)
 	struct axp2202_key *key = data;
 
 	if (key->wake_armed)
-		disable_irq_wake(key->press_irq);
+		disable_irq_wake(key->parent_irq);
 	device_init_wakeup(key->dev, false);
 }
 
 static int axp2202_key_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	const struct trimui_brick_pmic_pek_pdata *pdata = dev_get_platdata(dev);
 	struct axp2202_key *key;
 	int release_irq, ret;
 
@@ -42,6 +47,9 @@ static int axp2202_key_probe(struct platform_device *pdev)
 	if (!key)
 		return -ENOMEM;
 	key->dev = dev;
+	if (!pdata || pdata->parent_irq <= 0)
+		return -EINVAL;
+	key->parent_irq = pdata->parent_irq;
 	platform_set_drvdata(pdev, key);
 	key->press_irq = platform_get_irq_byname(pdev, "press");
 	if (key->press_irq < 0)
@@ -77,7 +85,21 @@ static int axp2202_key_probe(struct platform_device *pdev)
 
 static int axp2202_key_prepare(struct device *dev)
 {
-	return pm_suspend_target_state == PM_SUSPEND_TO_IDLE ? 0 : -EBUSY;
+	struct axp2202_key *key = dev_get_drvdata(dev);
+	int ret;
+
+	if (pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
+		return 0;
+	if (pm_suspend_target_state != PM_SUSPEND_MEM)
+		return -EOPNOTSUPP;
+
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		return ret;
+	if (!sun50i_a133_wakeupgen_irq_ready(key->parent_irq))
+		return -EOPNOTSUPP;
+
+	return 0;
 }
 
 static int axp2202_key_suspend(struct device *dev)
@@ -89,10 +111,12 @@ static int axp2202_key_suspend(struct device *dev)
 		return -EBUSY;
 	if (!device_may_wakeup(dev))
 		return 0;
-	/* regmap-irq forwards this nested vote to the PMIC's R_INTC NMI.
-	 * Only press wakes; release is delivered normally after resume.
+	/*
+	 * The nested regmap IRQ API cannot report a failed parent wake vote.
+	 * Arm the physical PMIC NMI so R_INTC and a deep parent can fail this
+	 * suspend transaction synchronously.
 	 */
-	ret = enable_irq_wake(key->press_irq);
+	ret = enable_irq_wake(key->parent_irq);
 	if (!ret)
 		key->wake_armed = true;
 	return ret;
@@ -105,7 +129,7 @@ static int axp2202_key_resume(struct device *dev)
 
 	if (!key->wake_armed)
 		return 0;
-	ret = disable_irq_wake(key->press_irq);
+	ret = disable_irq_wake(key->parent_irq);
 	if (!ret)
 		key->wake_armed = false;
 	return ret;

@@ -158,15 +158,34 @@ static int sun6i_r_intc_nmi_set_irqchip_state(struct irq_data *data,
 
 static int sun6i_r_intc_irq_set_wake(struct irq_data *data, unsigned int on)
 {
+	struct irq_chip *parent_chip;
 	unsigned long offset_from_nmi = data->hwirq - nmi_hwirq;
+	int ret;
+
+	if (offset_from_nmi >= SUN6I_NR_DIRECT_IRQS &&
+	    !test_bit(data->hwirq, wake_mux_valid))
+		/* Not wakeup capable. */
+		return -EPERM;
+
+	/*
+	 * Most variants have the GIC as their parent, which has no wake-up
+	 * facility. A parent wake controller may need the upstream SPI armed as
+	 * well. Program it first so a failed firmware request cannot leave the
+	 * local R_INTC wake bitmap claiming an unusable source.
+	 */
+	parent_chip = data->parent_data ?
+		irq_data_get_irq_chip(data->parent_data) : NULL;
+	if (parent_chip && (parent_chip->irq_set_wake ||
+			    parent_chip->flags & IRQCHIP_SKIP_SET_WAKE)) {
+		ret = irq_chip_set_wake_parent(data, on);
+		if (ret)
+			return ret;
+	}
 
 	if (offset_from_nmi < SUN6I_NR_DIRECT_IRQS)
 		assign_bit(offset_from_nmi, wake_irq_enabled, on);
-	else if (test_bit(data->hwirq, wake_mux_valid))
-		assign_bit(data->hwirq, wake_mux_enabled, on);
 	else
-		/* Not wakeup capable. */
-		return -EPERM;
+		assign_bit(data->hwirq, wake_mux_enabled, on);
 
 	return 0;
 }
