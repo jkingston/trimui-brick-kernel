@@ -118,4 +118,20 @@ static inline int ce_encode_sha256(struct ce_storage *s, u64 dma,
 	s->hash.dst[0].words = cpu_to_le32(32);
 	return 0;
 }
+
+/* A133 CE v4 hash/RNG task: SHA-256-conditioned TRNG selector, byte lengths. */
+static inline int ce_encode_trng(struct ce_storage *s, u64 dma,
+				 unsigned int flow, unsigned int bytes)
+{
+	if (!s || flow >= 4 || bytes < 32 || bytes > 8192 || (bytes & 31) ||
+	    (dma & 15) || dma > 0xffffffffULL - (sizeof(*s) - 1))
+		return -EINVAL;
+	memset(&s->desc, 0, sizeof(s->desc));
+	s->hash.common = cpu_to_le32(flow | (1U << 16));
+	s->hash.command = cpu_to_le32(0x203);
+	s->hash.dst[0].addr = cpu_to_le32((dma +
+					offsetof(struct ce_storage, output)) >> 2);
+	s->hash.dst[0].words = cpu_to_le32(bytes);
+	return 0;
+}
 #endif

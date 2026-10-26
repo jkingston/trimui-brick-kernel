@@ -132,3 +132,17 @@ config CRYPTO_DEV_SUN50I_A133_CE
 	  System suspend is not supported while this driver is bound.
 
 	  The module is called sun50i-a133-ce.
+
+config CRYPTO_DEV_SUN50I_A133_CE_TRNG
+	bool "Expose the A133 CE TRNG without entropy credit"
+	depends on CRYPTO_DEV_SUN50I_A133_CE
+	select HW_RANDOM
+	help
+	  Expose the A133 CE v4 TRNG transport through /dev/hwrng.  The
+	  hardware source has zero registered entropy quality because its health
+	  and conditioning guarantees have not been established.  The bytes
+	  remain available for direct diagnostics and are mixed into the
+	  random pool without crediting entropy.  Hardware errors return no
+	  output and use the parent driver's recovery and DMA quarantine path.
+	  Keep this disabled until CE operation has been qualified on the target.
+	  Entropy credit requires separate source and health evidence.

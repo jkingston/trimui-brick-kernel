@@ -4,6 +4,7 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/hw_random.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iommu.h>
@@ -58,6 +59,10 @@ struct a133_ce {
 	int irq, registered;
 	bool irq_owned, irq_disabled, clocks_on, clocks_acquired, rate_held, pm_held;
 	bool stopping, suspending, suspended, unexpected, hash_registered;
+#if IS_ENABLED(CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG)
+	struct hwrng trng;
+	bool trng_registered;
+#endif
 };
 
 struct ce_tfm {
@@ -261,6 +266,103 @@ static int ce_wait(struct ce_flow *flow, bool *release)
 		module_put(THIS_MODULE);
 	return result;
 }
+
+#if IS_ENABLED(CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG)
+struct ce_trng_request {
+	struct work_struct work;
+	struct completion done;
+	struct ce_flow *flow;
+	u8 *output;
+	unsigned int bytes;
+	int result;
+};
+
+static void ce_trng_work(struct work_struct *work)
+{
+	struct ce_trng_request *req = container_of(work, struct ce_trng_request,
+						      work);
+	struct ce_flow *flow = req->flow;
+	struct a133_ce *ce = flow->ce;
+	struct ce_storage *s = flow->storage;
+	bool release = true, prepared = false;
+	int ret;
+
+	mutex_lock(&ce->lifecycle);
+	if (READ_ONCE(ce->suspending)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+	if (ce->stopping || ce->recovery.dead) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	prepared = true;
+	memset(s->output, 0xa5, sizeof(s->output));
+	ret = ce_encode_trng(s, flow->dma, flow->index, req->bytes);
+	if (!ret)
+		ret = ce_launch(flow, BIT(1));
+unlock:
+	mutex_unlock(&ce->lifecycle);
+	if (ret)
+		goto finish;
+	ret = ce_wait(flow, &release);
+	if (!ret) {
+		dma_rmb();
+		if (memchr_inv(s->output + req->bytes, 0xa5,
+			       sizeof(s->output) - req->bytes)) {
+			mutex_lock(&ce->lifecycle);
+			ce->recovery.dead = true;
+			mutex_unlock(&ce->lifecycle);
+			ret = -EOVERFLOW;
+		} else {
+			memcpy(req->output, s->output, req->bytes);
+		}
+	}
+finish:
+	if (prepared && release)
+		memzero_explicit(s, sizeof(*s));
+	req->result = ret;
+	complete(&req->done);
+}
+
+static int ce_trng_read(struct hwrng *rng, void *data, size_t max, bool wait)
+{
+	struct a133_ce *ce = container_of(rng, struct a133_ce, trng);
+	struct ce_trng_request *req;
+	unsigned int flow;
+	int ret;
+
+	if (!wait)
+		return 0;
+	max = min_t(size_t, max, 8192);
+	max = round_down(max, 32);
+	if (!max)
+		return -EINVAL;
+	req = kzalloc_obj(*req);
+	if (!req)
+		return -ENOMEM;
+	req->output = kmalloc(max, GFP_KERNEL);
+	if (!req->output) {
+		kfree(req);
+		return -ENOMEM;
+	}
+	req->bytes = max;
+	init_completion(&req->done);
+	INIT_WORK(&req->work, ce_trng_work);
+	flow = (unsigned int)atomic_inc_return(&ce->next_flow) % 4;
+	req->flow = &ce->flows[flow];
+	queue_work(req->flow->queue, &req->work);
+	wait_for_completion(&req->done);
+	ret = req->result;
+	if (!ret) {
+		memcpy(data, req->output, max);
+		ret = max;
+	}
+	kfree_sensitive(req->output);
+	kfree(req);
+	return ret;
+}
+#endif
 
 /* Larger requests stay in software, without exposing caller memory to CE DMA. */
 static int ce_software(struct skcipher_request *req, struct ce_tfm *ctx,
@@ -725,6 +827,12 @@ static void ce_quiesce(struct a133_ce *ce)
 	ce->stopping = true;
 	spin_unlock_irqrestore(&ce->irq_lock, flags);
 	mutex_unlock(&ce->lifecycle);
+#if IS_ENABLED(CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG)
+	if (ce->trng_registered) {
+		hwrng_unregister(&ce->trng);
+		ce->trng_registered = false;
+	}
+#endif
 	if (ce->hash_registered) {
 		crypto_unregister_ahash(&hash_algorithm);
 		ce->hash_registered = false;
@@ -886,6 +994,15 @@ static int ce_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 	ce->hash_registered = true;
+#if IS_ENABLED(CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG)
+	ce->trng.name = "a133-ce-trng-unqualified";
+	ce->trng.read = ce_trng_read;
+	ce->trng.no_entropy_credit = true;
+	ret = hwrng_register(&ce->trng);
+	if (ret)
+		goto fail;
+	ce->trng_registered = true;
+#endif
 	return 0;
 fail:
 	ce_stop(ce);
