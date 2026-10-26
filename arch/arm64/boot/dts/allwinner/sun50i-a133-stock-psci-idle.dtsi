@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * This profile requires the vendor PSCI CPU_SUSPEND implementation in the
+ * retained monitor/SCP firmware.  It is not compatible with TF-A's native
+ * sun50i-a133 power-management backend, which does not implement CPU_SUSPEND.
+ */
+
+/ {
+	cpus {
+		idle-states {
+			entry-method = "psci";
+
+			cpu_sleep_0: cpu-sleep-0 {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x00010000>;
+				entry-latency-us = <46>;
+				exit-latency-us = <59>;
+				min-residency-us = <3570>;
+				local-timer-stop;
+			};
+
+			cluster_sleep_0: cluster-sleep-0 {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x01010000>;
+				entry-latency-us = <47>;
+				exit-latency-us = <74>;
+				min-residency-us = <5000>;
+				local-timer-stop;
+			};
+		};
+	};
+};
+
+&cpu0 {
+	cpu-idle-states = <&cpu_sleep_0 &cluster_sleep_0>;
+};
+
+&cpu1 {
+	cpu-idle-states = <&cpu_sleep_0 &cluster_sleep_0>;
+};
+
+&cpu2 {
+	cpu-idle-states = <&cpu_sleep_0 &cluster_sleep_0>;
+};
+
+&cpu3 {
+	cpu-idle-states = <&cpu_sleep_0 &cluster_sleep_0>;
+};
