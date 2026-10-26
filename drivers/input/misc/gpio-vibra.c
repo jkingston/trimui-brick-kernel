@@ -18,11 +18,13 @@
 #include <linux/input.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 
 struct gpio_vibrator {
 	struct input_dev *input;
@@ -30,7 +32,12 @@ struct gpio_vibrator {
 	struct regulator *vcc;
 
 	struct work_struct play_work;
+	/* Serializes operations that can sleep. */
+	struct mutex action_lock;
+	/* Protects running and suspended. */
+	spinlock_t state_lock;
 	bool running;
+	bool suspended;
 	bool vcc_on;
 };
 
@@ -67,25 +74,40 @@ static void gpio_vibrator_play_work(struct work_struct *work)
 {
 	struct gpio_vibrator *vibrator =
 		container_of(work, struct gpio_vibrator, play_work);
+	unsigned long flags;
+	bool running;
 
-	if (vibrator->running)
+	mutex_lock(&vibrator->action_lock);
+	spin_lock_irqsave(&vibrator->state_lock, flags);
+	running = vibrator->running && !vibrator->suspended;
+	spin_unlock_irqrestore(&vibrator->state_lock, flags);
+
+	if (running)
 		gpio_vibrator_start(vibrator);
 	else
 		gpio_vibrator_stop(vibrator);
+	mutex_unlock(&vibrator->action_lock);
 }
 
 static int gpio_vibrator_play_effect(struct input_dev *dev, void *data,
 				     struct ff_effect *effect)
 {
 	struct gpio_vibrator *vibrator = input_get_drvdata(dev);
+	unsigned long flags;
+	bool schedule;
 	int level;
 
 	level = effect->u.rumble.strong_magnitude;
 	if (!level)
 		level = effect->u.rumble.weak_magnitude;
 
+	spin_lock_irqsave(&vibrator->state_lock, flags);
 	vibrator->running = level;
-	schedule_work(&vibrator->play_work);
+	schedule = !vibrator->suspended;
+	spin_unlock_irqrestore(&vibrator->state_lock, flags);
+
+	if (schedule)
+		schedule_work(&vibrator->play_work);
 
 	return 0;
 }
@@ -93,10 +115,15 @@ static int gpio_vibrator_play_effect(struct input_dev *dev, void *data,
 static void gpio_vibrator_close(struct input_dev *input)
 {
 	struct gpio_vibrator *vibrator = input_get_drvdata(input);
+	unsigned long flags;
 
-	cancel_work_sync(&vibrator->play_work);
-	gpio_vibrator_stop(vibrator);
+	spin_lock_irqsave(&vibrator->state_lock, flags);
 	vibrator->running = false;
+	spin_unlock_irqrestore(&vibrator->state_lock, flags);
+	cancel_work_sync(&vibrator->play_work);
+	mutex_lock(&vibrator->action_lock);
+	gpio_vibrator_stop(vibrator);
+	mutex_unlock(&vibrator->action_lock);
 }
 
 static int gpio_vibrator_probe(struct platform_device *pdev)
@@ -123,6 +150,8 @@ static int gpio_vibrator_probe(struct platform_device *pdev)
 				     "Failed to request main gpio\n");
 
 	INIT_WORK(&vibrator->play_work, gpio_vibrator_play_work);
+	mutex_init(&vibrator->action_lock);
+	spin_lock_init(&vibrator->state_lock);
 
 	vibrator->input->name = "gpio-vibrator";
 	vibrator->input->id.bustype = BUS_HOST;
@@ -153,10 +182,15 @@ static int gpio_vibrator_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct gpio_vibrator *vibrator = platform_get_drvdata(pdev);
+	unsigned long flags;
 
+	spin_lock_irqsave(&vibrator->state_lock, flags);
+	vibrator->suspended = true;
+	spin_unlock_irqrestore(&vibrator->state_lock, flags);
 	cancel_work_sync(&vibrator->play_work);
-	if (vibrator->running)
-		gpio_vibrator_stop(vibrator);
+	mutex_lock(&vibrator->action_lock);
+	gpio_vibrator_stop(vibrator);
+	mutex_unlock(&vibrator->action_lock);
 
 	return 0;
 }
@@ -165,11 +199,20 @@ static int gpio_vibrator_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct gpio_vibrator *vibrator = platform_get_drvdata(pdev);
+	unsigned long flags;
+	bool running;
+	int err = 0;
 
-	if (vibrator->running)
-		gpio_vibrator_start(vibrator);
+	mutex_lock(&vibrator->action_lock);
+	spin_lock_irqsave(&vibrator->state_lock, flags);
+	vibrator->suspended = false;
+	running = vibrator->running;
+	spin_unlock_irqrestore(&vibrator->state_lock, flags);
+	if (running)
+		err = gpio_vibrator_start(vibrator);
+	mutex_unlock(&vibrator->action_lock);
 
-	return 0;
+	return err;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(gpio_vibrator_pm_ops,
