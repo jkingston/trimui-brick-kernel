@@ -416,6 +416,7 @@
 
 	brick_pmic: pmic@34 {
 		compatible = "trimui,brick-pmic";
+		system-power-controller;
 		interrupt-parent = <&r_intc>;
 		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
 		reg = <0x34>;
