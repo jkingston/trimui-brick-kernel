@@ -18,9 +18,12 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
+#include <linux/sun50i-a133-ccu-sleep.h>
 #include <linux/thermal.h>
 
 #include "thermal_hwmon.h"
@@ -69,6 +72,7 @@ struct ths_thermal_chip {
 	bool            has_mod_clk;
 	bool            has_bus_clk_reset;
 	bool		needs_sram;
+	bool		needs_sleep_restore;
 	int		sensor_num;
 	int		offset;
 	int		scale;
@@ -90,6 +94,8 @@ struct ths_device {
 	struct reset_control			*reset;
 	struct clk				*bus_clk;
 	struct clk                              *mod_clk;
+	int					irq;
+	bool					bus_clk_suspended;
 	struct tsensor				sensor[MAX_SENSOR_NUM];
 };
 
@@ -550,6 +556,71 @@ static int sun8i_ths_register(struct ths_device *tmdev)
 	return 0;
 }
 
+static int sun8i_ths_suspend(struct device *dev)
+{
+	struct ths_device *tmdev = dev_get_drvdata(dev);
+	int ret;
+
+	if (!tmdev->chip->needs_sleep_restore ||
+	    pm_suspend_target_state != PM_SUSPEND_MEM)
+		return 0;
+
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		return ret;
+
+	if (tmdev->bus_clk_suspended)
+		return 0;
+
+	ret = regmap_write(tmdev->regmap, SUN50I_H6_THS_DIC, 0);
+	if (ret)
+		return ret;
+
+	synchronize_irq(tmdev->irq);
+	clk_disable_unprepare(tmdev->bus_clk);
+	tmdev->bus_clk_suspended = true;
+
+	return 0;
+}
+
+static int sun8i_ths_resume(struct device *dev)
+{
+	struct ths_device *tmdev = dev_get_drvdata(dev);
+	int cal_ret, ret;
+
+	if (!tmdev->chip->needs_sleep_restore ||
+	    pm_suspend_target_state != PM_SUSPEND_MEM)
+		return 0;
+
+	ret = sun50i_a133_ccu_deep_ready();
+	if (ret)
+		return ret;
+
+	if (!tmdev->bus_clk_suspended)
+		return 0;
+
+	ret = clk_prepare_enable(tmdev->bus_clk);
+	if (ret)
+		return ret;
+	tmdev->bus_clk_suspended = false;
+
+	cal_ret = sun8i_ths_calibrate(tmdev);
+
+	ret = regmap_write(tmdev->regmap, SUN50I_H6_THS_DIS,
+			   GENMASK(tmdev->chip->sensor_num - 1, 0));
+	if (ret)
+		return ret;
+
+	ret = tmdev->chip->init(tmdev);
+	if (ret)
+		return ret;
+
+	return cal_ret;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(sun8i_ths_pm_ops,
+				sun8i_ths_suspend, sun8i_ths_resume);
+
 static int sun8i_ths_probe(struct platform_device *pdev)
 {
 	struct ths_device *tmdev;
@@ -572,6 +643,7 @@ static int sun8i_ths_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	tmdev->irq = irq;
 
 	ret = tmdev->chip->init(tmdev);
 	if (ret)
@@ -591,6 +663,8 @@ static int sun8i_ths_probe(struct platform_device *pdev)
 					IRQF_ONESHOT, "ths", tmdev);
 	if (ret)
 		return ret;
+
+	platform_set_drvdata(pdev, tmdev);
 
 	return 0;
 }
@@ -648,6 +722,7 @@ static const struct ths_thermal_chip sun50i_a64_ths = {
 static const struct ths_thermal_chip sun50i_a100_ths = {
 	.sensor_num = 3,
 	.has_bus_clk_reset = true,
+	.needs_sleep_restore = true,
 	.ft_deviation = 8000,
 	.offset = 187744,
 	.scale = 672,
@@ -727,6 +802,7 @@ static struct platform_driver ths_driver = {
 	.driver = {
 		.name = "sun8i-thermal",
 		.of_match_table = of_ths_match,
+		.pm = pm_sleep_ptr(&sun8i_ths_pm_ops),
 	},
 };
 module_platform_driver(ths_driver);
