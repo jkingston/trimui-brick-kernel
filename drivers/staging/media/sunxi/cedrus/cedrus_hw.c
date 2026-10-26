@@ -33,6 +33,9 @@
 #include "cedrus.h"
 #include "cedrus_hw.h"
 #include "cedrus_regs.h"
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
+#include "cedrus_enc.h"
+#endif
 
 int cedrus_engine_enable(struct cedrus_ctx *ctx)
 {
@@ -444,6 +447,15 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 
 	dev->capabilities = variant->capabilities;
 	dev->requires_iommu = variant->requires_iommu;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
+	if (variant->enc_ops) {
+		ret = cedrus_enc_backend_validate(variant->enc_ops);
+		if (ret)
+			return dev_err_probe(dev->dev, ret,
+					     "incomplete encoder backend\n");
+		dev->enc_ops = variant->enc_ops;
+	}
+#endif
 	if (variant->requires_iommu) {
 		struct iommu_domain *domain = iommu_get_domain_for_dev(dev->dev);
 

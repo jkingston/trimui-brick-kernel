@@ -180,10 +180,15 @@ struct cedrus_dec_ops {
 				       struct v4l2_pix_format *pix_fmt);
 };
 
+struct cedrus_enc_backend_ops;
+
 struct cedrus_variant {
 	unsigned int	capabilities;
 	unsigned int	mod_rate;
 	bool		requires_iommu;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
+	const struct cedrus_enc_backend_ops *enc_ops;
+#endif
 };
 
 struct cedrus_dev {
@@ -208,6 +213,9 @@ struct cedrus_dev {
 
 	unsigned int		capabilities;
 	bool		requires_iommu;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
+	const struct cedrus_enc_backend_ops *enc_ops;
+#endif
 	int		irq;
 	atomic_t	iommu_fault_state;
 	/* Keep process-context VE programming inside fault recovery. */
