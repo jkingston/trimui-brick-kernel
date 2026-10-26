@@ -13,10 +13,12 @@
 #include <linux/slab.h>
 #include <linux/sizes.h>
 #include <linux/sun50i-a133-ccu-sleep.h>
+#include <linux/sun50i-a133-iommu.h>
 #include <linux/suspend.h>
 
 #define A133_MASTERS 7
 #define A133_ALL GENMASK(6, 0)
+#define A133_RESET 0x010
 #define A133_ENABLE 0x020
 #define A133_BYPASS 0x030
 #define A133_GATING 0x040
@@ -32,11 +34,24 @@
 #define A133_INT_ENABLE 0x100
 #define A133_INT_CLEAR 0x104
 #define A133_INT_STATUS 0x108
+#define A133_INT_ERR_ADDR(n) (0x110 + (n) * 4)
+#define A133_INT_ERR_DATA(n) (0x150 + (n) * 4)
+#define A133_INT_ERR_ADDR_L1 0x130
+#define A133_INT_ERR_ADDR_L2 0x134
+#define A133_INT_ERR_DATA_L1 0x170
+#define A133_INT_ERR_DATA_L2 0x174
+#define A133_L1_STATUS 0x180
+#define A133_L2_STATUS 0x184
+#define A133_INT_L1 BIT(16)
+#define A133_INT_L2 BIT(17)
+#define A133_INT_MASK 0x3003f
 #define A133_DT_SIZE SZ_16K
 #define A133_PT_SIZE SZ_1K
 #define A133_VALID BIT(1)
 
 struct a133_iommu;
+static const struct iommu_ops a133_ops;
+
 struct a133_domain {
 	struct iommu_domain domain;
 	struct a133_iommu *iommu;
@@ -48,8 +63,11 @@ struct a133_domain {
 
 struct a133_client {
 	struct a133_iommu *iommu;
+	struct device *dev;
 	u32 masters;
-	};
+	sun50i_a133_fault_handler_t fault_handler;
+	void *fault_data;
+};
 
 struct a133_iommu {
 	struct iommu_device iommu;
@@ -62,8 +80,11 @@ struct a133_iommu {
 	/* Register programming and table publication share this lock. */
 	spinlock_t lock;
 	struct a133_domain *installed;
+	struct a133_client *clients[A133_MASTERS];
 	u32 owned;
 	u32 attached;
+	u32 faulted;
+	u32 fault_iova[A133_MASTERS];
 };
 
 static struct a133_domain *to_a133(struct iommu_domain *domain)
@@ -115,6 +136,35 @@ static void a133_invalidate(struct a133_iommu *iommu, u32 iova)
 	writel(iova, iommu->base + A133_PTW_ADDR);
 	writel(1, iommu->base + A133_PTW_TRIGGER);
 	a133_timeout(iommu, a133_poll(iommu, A133_PTW_TRIGGER));
+}
+
+/* Fault retirement uses the driver's address/mask invalidation mode. This is
+ * equivalent to stock's A133 range invalidation without changing the live
+ * invalidation mode as part of an error path.
+ */
+static int a133_fault_invalidate(struct a133_iommu *iommu, u32 iova)
+{
+	unsigned int offset;
+	int ret;
+
+	for (offset = 0; offset <= SZ_8K; offset += SZ_8K) {
+		writel(iova + offset, iommu->base + A133_TLB_ADDR);
+		writel(GENMASK(31, 12), iommu->base + A133_TLB_MASK);
+		writel(1, iommu->base + A133_TLB_TRIGGER);
+		ret = a133_poll(iommu, A133_TLB_TRIGGER);
+		if (ret)
+			return ret;
+	}
+
+	for (offset = 0; offset <= SZ_2M; offset += SZ_2M) {
+		writel(iova + offset, iommu->base + A133_PTW_ADDR);
+		writel(1, iommu->base + A133_PTW_TRIGGER);
+		ret = a133_poll(iommu, A133_PTW_TRIGGER);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static void a133_sync(struct iommu_domain *domain)
@@ -284,6 +334,10 @@ static int a133_attach(struct iommu_domain *domain, struct device *dev,
 	if (d->iommu != iommu)
 		return -EINVAL;
 	spin_lock_irqsave(&iommu->lock, flags);
+	if (iommu->faulted & c->masters) {
+		spin_unlock_irqrestore(&iommu->lock, flags);
+		return -EBUSY;
+	}
 	/* A singleton group shares one root. First callback switches every
 	 * attached master; later callbacks only add newly attached master IDs.
 	 * Both roots stay allocated through the core's group transaction.
@@ -318,6 +372,10 @@ static int a133_identity_attach(struct iommu_domain *domain, struct device *dev,
 	unsigned long flags;
 
 	spin_lock_irqsave(&iommu->lock, flags);
+	if (iommu->faulted & c->masters) {
+		spin_unlock_irqrestore(&iommu->lock, flags);
+		return -EBUSY;
+	}
 	/* Identity is a deliberate group transition, never error recovery. */
 	writel(A133_ALL, iommu->base + A133_BYPASS);
 	writel(iommu->empty_dma, iommu->base + A133_TTB);
@@ -370,6 +428,10 @@ static struct iommu_device *a133_probe_device(struct device *dev)
 	}
 	c->masters = mask;
 	c->iommu = iommu;
+	c->dev = dev;
+	for (i = 0; i < A133_MASTERS; i++)
+		if (mask & BIT(i))
+			iommu->clients[i] = c;
 	iommu->owned |= mask;
 	spin_unlock_irqrestore(&iommu->lock, flags);
 	dev_iommu_priv_set(dev, c);
@@ -381,11 +443,19 @@ static void a133_release_device(struct device *dev)
 	struct a133_client *c = dev_iommu_priv_get(dev);
 	struct a133_iommu *iommu = c->iommu;
 	unsigned long flags;
+	unsigned int i;
 
 	/* The consumer must have stopped DMA before device removal. */
 	spin_lock_irqsave(&iommu->lock, flags);
 	iommu->attached &= ~c->masters;
 	iommu->owned &= ~c->masters;
+	if (iommu->faulted & c->masters)
+		dev_err(iommu->dev,
+			"released device leaves masters %#x quarantined\n",
+			iommu->faulted & c->masters);
+	for (i = 0; i < A133_MASTERS; i++)
+		if (c->masters & BIT(i))
+			iommu->clients[i] = NULL;
 	writel(iommu->installed ? A133_ALL & ~iommu->attached : A133_ALL,
 	       iommu->base + A133_BYPASS);
 	if (!iommu->attached)
@@ -397,6 +467,96 @@ static void a133_release_device(struct device *dev)
 	dev_iommu_priv_set(dev, NULL);
 	kfree(c);
 }
+
+int sun50i_a133_iommu_register_fault_handler(struct device *dev,
+					     sun50i_a133_fault_handler_t handler,
+					     void *data)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct a133_client *c = dev_iommu_priv_get(dev);
+	unsigned long flags;
+	int ret = 0;
+
+	if (!domain || domain->owner != &a133_ops || !c)
+		return -ENODEV;
+	if (!handler)
+		return -EINVAL;
+
+	spin_lock_irqsave(&c->iommu->lock, flags);
+	if (c->fault_handler) {
+		ret = -EBUSY;
+	} else {
+		c->fault_data = data;
+		c->fault_handler = handler;
+	}
+	spin_unlock_irqrestore(&c->iommu->lock, flags);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(sun50i_a133_iommu_register_fault_handler);
+
+void sun50i_a133_iommu_unregister_fault_handler(struct device *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct a133_client *c = dev_iommu_priv_get(dev);
+	unsigned long flags;
+
+	if (!domain || domain->owner != &a133_ops || !c)
+		return;
+
+	spin_lock_irqsave(&c->iommu->lock, flags);
+	c->fault_handler = NULL;
+	c->fault_data = NULL;
+	spin_unlock_irqrestore(&c->iommu->lock, flags);
+}
+EXPORT_SYMBOL_GPL(sun50i_a133_iommu_unregister_fault_handler);
+
+int sun50i_a133_iommu_fault_complete(struct device *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct a133_client *c = dev_iommu_priv_get(dev);
+	struct a133_iommu *iommu;
+	unsigned long flags;
+	unsigned int master;
+	u32 masters;
+	int ret = 0;
+
+	if (!domain || domain->owner != &a133_ops || !c)
+		return -ENODEV;
+	iommu = c->iommu;
+
+	spin_lock_irqsave(&iommu->lock, flags);
+	masters = iommu->faulted & c->masters;
+	if (!masters) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	/* The consumer has stopped its DMA engine. Invalidate the same fault
+	 * neighborhoods as stock before releasing the IOMMU master interface.
+	 */
+	for (master = 0; master < A133_MASTERS; master++) {
+		if (!(masters & BIT(master)))
+			continue;
+		ret = a133_fault_invalidate(iommu, iommu->fault_iova[master]);
+		if (ret) {
+			dev_err(iommu->dev,
+				"master %u fault invalidation failed: %d\n",
+				master, ret);
+			goto out;
+		}
+	}
+
+	iommu->faulted &= ~masters;
+	/* Stock asserts affected interfaces with active-low reset bits. Keep any
+	 * other faulted master quarantined until its consumer also completes.
+	 */
+	writel(~iommu->faulted, iommu->base + A133_RESET);
+out:
+	spin_unlock_irqrestore(&iommu->lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(sun50i_a133_iommu_fault_complete);
 
 static int a133_xlate(struct device *dev, const struct of_phandle_args *args)
 {
@@ -424,18 +584,125 @@ static const struct iommu_ops a133_ops = {
 	},
 };
 
+static u8 a133_fault_flags(u32 data, bool *valid)
+{
+	switch (data & ((IOMMU_READ | IOMMU_WRITE) << 2)) {
+	case IOMMU_READ << 2:
+		*valid = true;
+		return IOMMU_FAULT_WRITE;
+	case IOMMU_WRITE << 2:
+		*valid = true;
+		return IOMMU_FAULT_READ;
+	default:
+		/* Like the upstream sun50i provider, use READ when the hardware
+		 * page-table data cannot distinguish the attempted operation.
+		 */
+		*valid = false;
+		return IOMMU_FAULT_READ;
+	}
+}
+
 static irqreturn_t a133_irq(int irq, void *data)
 {
 	struct a133_iommu *iommu = data;
-	u32 status = readl(iommu->base + A133_INT_STATUS);
+	struct sun50i_a133_iommu_fault faults[A133_MASTERS] = {};
+	struct a133_client *client;
+	unsigned long flags;
+	unsigned int master;
+	u32 l1_status, l2_status, masters, status;
 
-	if (!(status & 0x3003f))
+	spin_lock_irqsave(&iommu->lock, flags);
+	status = readl(iommu->base + A133_INT_STATUS) & A133_INT_MASK;
+	if (!status) {
+		spin_unlock_irqrestore(&iommu->lock, flags);
 		return IRQ_NONE;
-	/* Keep mappings and masters unchanged. Recovering faulted bus requests
-	 * requires the consumer to own the stop/reset operation.
+	}
+
+	l1_status = readl(iommu->base + A133_L1_STATUS);
+	l2_status = readl(iommu->base + A133_L2_STATUS);
+	masters = status & A133_ALL;
+	if (status & A133_INT_L1)
+		masters |= l1_status & A133_ALL;
+	if (status & A133_INT_L2)
+		masters |= l2_status & A133_ALL;
+
+	/* Stock treats a page-table prefetch with no blamed master as harmless. */
+	if (!masters) {
+		writel(status, iommu->base + A133_INT_CLEAR);
+		spin_unlock_irqrestore(&iommu->lock, flags);
+		return IRQ_HANDLED;
+	}
+
+	for (master = 0; master < A133_MASTERS; master++) {
+		if (!(masters & BIT(master)))
+			continue;
+
+		faults[master].master = master;
+		faults[master].status = status;
+		if ((status & A133_INT_L2) && (l2_status & BIT(master))) {
+			faults[master].iova = readl(iommu->base +
+						       A133_INT_ERR_ADDR_L2);
+			faults[master].data = readl(iommu->base +
+						       A133_INT_ERR_DATA_L2);
+			faults[master].flags = IOMMU_FAULT_READ;
+			faults[master].flags_valid = false;
+		} else if ((status & A133_INT_L1) &&
+			   (l1_status & BIT(master))) {
+			faults[master].iova = readl(iommu->base +
+						       A133_INT_ERR_ADDR_L1);
+			faults[master].data = readl(iommu->base +
+						       A133_INT_ERR_DATA_L1);
+			faults[master].flags = IOMMU_FAULT_READ;
+			faults[master].flags_valid = false;
+		} else {
+			faults[master].iova = readl(iommu->base +
+						       A133_INT_ERR_ADDR(master));
+			faults[master].data = readl(iommu->base +
+						       A133_INT_ERR_DATA(master));
+			faults[master].flags =
+				a133_fault_flags(faults[master].data,
+						 &faults[master].flags_valid);
+		}
+	}
+
+	/* Stop interrupt storms and hold every blamed master in the active-low
+	 * IOMMU interface reset before a consumer can retire or unmap DMA memory.
 	 */
-	panic("%s: IOMMU fault status %#x; DMA remains owned",
-	      dev_name(iommu->dev), status);
+	writel(0, iommu->base + A133_INT_ENABLE);
+	iommu->faulted |= masters;
+	writel(~iommu->faulted, iommu->base + A133_RESET);
+	/* The blamed interfaces are now unable to retry. Clear the captured
+	 * status and continue reporting independent faults from other masters.
+	 */
+	writel(status, iommu->base + A133_INT_CLEAR);
+	writel(A133_INT_MASK, iommu->base + A133_INT_ENABLE);
+
+	for (master = 0; master < A133_MASTERS; master++) {
+		if (!(masters & BIT(master)))
+			continue;
+		iommu->fault_iova[master] = faults[master].iova;
+		client = iommu->clients[master];
+		dev_err(client ? client->dev : iommu->dev,
+			"IOMMU fault iova %pad master %u %s%s status %#x data %#x\n",
+			&faults[master].iova, master,
+			faults[master].flags == IOMMU_FAULT_WRITE ? "write" : "read",
+			faults[master].flags_valid ? "" : " (fallback)",
+			status, faults[master].data);
+		if (iommu->installed && client)
+			report_iommu_fault(&iommu->installed->domain, client->dev,
+					   faults[master].iova,
+					   faults[master].flags);
+		if (client && client->fault_handler)
+			client->fault_handler(client->dev, &faults[master],
+					      client->fault_data);
+		else
+			dev_err(iommu->dev,
+				"master %u remains quarantined: no recovery handler\n",
+				master);
+	}
+
+	spin_unlock_irqrestore(&iommu->lock, flags);
+	return IRQ_HANDLED;
 }
 
 static int a133_restore(struct a133_iommu *iommu)
@@ -461,8 +728,8 @@ static int a133_restore(struct a133_iommu *iommu)
 	ret = a133_flush(iommu);
 	if (ret)
 		goto failed;
-	writel(0x3003f, iommu->base + A133_INT_CLEAR);
-	writel(0x3003f, iommu->base + A133_INT_ENABLE);
+	writel(A133_INT_MASK, iommu->base + A133_INT_CLEAR);
+	writel(A133_INT_MASK, iommu->base + A133_INT_ENABLE);
 	writel(1, iommu->base + A133_GATING);
 	writel(1, iommu->base + A133_ENABLE);
 	writel(bypass, iommu->base + A133_BYPASS);
@@ -489,6 +756,15 @@ failed:
 
 static int a133_prepare(struct device *dev)
 {
+	struct a133_iommu *iommu = dev_get_drvdata(dev);
+	unsigned long flags;
+	u32 faulted;
+
+	spin_lock_irqsave(&iommu->lock, flags);
+	faulted = iommu->faulted;
+	spin_unlock_irqrestore(&iommu->lock, flags);
+	if (faulted)
+		return -EBUSY;
 	if (pm_suspend_target_state == PM_SUSPEND_MEM)
 		return sun50i_a133_ccu_deep_ready();
 	return 0;
@@ -558,12 +834,12 @@ static int a133_probe(struct platform_device *pdev)
 	}
 	/* Clear inherited status before installing an active handler. */
 	writel(0, iommu->base + A133_INT_ENABLE);
-	writel(0x3003f, iommu->base + A133_INT_CLEAR);
+	writel(A133_INT_MASK, iommu->base + A133_INT_CLEAR);
 	ret = devm_request_irq(&pdev->dev, irq, a133_irq, 0, dev_name(&pdev->dev), iommu);
 	if (ret)
 		goto free_pool;
-	writel(0x3003f, iommu->base + A133_INT_CLEAR);
-	writel(0x3003f, iommu->base + A133_INT_ENABLE);
+	writel(A133_INT_MASK, iommu->base + A133_INT_CLEAR);
+	writel(A133_INT_MASK, iommu->base + A133_INT_ENABLE);
 	writel(1, iommu->base + A133_GATING);
 	writel(1, iommu->base + A133_ENABLE);
 	ret = iommu_device_sysfs_add(&iommu->iommu, &pdev->dev, NULL,

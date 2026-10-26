@@ -244,9 +244,9 @@ config SUN50I_A133_IOMMU
 	select IOMMU_DMA
 	help
 	  A133 seven-master IOMMU with stock direct page permissions.
-	  Translation faults and invalidation timeouts currently stop the kernel
-	  instead of permitting unsafe DMA buffer reuse. Hardware recovery and
-	  permission enforcement still require qualification.
+	  Faulted masters remain quarantined until a registered consumer has
+	  stopped DMA and completed fault retirement. Invalidation timeouts retain
+	  their mappings rather than permitting unsafe DMA buffer reuse.
 
 config SUN50I_IOMMU
 	bool "Allwinner H6 IOMMU Support"

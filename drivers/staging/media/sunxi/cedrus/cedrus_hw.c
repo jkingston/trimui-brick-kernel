@@ -25,6 +25,7 @@
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/soc/sunxi/sunxi_sram.h>
+#include <linux/sun50i-a133-iommu.h>
 
 #include <media/videobuf2-core.h>
 #include <media/v4l2-mem2mem.h>
@@ -138,6 +139,10 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 	enum cedrus_irq_status status;
 	unsigned long deadline = dev->watchdog_work.timer.expires;
 
+	if (unlikely(atomic_read(&dev->iommu_fault_state) !=
+		     CEDRUS_IOMMU_READY))
+		return IRQ_HANDLED;
+
 	/*
 	 * If cancel_delayed_work returns false it means watchdog already
 	 * executed and finished the job.
@@ -187,6 +192,9 @@ void cedrus_watchdog(struct work_struct *work)
 
 	dev = container_of(to_delayed_work(work),
 			   struct cedrus_dev, watchdog_work);
+	if (unlikely(atomic_read(&dev->iommu_fault_state) !=
+		     CEDRUS_IOMMU_READY))
+		return;
 
 	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
 	if (!ctx)
@@ -199,6 +207,123 @@ void cedrus_watchdog(struct work_struct *work)
 		      dev_name(dev->dev), ret);
 	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev, ctx->fh.m2m_ctx,
 					 VB2_BUF_STATE_ERROR);
+}
+
+static void cedrus_iommu_fault(struct device *device,
+			       const struct sun50i_a133_iommu_fault *fault,
+			       void *data)
+{
+	struct cedrus_dev *dev = data;
+
+	if (atomic_cmpxchg(&dev->iommu_fault_state, CEDRUS_IOMMU_READY,
+			   CEDRUS_IOMMU_FAULT_PENDING) != CEDRUS_IOMMU_READY)
+		return;
+
+	v4l2_err(&dev->v4l2_dev,
+		 "IOMMU fault at %pad (master %u, %s%s, status %#x)\n",
+		 &fault->iova, fault->master,
+		 fault->flags == IOMMU_FAULT_WRITE ? "write" : "read",
+		 fault->flags_valid ? "" : " fallback",
+		 fault->status);
+	schedule_work(&dev->iommu_fault_work);
+}
+
+static void cedrus_iommu_fault_work(struct work_struct *work)
+{
+	struct cedrus_dev *dev = container_of(work, struct cedrus_dev,
+					      iommu_fault_work);
+	struct cedrus_ctx *ctx;
+	bool recovered = false;
+	int ret;
+
+	/* The provider already holds the VE IOMMU master in reset. Synchronize
+	 * both completion paths, then stop the engine before releasing it.
+	 */
+	disable_irq(dev->irq);
+	cancel_delayed_work_sync(&dev->watchdog_work);
+	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
+
+	ret = reset_control_reset(dev->rstc);
+	if (ret) {
+		v4l2_err(&dev->v4l2_dev,
+			 "VE reset failed after IOMMU fault: %d\n", ret);
+		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_FAULT_DEAD);
+	} else {
+		ret = sun50i_a133_iommu_fault_complete(dev->dev);
+		if (ret) {
+			v4l2_err(&dev->v4l2_dev,
+				 "IOMMU fault retirement failed: %d\n", ret);
+			atomic_set(&dev->iommu_fault_state,
+				   CEDRUS_IOMMU_FAULT_DEAD);
+		} else {
+			recovered = true;
+		}
+	}
+
+	enable_irq(dev->irq);
+	if (recovered)
+		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
+
+	/* A racing VE interrupt or watchdog may already have retired the job. */
+	if (ctx && ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev))
+		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
+						 ctx->fh.m2m_ctx,
+						 VB2_BUF_STATE_ERROR);
+}
+
+int cedrus_iommu_fault_init(struct cedrus_dev *dev)
+{
+	if (!dev->requires_iommu)
+		return 0;
+
+	atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
+	INIT_WORK(&dev->iommu_fault_work, cedrus_iommu_fault_work);
+	return sun50i_a133_iommu_register_fault_handler(dev->dev,
+							cedrus_iommu_fault, dev);
+}
+
+static int cedrus_iommu_fault_retire_asserted(struct cedrus_dev *dev)
+{
+	int ret;
+
+	if (atomic_read(&dev->iommu_fault_state) == CEDRUS_IOMMU_READY)
+		return 0;
+
+	/* A failed reset pulse or invalidation leaves the provider master held.
+	 * Suspend and unbind get one final containment attempt with VE reset held.
+	 */
+	ret = reset_control_assert(dev->rstc);
+	if (ret)
+		return ret;
+	ret = sun50i_a133_iommu_fault_complete(dev->dev);
+	if (!ret)
+		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
+	return ret;
+}
+
+void cedrus_iommu_fault_exit(struct cedrus_dev *dev)
+{
+	int ret;
+
+	if (!dev->requires_iommu)
+		return;
+
+	sun50i_a133_iommu_unregister_fault_handler(dev->dev);
+	flush_work(&dev->iommu_fault_work);
+	ret = cedrus_iommu_fault_retire_asserted(dev);
+	if (ret)
+		v4l2_err(&dev->v4l2_dev,
+			 "IOMMU master remains quarantined during remove: %d\n", ret);
+}
+
+int cedrus_iommu_fault_flush(struct cedrus_dev *dev)
+{
+	if (!dev->requires_iommu)
+		return 0;
+
+	flush_work(&dev->iommu_fault_work);
+	return atomic_read(&dev->iommu_fault_state) == CEDRUS_IOMMU_READY ?
+		0 : -EIO;
 }
 
 int cedrus_hw_suspend(struct device *device)
@@ -286,6 +411,7 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 	irq_dec = platform_get_irq(dev->pdev, 0);
 	if (irq_dec <= 0)
 		return irq_dec;
+	dev->irq = irq_dec;
 	ret = devm_request_irq(dev->dev, irq_dec, cedrus_irq,
 			       0, dev_name(dev->dev), dev);
 	if (ret) {

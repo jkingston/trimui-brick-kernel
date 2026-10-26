@@ -499,6 +499,13 @@ static int cedrus_probe(struct platform_device *pdev)
 		goto err_v4l2;
 	}
 
+	ret = cedrus_iommu_fault_init(dev);
+	if (ret) {
+		v4l2_err(&dev->v4l2_dev,
+			 "Failed to register IOMMU fault recovery: %d\n", ret);
+		goto err_m2m;
+	}
+
 	dev->mdev.dev = &pdev->dev;
 	strscpy(dev->mdev.model, CEDRUS_NAME, sizeof(dev->mdev.model));
 	strscpy(dev->mdev.bus_info, "platform:" CEDRUS_NAME,
@@ -539,6 +546,8 @@ err_video:
 	video_unregister_device(&dev->vfd);
 err_media:
 	media_device_cleanup(&dev->mdev);
+	cedrus_iommu_fault_exit(dev);
+err_m2m:
 	v4l2_m2m_release(dev->m2m_dev);
 err_v4l2:
 	v4l2_device_unregister(&dev->v4l2_dev);
@@ -559,6 +568,7 @@ static void cedrus_remove(struct platform_device *pdev)
 		media_device_cleanup(&dev->mdev);
 	}
 
+	cedrus_iommu_fault_exit(dev);
 	v4l2_m2m_release(dev->m2m_dev);
 	video_unregister_device(&dev->vfd);
 	v4l2_device_unregister(&dev->v4l2_dev);
@@ -731,6 +741,11 @@ static int cedrus_suspend(struct device *device)
 	 * runtime PM resets the engine and removes its clocks.
 	 */
 	v4l2_m2m_suspend(dev->m2m_dev);
+	ret = cedrus_iommu_fault_flush(dev);
+	if (ret) {
+		v4l2_m2m_resume(dev->m2m_dev);
+		return ret;
+	}
 	ret = pm_runtime_force_suspend(device);
 	if (ret)
 		v4l2_m2m_resume(dev->m2m_dev);

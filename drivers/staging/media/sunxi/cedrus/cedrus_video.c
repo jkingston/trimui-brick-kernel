@@ -523,6 +523,10 @@ static int cedrus_start_streaming(struct vb2_queue *vq, unsigned int count)
 	struct cedrus_dev *dev = ctx->dev;
 	int ret = 0;
 
+	if (unlikely(atomic_read(&dev->iommu_fault_state) !=
+		     CEDRUS_IOMMU_READY))
+		return -EIO;
+
 	if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
 		ret = pm_runtime_resume_and_get(dev->dev);
 		if (ret < 0)

@@ -22,6 +22,7 @@
 #include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-dma-contig.h>
 
+#include <linux/atomic.h>
 #include <linux/iopoll.h>
 #include <linux/platform_device.h>
 #include <linux/workqueue.h>
@@ -39,6 +40,12 @@ enum cedrus_irq_status {
 	CEDRUS_IRQ_NONE,
 	CEDRUS_IRQ_ERROR,
 	CEDRUS_IRQ_OK,
+};
+
+enum cedrus_iommu_fault_state {
+	CEDRUS_IOMMU_READY,
+	CEDRUS_IOMMU_FAULT_PENDING,
+	CEDRUS_IOMMU_FAULT_DEAD,
 };
 
 enum cedrus_h264_pic_type {
@@ -200,8 +207,11 @@ struct cedrus_dev {
 
 	unsigned int		capabilities;
 	bool		requires_iommu;
+	int		irq;
+	atomic_t	iommu_fault_state;
 
 	struct delayed_work	watchdog_work;
+	struct work_struct	iommu_fault_work;
 };
 
 extern struct cedrus_dec_ops cedrus_dec_ops_mpeg2;

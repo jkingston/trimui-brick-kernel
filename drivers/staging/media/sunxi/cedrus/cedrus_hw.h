@@ -28,6 +28,10 @@ int cedrus_hw_resume(struct device *device);
 int cedrus_hw_probe(struct cedrus_dev *dev);
 void cedrus_hw_remove(struct cedrus_dev *dev);
 
+int cedrus_iommu_fault_init(struct cedrus_dev *dev);
+void cedrus_iommu_fault_exit(struct cedrus_dev *dev);
+int cedrus_iommu_fault_flush(struct cedrus_dev *dev);
+
 void cedrus_watchdog(struct work_struct *work);
 
 #endif
