@@ -351,14 +351,14 @@ config SUN6I_R_INTC
 	select IRQ_FASTEOI_HIERARCHY_HANDLERS
 
 config SUN50I_A133_WAKEUPGEN
-	bool "Allwinner A133 stock firmware wakeup routing"
+	bool "Allwinner A133 firmware wakeup routing"
 	depends on ARM64 && (ARCH_SUNXI || COMPILE_TEST)
 	select IRQ_DOMAIN_HIERARCHY
 	help
 	  Route wake requests through the A133 vendor secure monitor and SCP.
-	  Requires an explicit device-tree interrupt domain and matching stock
-	  firmware initialized by the boot loader. Ordinary interrupts remain
-	  routed through the GIC. Not used with native TF-A.
+	  Requires an explicit device-tree interrupt domain and a matching stock
+	  monitor or versioned native firmware service. Ordinary interrupts
+	  remain routed through the GIC.
 
 config SUNXI_NMI_INTC
 	bool
