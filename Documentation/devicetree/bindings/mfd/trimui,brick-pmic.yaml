@@ -30,6 +30,7 @@ description: |
   each provider has a 1000 microsecond enable delay.
 
 properties:
+  system-power-controller: true
   compatible:
     const: trimui,brick-pmic
   interrupts:
