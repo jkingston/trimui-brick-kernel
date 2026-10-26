@@ -274,6 +274,7 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 	/* The provider already holds the VE IOMMU master in reset. Synchronize
 	 * both completion paths, then stop the engine before releasing it.
 	 */
+	mutex_lock(&dev->iommu_fault_mutex);
 	disable_irq(dev->irq);
 	cancel_delayed_work_sync(&dev->watchdog_work);
 
@@ -302,9 +303,6 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 
-	if (recovered)
-		enable_irq(dev->irq);
-
 	/* Serialize with process-context setup/error completion as well as the VE
 	 * IRQ and watchdog. Compare before dereferencing the captured context.
 	 */
@@ -316,6 +314,9 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 						 ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_ERROR);
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+	if (recovered)
+		enable_irq(dev->irq);
+	mutex_unlock(&dev->iommu_fault_mutex);
 }
 
 int cedrus_iommu_fault_init(struct cedrus_dev *dev)

@@ -36,6 +36,20 @@ static void cedrus_finish_job(struct cedrus_ctx *ctx,
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 }
 
+static bool cedrus_job_active(struct cedrus_ctx *ctx)
+{
+	struct cedrus_dev *dev = ctx->dev;
+	unsigned long flags;
+	bool active;
+
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	active = !cedrus_iommu_fault_pending(dev) &&
+		 ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+
+	return active;
+}
+
 void cedrus_device_run(void *priv)
 {
 	struct cedrus_ctx *ctx = priv;
@@ -44,7 +58,12 @@ void cedrus_device_run(void *priv)
 	struct media_request *src_req;
 	int error;
 
-	if (unlikely(cedrus_iommu_fault_pending(dev))) {
+	if (dev->requires_iommu)
+		mutex_lock(&dev->iommu_fault_mutex);
+
+	if (unlikely(!cedrus_job_active(ctx))) {
+		if (dev->requires_iommu)
+			mutex_unlock(&dev->iommu_fault_mutex);
 		/* FAULT_PENDING is completed by the recovery worker. DEAD has no
 		 * worker left, so drain later queued jobs without touching hardware.
 		 */
@@ -130,12 +149,25 @@ void cedrus_device_run(void *priv)
 
 	/* Trigger decoding if setup went well, bail out otherwise. */
 	if (!error) {
+		/* Setup may itself start bitstream DMA. A fault callback quarantines
+		 * the IOMMU master first, then its worker waits on this mutex before
+		 * resetting the VE and returning buffers. Do not issue the final
+		 * trigger if that happened, or if recovery already retired this job.
+		 */
+		if (unlikely(!cedrus_job_active(ctx))) {
+			if (dev->requires_iommu)
+				mutex_unlock(&dev->iommu_fault_mutex);
+			return;
+		}
 		/* Start the watchdog timer. */
 		schedule_delayed_work(&dev->watchdog_work,
 				      msecs_to_jiffies(2000));
 
 		ctx->current_codec->trigger(ctx);
-	} else {
+	}
+	if (dev->requires_iommu)
+		mutex_unlock(&dev->iommu_fault_mutex);
+	if (error) {
 		/* A fault which overlaps setup owns this completion. */
 		cedrus_finish_job(ctx, VB2_BUF_STATE_ERROR, false);
 	}

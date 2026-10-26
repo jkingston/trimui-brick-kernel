@@ -210,6 +210,8 @@ struct cedrus_dev {
 	bool		requires_iommu;
 	int		irq;
 	atomic_t	iommu_fault_state;
+	/* Keep process-context VE programming inside fault recovery. */
+	struct mutex		iommu_fault_mutex;
 	/* Serialize IOMMU fault publication against job completion. */
 	spinlock_t	iommu_completion_lock;
 
