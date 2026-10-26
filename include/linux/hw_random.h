@@ -34,7 +34,11 @@
  * @priv:		Private data, for use by the RNG driver.
  * @quality:		Estimation of true entropy in RNG's bitstream
  *			(in bits of entropy per 1024 bits of input;
- *			valid values: 1 to 1024, or 0 for maximum).
+ *			valid values: 1 to 1024, or 0 for maximum unless
+ *			@no_entropy_credit is set).
+ * @no_entropy_credit:	Expose bytes without assigning an entropy estimate.
+ *			The source remains available through /dev/hwrng and is
+ *			mixed into the random pool with zero entropy credit.
  */
 struct hwrng {
 	const char *name;
@@ -45,6 +49,7 @@ struct hwrng {
 	int (*read)(struct hwrng *rng, void *data, size_t max, bool wait);
 	unsigned long priv;
 	unsigned short quality;
+	bool no_entropy_credit;
 
 	/* private: internal. */
 	struct list_head list;

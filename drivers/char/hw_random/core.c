@@ -641,8 +641,12 @@ int hwrng_register(struct hwrng *rng)
 	complete(&rng->cleanup_done);
 	init_completion(&rng->dying);
 
-	/* Adjust quality field to always have a proper value */
-	rng->quality = min3(default_quality, 1024, rng->quality ?: 1024);
+	/* Keep explicitly unqualified transports available without entropy credit. */
+	if (rng->no_entropy_credit)
+		rng->quality = 0;
+	else
+		rng->quality = min3(default_quality, 1024,
+				    rng->quality ?: 1024);
 
 	if (!cur_rng_set_by_user) {
 		cur_rng = rcu_dereference_protected(current_rng,
