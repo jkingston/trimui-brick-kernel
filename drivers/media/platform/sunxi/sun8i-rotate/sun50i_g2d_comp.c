@@ -130,13 +130,25 @@ static bool g2d_comp_ready(struct g2d_comp *comp)
 	return true;
 }
 
+static bool g2d_comp_job_cancelled(void *data)
+{
+	struct g2d_comp *comp = data;
+
+	return READ_ONCE(comp->paused) || READ_ONCE(comp->broken) ||
+		READ_ONCE(comp->dev->removing) ||
+		READ_ONCE(comp->dev->quiescing);
+}
+
 static void g2d_comp_work(struct work_struct *work)
 {
 	struct g2d_comp *comp = container_of(work, struct g2d_comp, work);
 	struct g2d_comp_buffer *buffers[G2D_COMP_NODES];
+	struct vb2_buffer *vb2_buffers[G2D_COMP_NODES];
+	struct g2d_dma_job dma_job;
 	dma_addr_t addr[G2D_COMP_NODES];
 	enum vb2_buffer_state state;
 	unsigned int i;
+	int ret;
 
 	for (;;) {
 		spin_lock_irq(&comp->lock);
@@ -148,13 +160,26 @@ static void g2d_comp_work(struct work_struct *work)
 			buffers[i] = list_first_entry(&comp->nodes[i].buffers,
 						     struct g2d_comp_buffer, list);
 			list_del(&buffers[i]->list);
+			vb2_buffers[i] = &buffers[i]->vb.vb2_buf;
 			addr[i] = vb2_dma_contig_plane_dma_addr(&buffers[i]->vb.vb2_buf, 0);
 		}
 		spin_unlock_irq(&comp->lock);
 
-		rotate_a133_begin(comp->dev, true);
-		g2d_comp_program(comp, addr);
-		state = rotate_a133_wait(comp->dev);
+		ret = sun50i_g2d_dma_prepare(comp->dev, &dma_job, vb2_buffers,
+					     G2D_COMP_NODES, 2);
+		if (!ret)
+			ret = sun50i_g2d_dma_wait(&dma_job,
+						  g2d_comp_job_cancelled, comp);
+		if (!ret) {
+			rotate_a133_begin(comp->dev, true);
+			g2d_comp_program(comp, addr);
+			state = rotate_a133_wait(comp->dev);
+			if (state != VB2_BUF_STATE_DONE)
+				ret = -ETIME;
+		} else {
+			state = VB2_BUF_STATE_ERROR;
+		}
+		sun50i_g2d_dma_finish(&dma_job, ret);
 		for (i = 0; i < G2D_COMP_NODES; i++) {
 			buffers[i]->vb.sequence = comp->sequence;
 			buffers[i]->vb.field = V4L2_FIELD_NONE;
@@ -452,6 +477,7 @@ static const struct v4l2_ioctl_ops g2d_comp_ioctl_ops = {
 	.vidioc_reqbufs = vb2_ioctl_reqbufs,
 	.vidioc_create_bufs = vb2_ioctl_create_bufs,
 	.vidioc_querybuf = vb2_ioctl_querybuf,
+	.vidioc_expbuf = vb2_ioctl_expbuf,
 	.vidioc_qbuf = vb2_ioctl_qbuf,
 	.vidioc_dqbuf = vb2_ioctl_dqbuf,
 	.vidioc_streamon = vb2_ioctl_streamon,
@@ -590,8 +616,7 @@ int sun50i_g2d_comp_register(struct rotate_dev *dev)
 		g2d_comp_try_fmt(NULL, NULL, &format);
 		node->format = format.fmt.pix;
 		queue->type = i == 2 ? V4L2_BUF_TYPE_VIDEO_CAPTURE : V4L2_BUF_TYPE_VIDEO_OUTPUT;
-		/* No import/export until a multi-buffer reservation fence protocol exists. */
-		queue->io_modes = VB2_MMAP;
+		queue->io_modes = VB2_MMAP | VB2_DMABUF;
 		queue->drv_priv = node;
 		queue->buf_struct_size = sizeof(struct g2d_comp_buffer);
 		queue->ops = &g2d_comp_queue_ops;

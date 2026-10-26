@@ -16,6 +16,8 @@
 #include <media/videobuf2-v4l2.h>
 #include <linux/dma-mapping.h>
 
+struct dma_resv;
+
 static inline dma_addr_t
 vb2_dma_contig_plane_dma_addr(struct vb2_buffer *vb, unsigned int plane_no)
 {
@@ -26,6 +28,9 @@ vb2_dma_contig_plane_dma_addr(struct vb2_buffer *vb, unsigned int plane_no)
 
 int vb2_dma_contig_set_max_seg_size(struct device *dev, unsigned int size);
 static inline void vb2_dma_contig_clear_max_seg_size(struct device *dev) { }
+
+struct dma_resv *
+vb2_dma_contig_plane_resv(struct vb2_buffer *vb, unsigned int plane_no);
 
 extern const struct vb2_mem_ops vb2_dma_contig_memops;
 

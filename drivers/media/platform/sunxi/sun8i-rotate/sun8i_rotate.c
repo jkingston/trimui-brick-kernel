@@ -6,6 +6,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/dma-fence.h>
 #include <linux/iommu.h>
 #include <linux/of.h>
 #include <linux/interrupt.h>
@@ -23,6 +24,9 @@
 
 #include "sun8i-formats.h"
 #include "sun8i-rotate.h"
+
+static bool rotate_a133_job_cancelled(void *data);
+static void rotate_job_abort(void *priv);
 
 /* A133 file handles may outlive platform removal, but cannot touch hardware. */
 static void rotate_a133_release(struct kref *ref)
@@ -261,11 +265,28 @@ static void rotate_a133_work(struct work_struct *work)
 	struct rotate_dev *dev = container_of(work, struct rotate_dev, work);
 	struct rotate_ctx *ctx = dev->job;
 	struct vb2_v4l2_buffer *src, *dst;
+	struct vb2_buffer *buffers[2];
+	struct g2d_dma_job dma_job;
 	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
+	int ret;
 
-	rotate_a133_begin(dev, rotate_uses_mixer(ctx));
-	rotate_program(ctx);
-	state = rotate_a133_wait(dev);
+	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	buffers[0] = &src->vb2_buf;
+	buffers[1] = &dst->vb2_buf;
+	ret = sun50i_g2d_dma_prepare(dev, &dma_job, buffers, 2, 1);
+	if (!ret)
+		ret = sun50i_g2d_dma_wait(&dma_job, rotate_a133_job_cancelled, ctx);
+	if (!ret) {
+		rotate_a133_begin(dev, rotate_uses_mixer(ctx));
+		rotate_program(ctx);
+		state = rotate_a133_wait(dev);
+		if (state != VB2_BUF_STATE_DONE)
+			ret = -ETIME;
+	} else {
+		state = VB2_BUF_STATE_ERROR;
+	}
+	sun50i_g2d_dma_finish(&dma_job, ret);
 
 	src = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
 	dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
@@ -273,6 +294,14 @@ static void rotate_a133_work(struct work_struct *work)
 	v4l2_m2m_buf_done(dst, state);
 	dev->job = NULL;
 	v4l2_m2m_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx);
+}
+
+static bool rotate_a133_job_cancelled(void *data)
+{
+	struct rotate_ctx *ctx = data;
+
+	return READ_ONCE(ctx->stopping) || READ_ONCE(ctx->dev->removing) ||
+		READ_ONCE(ctx->dev->quiescing);
 }
 
 static void rotate_device_run(void *priv)
@@ -690,6 +719,8 @@ static int rotate_start_streaming(struct vb2_queue *vq, unsigned int count)
 	struct rotate_ctx *owner = vb2_get_drv_priv(vq);
 	int error = owner->dev->resume_failed ? -EIO : rotate_check_csc(owner);
 
+	WRITE_ONCE(owner->stopping, false);
+
 	if (owner->dev->compose_active)
 		error = -EBUSY;
 
@@ -719,6 +750,7 @@ static void rotate_stop_streaming(struct vb2_queue *vq)
 {
 	struct rotate_ctx *owner = vb2_get_drv_priv(vq);
 
+	WRITE_ONCE(owner->stopping, true);
 	/* job_finish wakes streamoff before its scheduler tail has returned. */
 	if (owner->dev->a133)
 		flush_work(&owner->dev->work);
@@ -932,6 +964,7 @@ static int rotate_release(struct file *file)
 	mutex_lock(&dev->dev_mutex);
 
 	if (dev->a133) {
+		WRITE_ONCE(ctx->stopping, true);
 		v4l2_m2m_suspend(dev->m2m_dev);
 		flush_work(&dev->work);
 	}
@@ -970,7 +1003,15 @@ static const struct video_device rotate_video_device = {
 
 static const struct v4l2_m2m_ops rotate_m2m_ops = {
 	.device_run	= rotate_device_run,
+	.job_abort	= rotate_job_abort,
 };
+
+static void rotate_job_abort(void *priv)
+{
+	struct rotate_ctx *ctx = priv;
+
+	WRITE_ONCE(ctx->stopping, true);
+}
 
 static int rotate_probe(struct platform_device *pdev)
 {
@@ -1006,6 +1047,8 @@ static int rotate_probe(struct platform_device *pdev)
 			return ret;
 		init_completion(&dev->complete);
 		INIT_WORK(&dev->work, rotate_a133_work);
+		dev->fence_context = dma_fence_context_alloc(1);
+		atomic64_set(&dev->fence_seqno, 0);
 	}
 
 	irq = platform_get_irq(pdev, 0);
@@ -1220,10 +1263,12 @@ static int rotate_suspend(struct device *device)
 
 	if (!dev->a133)
 		return 0;
+	WRITE_ONCE(dev->quiescing, true);
 	v4l2_m2m_suspend(dev->m2m_dev);
 	sun50i_g2d_comp_pause(dev, true);
 	ret = pm_runtime_force_suspend(device);
 	if (ret) {
+		WRITE_ONCE(dev->quiescing, false);
 		sun50i_g2d_comp_pause(dev, false);
 		if (!dev->compose_active)
 			v4l2_m2m_resume(dev->m2m_dev);
@@ -1244,6 +1289,7 @@ static int rotate_resume(struct device *device)
 	if (ret)
 		dev->resume_failed = true;
 	else {
+		WRITE_ONCE(dev->quiescing, false);
 		sun50i_g2d_comp_pause(dev, false);
 		if (!dev->compose_active)
 			v4l2_m2m_resume(dev->m2m_dev);
@@ -1256,6 +1302,7 @@ static void rotate_shutdown(struct platform_device *pdev)
 	struct rotate_dev *dev = platform_get_drvdata(pdev);
 
 	if (dev->a133) {
+		WRITE_ONCE(dev->quiescing, true);
 		v4l2_m2m_suspend(dev->m2m_dev);
 		flush_work(&dev->work);
 		sun50i_g2d_comp_pause(dev, true);
