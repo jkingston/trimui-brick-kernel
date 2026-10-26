@@ -131,6 +131,15 @@ void cedrus_dst_format_set(struct cedrus_dev *dev,
 	}
 }
 
+bool cedrus_iommu_fault_pending(struct cedrus_dev *dev)
+{
+	if (atomic_read(&dev->iommu_fault_state) != CEDRUS_IOMMU_READY)
+		return true;
+
+	return dev->requires_iommu &&
+		sun50i_a133_iommu_fault_pending(dev->dev);
+}
+
 static irqreturn_t cedrus_irq(int irq, void *data)
 {
 	struct cedrus_dev *dev = data;
@@ -142,8 +151,7 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 	irqreturn_t ret = IRQ_HANDLED;
 
 	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
-	if (unlikely(atomic_read(&dev->iommu_fault_state) !=
-		     CEDRUS_IOMMU_READY))
+	if (unlikely(cedrus_iommu_fault_pending(dev)))
 		goto out;
 
 	/*
@@ -187,8 +195,7 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 	 * Recheck after acknowledging the VE source so a fault always owns the
 	 * completion when the two interrupts overlap.
 	 */
-	if (likely(atomic_read(&dev->iommu_fault_state) ==
-		   CEDRUS_IOMMU_READY))
+	if (likely(!cedrus_iommu_fault_pending(dev)))
 		v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev,
 						 ctx->fh.m2m_ctx, state);
 
@@ -206,8 +213,7 @@ void cedrus_watchdog(struct work_struct *work)
 
 	dev = container_of(to_delayed_work(work),
 			   struct cedrus_dev, watchdog_work);
-	if (unlikely(atomic_read(&dev->iommu_fault_state) !=
-		     CEDRUS_IOMMU_READY))
+	if (unlikely(cedrus_iommu_fault_pending(dev)))
 		return;
 
 	ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev);
@@ -221,8 +227,7 @@ void cedrus_watchdog(struct work_struct *work)
 		      dev_name(dev->dev), ret);
 
 	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
-	if (likely(atomic_read(&dev->iommu_fault_state) ==
-		   CEDRUS_IOMMU_READY) &&
+	if (likely(!cedrus_iommu_fault_pending(dev)) &&
 	    ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev))
 		v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev,
 						 ctx->fh.m2m_ctx,

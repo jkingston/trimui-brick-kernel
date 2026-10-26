@@ -25,6 +25,7 @@ int sun50i_a133_iommu_register_fault_handler(struct device *dev,
 					     sun50i_a133_fault_handler_t handler,
 					     void *data);
 void sun50i_a133_iommu_unregister_fault_handler(struct device *dev);
+bool sun50i_a133_iommu_fault_pending(struct device *dev);
 int sun50i_a133_iommu_fault_complete(struct device *dev);
 #else
 static inline int sun50i_a133_iommu_register_fault_handler(struct device *dev,
@@ -37,6 +38,11 @@ static inline int sun50i_a133_iommu_register_fault_handler(struct device *dev,
 static inline void
 sun50i_a133_iommu_unregister_fault_handler(struct device *dev)
 {
+}
+
+static inline bool sun50i_a133_iommu_fault_pending(struct device *dev)
+{
+	return false;
 }
 
 static inline int sun50i_a133_iommu_fault_complete(struct device *dev)

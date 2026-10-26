@@ -511,6 +511,38 @@ void sun50i_a133_iommu_unregister_fault_handler(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(sun50i_a133_iommu_unregister_fault_handler);
 
+bool sun50i_a133_iommu_fault_pending(struct device *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct a133_client *c = dev_iommu_priv_get(dev);
+	struct a133_iommu *iommu;
+	u32 status;
+
+	if (!domain || domain->owner != &a133_ops || !c)
+		return true;
+	iommu = c->iommu;
+
+	/* The software bitmap bridges the interval after the IRQ handler clears
+	 * the hardware status. Reading the still-latched status closes the
+	 * interval before the handler has populated that bitmap.
+	 */
+	if (READ_ONCE(iommu->faulted) & c->masters)
+		return true;
+
+	status = readl(iommu->base + A133_INT_STATUS) & A133_INT_MASK;
+	if (status & c->masters)
+		return true;
+	if ((status & A133_INT_L1) &&
+	    (readl(iommu->base + A133_L1_STATUS) & c->masters))
+		return true;
+	if ((status & A133_INT_L2) &&
+	    (readl(iommu->base + A133_L2_STATUS) & c->masters))
+		return true;
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(sun50i_a133_iommu_fault_pending);
+
 int sun50i_a133_iommu_fault_complete(struct device *dev)
 {
 	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
@@ -547,7 +579,7 @@ int sun50i_a133_iommu_fault_complete(struct device *dev)
 		}
 	}
 
-	iommu->faulted &= ~masters;
+	WRITE_ONCE(iommu->faulted, iommu->faulted & ~masters);
 	/* Stock asserts affected interfaces with active-low reset bits. Keep any
 	 * other faulted master quarantined until its consumer also completes.
 	 */
@@ -669,7 +701,7 @@ static irqreturn_t a133_irq(int irq, void *data)
 	 * IOMMU interface reset before a consumer can retire or unmap DMA memory.
 	 */
 	writel(0, iommu->base + A133_INT_ENABLE);
-	iommu->faulted |= masters;
+	WRITE_ONCE(iommu->faulted, iommu->faulted | masters);
 	writel(~iommu->faulted, iommu->base + A133_RESET);
 
 	/* Publish the fault to each consumer immediately after quarantine. This

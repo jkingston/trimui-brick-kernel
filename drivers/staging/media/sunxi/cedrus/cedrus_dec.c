@@ -30,8 +30,7 @@ void cedrus_device_run(void *priv)
 	struct media_request *src_req;
 	int error;
 
-	if (unlikely(atomic_read(&dev->iommu_fault_state) !=
-		     CEDRUS_IOMMU_READY)) {
+	if (unlikely(cedrus_iommu_fault_pending(dev))) {
 		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
 						 ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_ERROR);
