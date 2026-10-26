@@ -6,6 +6,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/panic.h>
 #include <linux/platform_device.h>
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
@@ -303,7 +304,14 @@ static void a133_context_resume(void *unused)
 		return;
 failed:
 	WRITE_ONCE(context_error, ret);
-	pr_err("A133 CCU deep context restore failed: %d\n", ret);
+	/*
+	 * syscore resume callbacks cannot return an error.  Continuing would
+	 * enable early IRQs and run noirq device callbacks with physical clocks
+	 * and resets that no longer match the CCF state.  Stop here, while one
+	 * CPU is online and interrupts remain disabled, before any later syscore
+	 * or device callback can touch that indeterminate hardware.
+	 */
+	panic("A133 CCU deep context restore failed: %d", ret);
 }
 
 static const struct syscore_ops a133_context_ops = {
@@ -349,7 +357,7 @@ int sun50i_a133_ccu_sleep_init(struct device *dev, void __iomem *base, bool r_cc
 	if (ret)
 		return ret;
 	if (bases[0] && bases[1]) {
-		register_syscore(&a133_context);
+		register_syscore_early_resume(&a133_context);
 		WRITE_ONCE(enabled, true);
 	}
 	return 0;

@@ -27,6 +27,21 @@ void register_syscore(struct syscore *syscore)
 EXPORT_SYMBOL_GPL(register_syscore);
 
 /**
+ * register_syscore_early_resume - Register operations that restore a dependency
+ * @syscore: System core operations to register.
+ *
+ * Place @syscore first in resume order and last in suspend order.  This is for
+ * a system-wide dependency that every other syscore operation requires.
+ */
+void register_syscore_early_resume(struct syscore *syscore)
+{
+	mutex_lock(&syscore_lock);
+	list_add(&syscore->node, &syscore_list);
+	mutex_unlock(&syscore_lock);
+}
+EXPORT_SYMBOL_GPL(register_syscore_early_resume);
+
+/**
  * unregister_syscore - Unregister a set of system core operations.
  * @syscore: System core operations to unregister.
  */
