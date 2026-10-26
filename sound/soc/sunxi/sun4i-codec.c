@@ -2896,10 +2896,6 @@ static int sun50i_a133_card_init(struct snd_soc_pcm_runtime *rtd)
 	ret = sun4i_codec_machine_init(rtd);
 	if (ret)
 		return ret;
-	/* The external amplifier requires an explicit userspace opt-in. */
-	ret = snd_soc_dapm_disable_pin(dapm, "Speaker");
-	if (ret)
-		return ret;
 	/* Recording is opt-in; board routing must identify the wired ADC input. */
 	ret = snd_soc_dapm_disable_pin(dapm, "Onboard Mic");
 	if (ret)
