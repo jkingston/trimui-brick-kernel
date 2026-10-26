@@ -417,6 +417,7 @@ extern const struct hantro_variant rk3568_vpu_variant;
 extern const struct hantro_variant rk3588_vpu981_variant;
 extern const struct hantro_variant sama5d4_vdec_variant;
 extern const struct hantro_variant sunxi_vpu_variant;
+extern const struct hantro_variant sunxi_a133_vpu_variant;
 extern const struct hantro_variant stm32mp25_vdec_variant;
 extern const struct hantro_variant stm32mp25_venc_variant;
 

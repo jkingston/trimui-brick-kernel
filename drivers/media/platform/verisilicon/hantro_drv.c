@@ -733,6 +733,7 @@ static const struct of_device_id of_hantro_match[] = {
 	{ .compatible = "microchip,sama5d4-vdec", .data = &sama5d4_vdec_variant, },
 #endif
 #ifdef CONFIG_VIDEO_HANTRO_SUNXI
+	{ .compatible = "allwinner,sun50i-a133-vpu-g2", .data = &sunxi_a133_vpu_variant, },
 	{ .compatible = "allwinner,sun50i-h6-vpu-g2", .data = &sunxi_vpu_variant, },
 #endif
 #ifdef CONFIG_VIDEO_HANTRO_STM32MP25
