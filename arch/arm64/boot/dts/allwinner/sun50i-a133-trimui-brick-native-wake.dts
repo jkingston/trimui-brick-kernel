@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Native SCP wake routing. Keep this separate from the default board DT so
+ * firmware and kernel wake ABIs can only be selected as one build profile.
+ */
+
+#include "sun50i-a133-trimui-brick.dts"
+
+/ {
+	interrupt-parent = <&wakeupgen>;
+
+	wakeupgen: interrupt-controller {
+		compatible = "allwinner,sun50i-a133-native-wakeupgen";
+		interrupt-controller;
+		interrupt-parent = <&gic>;
+		#interrupt-cells = <3>;
+	};
+};
+
+/* PPIs and the GIC's own maintenance interrupt bypass the SPI wake domain. */
+&gic {
+	interrupt-parent = <&gic>;
+};
+
+&{/timer} {
+	interrupt-parent = <&gic>;
+};
+
+/* The NMI controller is a cascade above a GIC SPI, as in stock firmware. */
+&r_intc {
+	interrupt-parent = <&gic>;
+};
