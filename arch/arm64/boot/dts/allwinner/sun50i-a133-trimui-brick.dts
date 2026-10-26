@@ -227,7 +227,7 @@
 };
 
 &dsi0 {
-	/* Analogue supply remains boot-established; its physical rail is unknown. */
+	vcc-dsi-supply = <&cldo1>;
 	status = "okay";
 
 	panel@0 {
