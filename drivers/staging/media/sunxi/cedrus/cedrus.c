@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pm.h>
+#include <linux/pm_runtime.h>
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
@@ -717,9 +718,44 @@ static const struct of_device_id cedrus_dt_match[] = {
 };
 MODULE_DEVICE_TABLE(of, cedrus_dt_match);
 
+#ifdef CONFIG_PM_SLEEP
+static int cedrus_suspend(struct device *device)
+{
+	struct cedrus_dev *dev = dev_get_drvdata(device);
+	int ret;
+
+	/*
+	 * A decode owns the VE DMA master until its IRQ or watchdog completes.
+	 * Pause the scheduler and wait for that ownership to be retired before
+	 * runtime PM resets the engine and removes its clocks.
+	 */
+	v4l2_m2m_suspend(dev->m2m_dev);
+	ret = pm_runtime_force_suspend(device);
+	if (ret)
+		v4l2_m2m_resume(dev->m2m_dev);
+
+	return ret;
+}
+
+static int cedrus_resume(struct device *device)
+{
+	struct cedrus_dev *dev = dev_get_drvdata(device);
+	int ret;
+
+	ret = pm_runtime_force_resume(device);
+	if (ret)
+		return ret;
+
+	v4l2_m2m_resume(dev->m2m_dev);
+
+	return 0;
+}
+#endif
+
 static const struct dev_pm_ops cedrus_dev_pm_ops = {
 	SET_RUNTIME_PM_OPS(cedrus_hw_suspend,
 			   cedrus_hw_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(cedrus_suspend, cedrus_resume)
 };
 
 static struct platform_driver cedrus_driver = {
