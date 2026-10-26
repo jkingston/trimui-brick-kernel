@@ -16,6 +16,7 @@
 #include <linux/iopoll.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/leds.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
@@ -288,24 +289,51 @@ static int sun50i_a100_ledc_parse_timing(struct device *dev,
 	return 0;
 }
 
+static u32 sun50i_a100_ledc_ns_to_cycles(u32 timing_ns,
+					 unsigned long mod_freq, u32 mask,
+					 bool round_up)
+{
+	u64 cycles = (u64)timing_ns * mod_freq;
+
+	if (round_up)
+		cycles = DIV_ROUND_UP_ULL(cycles, NSEC_PER_SEC);
+	else
+		cycles = div_u64(cycles, NSEC_PER_SEC);
+
+	/* Zero has a special meaning; timing fields store cycles minus one. */
+	cycles = clamp_t(u64, cycles, 2, (u64)FIELD_MAX(mask) + 1);
+
+	return cycles - 1;
+}
+
 static void sun50i_a100_ledc_set_timing(struct sun50i_a100_ledc *priv)
 {
 	const struct sun50i_a100_ledc_timing *timing = &priv->timing;
 	unsigned long mod_freq = clk_get_rate(priv->mod_clk);
-	u32 cycle_ns;
+	u32 t0h, t0l, t1h, t1l, treset;
 	u32 control;
 
 	if (!mod_freq)
 		return;
 
-	cycle_ns = NSEC_PER_SEC / mod_freq;
-	control = FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T1H, timing->t1h_ns / cycle_ns) |
-		  FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T1L, timing->t1l_ns / cycle_ns) |
-		  FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T0H, timing->t0h_ns / cycle_ns) |
-		  FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T0L, timing->t0l_ns / cycle_ns);
+	t1h = sun50i_a100_ledc_ns_to_cycles(timing->t1h_ns, mod_freq,
+					    LEDC_T01_TIMING_CTRL_REG_T1H, false);
+	t1l = sun50i_a100_ledc_ns_to_cycles(timing->t1l_ns, mod_freq,
+					    LEDC_T01_TIMING_CTRL_REG_T1L, false);
+	t0h = sun50i_a100_ledc_ns_to_cycles(timing->t0h_ns, mod_freq,
+					    LEDC_T01_TIMING_CTRL_REG_T0H, false);
+	t0l = sun50i_a100_ledc_ns_to_cycles(timing->t0l_ns, mod_freq,
+					    LEDC_T01_TIMING_CTRL_REG_T0L, false);
+	treset = sun50i_a100_ledc_ns_to_cycles(timing->treset_ns, mod_freq,
+					       LEDC_RESET_TIMING_CTRL_REG_TR, true);
+
+	control = FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T1H, t1h) |
+		  FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T1L, t1l) |
+		  FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T0H, t0h) |
+		  FIELD_PREP(LEDC_T01_TIMING_CTRL_REG_T0L, t0l);
 	writel(control, priv->base + LEDC_T01_TIMING_CTRL_REG);
 
-	control = FIELD_PREP(LEDC_RESET_TIMING_CTRL_REG_TR, timing->treset_ns / cycle_ns) |
+	control = FIELD_PREP(LEDC_RESET_TIMING_CTRL_REG_TR, treset) |
 		  FIELD_PREP(LEDC_RESET_TIMING_CTRL_REG_LED_NUM, priv->max_addr);
 	writel(control, priv->base + LEDC_RESET_TIMING_CTRL_REG);
 }
