@@ -44,7 +44,8 @@
 #define A133_L2_STATUS 0x184
 #define A133_INT_L1 BIT(16)
 #define A133_INT_L2 BIT(17)
-#define A133_INT_MASK 0x3003f
+#define A133_INT_ENABLE_MASK 0x3003f
+#define A133_INT_STATUS_MASK 0x3ffff
 #define A133_DT_SIZE SZ_16K
 #define A133_PT_SIZE SZ_1K
 #define A133_VALID BIT(1)
@@ -529,7 +530,7 @@ bool sun50i_a133_iommu_fault_pending(struct device *dev)
 	if (READ_ONCE(iommu->faulted) & c->masters)
 		return true;
 
-	status = readl(iommu->base + A133_INT_STATUS) & A133_INT_MASK;
+	status = readl(iommu->base + A133_INT_STATUS) & A133_INT_STATUS_MASK;
 	if (status & c->masters)
 		return true;
 	if ((status & A133_INT_L1) &&
@@ -644,7 +645,7 @@ static irqreturn_t a133_irq(int irq, void *data)
 	u32 l1_status, l2_status, masters, status;
 
 	spin_lock_irqsave(&iommu->lock, flags);
-	status = readl(iommu->base + A133_INT_STATUS) & A133_INT_MASK;
+	status = readl(iommu->base + A133_INT_STATUS) & A133_INT_STATUS_MASK;
 	if (!status) {
 		spin_unlock_irqrestore(&iommu->lock, flags);
 		return IRQ_NONE;
@@ -721,7 +722,7 @@ static irqreturn_t a133_irq(int irq, void *data)
 	 * status and continue reporting independent faults from other masters.
 	 */
 	writel(status, iommu->base + A133_INT_CLEAR);
-	writel(A133_INT_MASK, iommu->base + A133_INT_ENABLE);
+	writel(A133_INT_ENABLE_MASK, iommu->base + A133_INT_ENABLE);
 
 	for (master = 0; master < A133_MASTERS; master++) {
 		if (!(masters & BIT(master)))
@@ -771,8 +772,8 @@ static int a133_restore(struct a133_iommu *iommu)
 	ret = a133_flush(iommu);
 	if (ret)
 		goto failed;
-	writel(A133_INT_MASK, iommu->base + A133_INT_CLEAR);
-	writel(A133_INT_MASK, iommu->base + A133_INT_ENABLE);
+	writel(A133_INT_STATUS_MASK, iommu->base + A133_INT_CLEAR);
+	writel(A133_INT_ENABLE_MASK, iommu->base + A133_INT_ENABLE);
 	writel(1, iommu->base + A133_GATING);
 	writel(1, iommu->base + A133_ENABLE);
 	writel(bypass, iommu->base + A133_BYPASS);
@@ -877,12 +878,12 @@ static int a133_probe(struct platform_device *pdev)
 	}
 	/* Clear inherited status before installing an active handler. */
 	writel(0, iommu->base + A133_INT_ENABLE);
-	writel(A133_INT_MASK, iommu->base + A133_INT_CLEAR);
+	writel(A133_INT_STATUS_MASK, iommu->base + A133_INT_CLEAR);
 	ret = devm_request_irq(&pdev->dev, irq, a133_irq, 0, dev_name(&pdev->dev), iommu);
 	if (ret)
 		goto free_pool;
-	writel(A133_INT_MASK, iommu->base + A133_INT_CLEAR);
-	writel(A133_INT_MASK, iommu->base + A133_INT_ENABLE);
+	writel(A133_INT_STATUS_MASK, iommu->base + A133_INT_CLEAR);
+	writel(A133_INT_ENABLE_MASK, iommu->base + A133_INT_ENABLE);
 	writel(1, iommu->base + A133_GATING);
 	writel(1, iommu->base + A133_ENABLE);
 	ret = iommu_device_sysfs_add(&iommu->iommu, &pdev->dev, NULL,
