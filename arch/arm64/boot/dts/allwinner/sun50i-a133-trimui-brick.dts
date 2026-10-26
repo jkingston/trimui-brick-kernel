@@ -707,7 +707,9 @@
 	allwinner,audio-routing = "Headphone", "HPOUTL",
 				  "Headphone", "HPOUTR",
 				  "Speaker", "HPOUTL",
-				  "Speaker", "HPOUTR";
+				  "Speaker", "HPOUTR",
+				  "MIC1", "Onboard Mic",
+				  "MIC1", "Main Mic Bias";
 	status = "okay";
 };
 

@@ -2890,17 +2890,7 @@ static int sun50i_a133_speaker_event(struct snd_soc_dapm_widget *w,
 
 static int sun50i_a133_card_init(struct snd_soc_pcm_runtime *rtd)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(rtd->card);
-	int ret;
-
-	ret = sun4i_codec_machine_init(rtd);
-	if (ret)
-		return ret;
-	/* Recording is opt-in; board routing must identify the wired ADC input. */
-	ret = snd_soc_dapm_disable_pin(dapm, "Onboard Mic");
-	if (ret)
-		return ret;
-	return snd_soc_dapm_sync(dapm);
+	return sun4i_codec_machine_init(rtd);
 }
 
 static const struct snd_kcontrol_new sun50i_a133_card_controls[] = {
