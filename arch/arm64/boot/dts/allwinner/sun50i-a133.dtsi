@@ -39,6 +39,16 @@
 		status = "disabled";
 	};
 
+	vp9: video-codec@1c00000 {
+		compatible = "allwinner,sun50i-a133-vpu-g2";
+		reg = <0x01c00000 0x1000>;
+		interrupts = <GIC_SPI 90 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>, <&ccu CLK_MBUS_VE>;
+		clock-names = "bus", "mod", "ram";
+		resets = <&ccu RST_BUS_VE>;
+		status = "disabled";
+	};
+
 	iommu: iommu@30f0000 {
 		compatible = "allwinner,sun50i-a133-iommu";
 		reg = <0x030f0000 0x1000>;
