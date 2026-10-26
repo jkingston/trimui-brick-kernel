@@ -69,5 +69,6 @@ dtb-$(CONFIG_ARCH_SUNXI) += sun55i-t527-avaota-a1.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun55i-t527-orangepi-4a.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a133-trimui-brick.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a133-trimui-brick-native-wake.dtb
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a133-trimui-brick-native-deep.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a133-trimui-brick-host.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a133-trimui-brick-auto-usb.dtb
