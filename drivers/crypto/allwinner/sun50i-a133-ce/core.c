@@ -57,7 +57,7 @@ struct a133_ce {
 	unsigned int armed;
 	int irq, registered;
 	bool irq_owned, irq_disabled, clocks_on, clocks_acquired, rate_held, pm_held;
-	bool stopping, unexpected, hash_registered;
+	bool stopping, suspending, suspended, unexpected, hash_registered;
 };
 
 struct ce_tfm {
@@ -174,8 +174,10 @@ static void ce_irq_resume(void *data)
 {
 	struct a133_ce *ce = data;
 
-	ce->irq_disabled = false;
-	enable_irq(ce->irq);
+	if (ce->irq_disabled) {
+		ce->irq_disabled = false;
+		enable_irq(ce->irq);
+	}
 }
 
 static const struct ce_recovery_ops recovery_ops = {
@@ -316,6 +318,10 @@ static void ce_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&ce->lifecycle);
+	if (READ_ONCE(ce->suspending)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 	if (ce->stopping || ce->recovery.dead) {
 		ret = -ENODEV;
 		goto unlock;
@@ -369,6 +375,10 @@ static int ce_crypt(struct skcipher_request *req, bool decrypt)
 	    sg_nents_for_len(req->dst, req->cryptlen) < 0)
 		return -EINVAL;
 	spin_lock_irqsave(&ce->irq_lock, flags);
+	if (READ_ONCE(ce->suspending)) {
+		ret = -EAGAIN;
+		goto out;
+	}
 	if (ce->stopping || READ_ONCE(ce->recovery.dead)) {
 		ret = -ENODEV;
 		goto out;
@@ -543,6 +553,10 @@ static void ce_hash_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&ce->lifecycle);
+	if (READ_ONCE(ce->suspending)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
 	if (ce->stopping || ce->recovery.dead) {
 		ret = -ENODEV;
 		goto unlock;
@@ -591,6 +605,10 @@ static int ce_hash_digest(struct ahash_request *req)
 	if (req->nbytes > 65408)
 		return ce_hash_commit(req, crypto_ahash_digest(ce_hash_fallback(req, true)));
 	spin_lock_irqsave(&ce->irq_lock, flags);
+	if (READ_ONCE(ce->suspending)) {
+		ret = -EAGAIN;
+		goto out;
+	}
 	if (ce->stopping || READ_ONCE(ce->recovery.dead)) {
 		ret = -ENODEV;
 		goto out;
@@ -716,7 +734,7 @@ static void ce_quiesce(struct a133_ce *ce)
 	for (i = 0; i < 4; i++)
 		if (ce->flows[i].queue)
 			flush_workqueue(ce->flows[i].queue);
-	if (ce->irq_owned) {
+	if (ce->irq_owned && ce->clocks_on) {
 		ce_irq_drain(ce);
 		ce_mask(ce);
 	}
@@ -887,14 +905,136 @@ static void ce_shutdown(struct platform_device *pdev)
 
 static int ce_suspend(struct device *dev)
 {
-	/* Shared-flow context retention has not been established on A133. */
-	return -EBUSY;
+	struct a133_ce *ce = dev_get_drvdata(dev);
+	unsigned long flags;
+	unsigned int i;
+	int ret, rollback;
+
+	/* Stop admission before draining work submitted by Crypto API callers. */
+	spin_lock_irqsave(&ce->irq_lock, flags);
+	if (ce->stopping || ce->recovery.dead) {
+		spin_unlock_irqrestore(&ce->irq_lock, flags);
+		return -EIO;
+	}
+	if (ce->suspended) {
+		spin_unlock_irqrestore(&ce->irq_lock, flags);
+		return 0;
+	}
+	ce->suspending = true;
+	spin_unlock_irqrestore(&ce->irq_lock, flags);
+
+	for (i = 0; i < ARRAY_SIZE(ce->flows); i++)
+		flush_workqueue(ce->flows[i].queue);
+
+	mutex_lock(&ce->lifecycle);
+	if (ce->recovery.active || ce->recovery.retired ||
+	    ce->recovery.quarantine) {
+		ret = -EBUSY;
+		goto admission_rollback;
+	}
+
+	ce_irq_drain(ce);
+	ce_mask(ce);
+	ret = reset_control_assert(ce->reset);
+	if (ret)
+		goto hardware_rollback;
+	ret = reset_control_status(ce->reset);
+	if (ret != 1) {
+		ret = ret < 0 ? ret : -EIO;
+		goto hardware_rollback;
+	}
+	ce_reset_hold(ce);
+	clk_bulk_disable_unprepare(ARRAY_SIZE(ce->clocks), ce->clocks);
+	ce->clocks_on = false;
+	ce->suspended = true;
+	mutex_unlock(&ce->lifecycle);
+	return 0;
+
+hardware_rollback:
+	/* Suspend was rejected: reconstruct the known idle, IRQ-enabled state. */
+	rollback = reset_control_deassert(ce->reset);
+	if (!rollback) {
+		rollback = reset_control_status(ce->reset);
+		if (rollback > 0)
+			rollback = -EIO;
+	}
+	if (!rollback) {
+		ce_clear(ce);
+		ce_irq_resume(ce);
+	} else {
+		ce->recovery.dead = true;
+		ce->recovery.reset_error = rollback;
+	}
+admission_rollback:
+	spin_lock_irqsave(&ce->irq_lock, flags);
+	if (!ce->recovery.dead)
+		ce->suspending = false;
+	spin_unlock_irqrestore(&ce->irq_lock, flags);
+	mutex_unlock(&ce->lifecycle);
+	return ret;
+}
+
+static int ce_resume(struct device *dev)
+{
+	struct a133_ce *ce = dev_get_drvdata(dev);
+	unsigned long flags;
+	int ret, rollback;
+
+	mutex_lock(&ce->lifecycle);
+	if (!ce->suspended) {
+		ret = ce->recovery.dead ? -EIO : 0;
+		goto out;
+	}
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(ce->clocks), ce->clocks);
+	if (ret)
+		goto out;
+	ce->clocks_on = true;
+	ret = reset_control_deassert(ce->reset);
+	if (ret)
+		goto power_rollback;
+	ret = reset_control_status(ce->reset);
+	if (ret) {
+		ret = ret < 0 ? ret : -EIO;
+		goto power_rollback;
+	}
+	ce_mask(ce);
+	ce_clear(ce);
+	ce_irq_resume(ce);
+	ce->suspended = false;
+	spin_lock_irqsave(&ce->irq_lock, flags);
+	ce->suspending = false;
+	spin_unlock_irqrestore(&ce->irq_lock, flags);
+	goto out;
+
+power_rollback:
+	rollback = reset_control_assert(ce->reset);
+	if (!rollback) {
+		rollback = reset_control_status(ce->reset);
+		if (rollback == 1)
+			rollback = 0;
+		else
+			rollback = rollback < 0 ? rollback : -EIO;
+	}
+	if (rollback) {
+		ce->recovery.dead = true;
+		ce->recovery.reset_error = rollback;
+		ce->suspended = false;
+		goto out;
+	}
+	clk_bulk_disable_unprepare(ARRAY_SIZE(ce->clocks), ce->clocks);
+	ce->clocks_on = false;
+out:
+	mutex_unlock(&ce->lifecycle);
+	return ret;
 }
 
 static const struct dev_pm_ops ce_pm_ops = {
 	.suspend = ce_suspend,
 	.freeze = ce_suspend,
 	.poweroff = ce_suspend,
+	.resume = ce_resume,
+	.thaw = ce_resume,
+	.restore = ce_resume,
 };
 
 static const struct of_device_id ce_of_match[] = {
