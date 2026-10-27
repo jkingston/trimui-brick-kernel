@@ -33,7 +33,8 @@ config VIDEO_SUNXI_CEDRUS_ENCODER_CORE_KUNIT_TEST
 	default KUNIT_ALL_TESTS
 	help
 	  Run tests for the fail-closed encoder backend/frontend gate and the
-	  proven A133 source, bitstream, interrupt and QP-field register contracts.
+	  proven A133 source, bitstream, buffer, interrupt and QP-field register
+	  contracts, plus the standard H.264 control, header and GOP helpers.
 	  The tests exercise only pure contract helpers.  They do not access
 	  encoder hardware or register an encoder video node.
 

@@ -120,6 +120,30 @@ struct cedrus_a133_enc_bitstream {
 	u32 limit;
 };
 
+/*
+ * Sizes used by the A133 Ver2 H.264 path. The unnamed work areas remain
+ * explicit: their allocation formula is known from the matching stock code,
+ * but their contents are not yet understood well enough to name or program.
+ */
+struct cedrus_a133_h264_enc_buffer_layout {
+	size_t reconstruction_luma;
+	size_t reconstruction_chroma;
+	size_t reconstruction;
+	size_t subpixel;
+	size_t motion_vectors;
+	size_t macroblock_info;
+	size_t deblock;
+	size_t work_9c;
+	size_t work_frame;
+};
+
+/* Register values for one reconstructed/reference frame slot. */
+struct cedrus_a133_h264_enc_frame_slot {
+	u32 luma;
+	u32 chroma;
+	u32 subpixel;
+};
+
 int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops);
 int cedrus_enc_format_validate(const struct cedrus_enc_format *format);
 bool cedrus_enc_control_is_standard(u32 id);
@@ -136,5 +160,13 @@ enum cedrus_enc_irq_status cedrus_a133_h264_enc_irq_status(u32 status);
 
 int cedrus_a133_h264_enc_qp_update(u32 register_value, unsigned int qp,
 				   u32 *updated);
+
+int cedrus_a133_h264_enc_buffer_layout(u32 width, u32 height,
+				       struct cedrus_a133_h264_enc_buffer_layout *layout);
+
+int cedrus_a133_h264_enc_frame_slot_prepare(dma_addr_t reconstruction,
+					    dma_addr_t subpixel,
+					    const struct cedrus_a133_h264_enc_buffer_layout *layout,
+					    struct cedrus_a133_h264_enc_frame_slot *slot);
 
 #endif /* _CEDRUS_ENC_H_ */

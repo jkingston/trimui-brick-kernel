@@ -252,3 +252,111 @@ int cedrus_a133_h264_enc_qp_update(u32 register_value, unsigned int qp,
 
 	return 0;
 }
+
+int cedrus_a133_h264_enc_buffer_layout(u32 width, u32 height,
+				       struct cedrus_a133_h264_enc_buffer_layout *layout)
+{
+	size_t aligned_width, aligned_height;
+	size_t reference_width, luma_height, chroma_height;
+	size_t mb_width, mb_height, subpixel_stride, subpixel_height;
+	size_t value;
+
+	if (!layout || !width || !height)
+		return -EINVAL;
+	if (width > CEDRUS_A133_ENC_MAX_DIMENSION ||
+	    height > CEDRUS_A133_ENC_MAX_DIMENSION)
+		return -ERANGE;
+	if (width % CEDRUS_A133_ENC_DIMENSION_UNIT ||
+	    height % CEDRUS_A133_ENC_DIMENSION_UNIT)
+		return -EINVAL;
+
+	aligned_width = ALIGN(width, 16);
+	aligned_height = ALIGN(height, 16);
+	mb_width = aligned_width / 16;
+	mb_height = aligned_height / 16;
+
+	/* Exact Ver2 formulas in the matching A133 stock allocation path. */
+	reference_width = ALIGN(aligned_width, 32);
+	luma_height = ALIGN(aligned_height + 8, 64);
+	chroma_height = ALIGN(aligned_height, 128);
+
+	if (check_mul_overflow(reference_width, luma_height, &value))
+		return -EOVERFLOW;
+	layout->reconstruction_luma = value;
+	if (check_mul_overflow(reference_width, chroma_height, &value))
+		return -EOVERFLOW;
+	layout->reconstruction_chroma = value / 2;
+	if (check_add_overflow(layout->reconstruction_luma,
+			       layout->reconstruction_chroma, &value))
+		return -EOVERFLOW;
+	layout->reconstruction = value;
+
+	subpixel_stride = 32 * DIV_ROUND_UP(mb_width, 48) +
+			  2 * ALIGN(mb_width, 32);
+	subpixel_height = (aligned_height + 72) / 8;
+	if (check_mul_overflow(subpixel_stride, subpixel_height, &value))
+		return -EOVERFLOW;
+	layout->subpixel = value;
+
+	if (check_mul_overflow(ALIGN(mb_width, 4), mb_height, &value) ||
+	    check_mul_overflow(value, (size_t)8, &value))
+		return -EOVERFLOW;
+	layout->motion_vectors = value;
+
+	if (check_mul_overflow(aligned_width, (size_t)8, &value))
+		return -EOVERFLOW;
+	layout->macroblock_info = value;
+	layout->deblock = value;
+
+	if (check_mul_overflow(mb_height, (size_t)12, &value) ||
+	    check_add_overflow(value, (size_t)500, &value))
+		return -EOVERFLOW;
+	layout->work_9c = value;
+
+	if (check_mul_overflow(ALIGN(mb_width, 8), mb_height, &value) ||
+	    check_mul_overflow(value, (size_t)12, &value))
+		return -EOVERFLOW;
+	layout->work_frame = value;
+
+	return 0;
+}
+
+int cedrus_a133_h264_enc_frame_slot_prepare(dma_addr_t reconstruction,
+					    dma_addr_t subpixel,
+					    const struct cedrus_a133_h264_enc_buffer_layout *layout,
+					    struct cedrus_a133_h264_enc_frame_slot *slot)
+{
+	dma_addr_t chroma, reconstruction_last, subpixel_last;
+
+	if (!layout || !slot || !layout->reconstruction ||
+	    !layout->reconstruction_luma || !layout->reconstruction_chroma ||
+	    !layout->subpixel ||
+	    layout->reconstruction_luma > layout->reconstruction ||
+	    layout->reconstruction_chroma != layout->reconstruction -
+					     layout->reconstruction_luma)
+		return -EINVAL;
+	if (!IS_ALIGNED(reconstruction, CEDRUS_A133_ENC_ADDR_UNIT) ||
+	    !IS_ALIGNED(subpixel, CEDRUS_A133_ENC_ADDR_UNIT))
+		return -EINVAL;
+	if (check_add_overflow(reconstruction,
+			       (dma_addr_t)layout->reconstruction_luma,
+			       &chroma) ||
+	    check_add_overflow(reconstruction,
+			       (dma_addr_t)layout->reconstruction - 1,
+			       &reconstruction_last) ||
+	    check_add_overflow(subpixel, (dma_addr_t)layout->subpixel - 1,
+			       &subpixel_last))
+		return -EOVERFLOW;
+	if ((reconstruction >> 8) > U32_MAX || (chroma >> 8) > U32_MAX ||
+	    (reconstruction_last >> 8) > U32_MAX ||
+	    (subpixel >> 8) > U32_MAX || (subpixel_last >> 8) > U32_MAX)
+		return -ERANGE;
+
+	*slot = (struct cedrus_a133_h264_enc_frame_slot) {
+		.luma = reconstruction >> 8,
+		.chroma = chroma >> 8,
+		.subpixel = subpixel >> 8,
+	};
+
+	return 0;
+}

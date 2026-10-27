@@ -8,6 +8,8 @@
 #include <linux/videodev2.h>
 
 #include "cedrus_enc.h"
+#include "cedrus_h264_enc.h"
+#include "cedrus_h264_enc_hw.h"
 
 static const struct cedrus_enc_format cedrus_enc_test_formats[] = {
 	{
@@ -234,6 +236,210 @@ static void cedrus_enc_test_qp_field(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
+static void cedrus_enc_test_buffer_layout(struct kunit *test)
+{
+	struct cedrus_a133_h264_enc_buffer_layout layout;
+	struct cedrus_a133_h264_enc_buffer_layout invalid_layout;
+	struct cedrus_a133_h264_enc_frame_slot slot;
+	int ret;
+
+	ret = cedrus_a133_h264_enc_buffer_layout(320, 240, &layout);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, layout.reconstruction_luma, (size_t)81920);
+	KUNIT_EXPECT_EQ(test, layout.reconstruction_chroma, (size_t)40960);
+	KUNIT_EXPECT_EQ(test, layout.reconstruction, (size_t)122880);
+	KUNIT_EXPECT_EQ(test, layout.subpixel, (size_t)3744);
+	KUNIT_EXPECT_EQ(test, layout.motion_vectors, (size_t)2400);
+	KUNIT_EXPECT_EQ(test, layout.macroblock_info, (size_t)2560);
+	KUNIT_EXPECT_EQ(test, layout.deblock, (size_t)2560);
+	KUNIT_EXPECT_EQ(test, layout.work_9c, (size_t)680);
+	KUNIT_EXPECT_EQ(test, layout.work_frame, (size_t)4320);
+
+	ret = cedrus_a133_h264_enc_frame_slot_prepare(0xfafe0000, 0xfafbf000,
+						      &layout, &slot);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, slot.luma, 0x00fafe00U);
+	KUNIT_EXPECT_EQ(test, slot.chroma, 0x00faff40U);
+	KUNIT_EXPECT_EQ(test, slot.subpixel, 0x00fafbf0U);
+
+	ret = cedrus_a133_h264_enc_frame_slot_prepare(0xfafe0001, 0xfafbf000,
+						      &layout, &slot);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	if (sizeof(dma_addr_t) > sizeof(u32)) {
+		dma_addr_t boundary = (dma_addr_t)((u64)U32_MAX << 8);
+
+		ret = cedrus_a133_h264_enc_frame_slot_prepare(0xfafe0000,
+							      boundary,
+							      &layout, &slot);
+		KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+	}
+
+	invalid_layout = layout;
+	invalid_layout.reconstruction_chroma--;
+	ret = cedrus_a133_h264_enc_frame_slot_prepare(0xfafe0000, 0xfafbf000,
+						      &invalid_layout, &slot);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+
+	ret = cedrus_a133_h264_enc_buffer_layout(4097, 240, &layout);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+}
+
+static void cedrus_enc_test_dma_register_image(struct kunit *test)
+{
+	struct cedrus_a133_h264_enc_buffer_layout layout;
+	struct cedrus_a133_h264_enc_dma dma;
+	struct cedrus_a133_h264_enc_frame_slot reconstructed;
+	struct cedrus_a133_h264_enc_frame_slot reference;
+	struct cedrus_a133_enc_bitstream bitstream;
+	struct cedrus_a133_enc_source source;
+	int ret;
+
+	ret = cedrus_enc_test_source(V4L2_PIX_FMT_NV12, 320, &source);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = cedrus_a133_h264_enc_bitstream_prepare(0xfb000000,
+						     12 * SZ_1M, &bitstream);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = cedrus_a133_h264_enc_buffer_layout(320, 240, &layout);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = cedrus_a133_h264_enc_frame_slot_prepare(0xfafe0000,
+						      0xfafbf000,
+						      &layout, &reference);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = cedrus_a133_h264_enc_frame_slot_prepare(0xfafc0000,
+						      0xfafbe000,
+						      &layout, &reconstructed);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = cedrus_a133_h264_dma_prepare(&source, &bitstream,
+					   &reference, &reconstructed,
+					   0xfafbd000, 0xfafbc000,
+					   &layout, &dma);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, dma.motion_vectors, 0x00fafbd0U);
+	KUNIT_EXPECT_EQ(test, dma.macroblock_info, 0x00fafbc0U);
+	KUNIT_EXPECT_EQ(test, dma.reference.luma, 0x00fafe00U);
+	KUNIT_EXPECT_EQ(test, dma.reference.chroma, 0x00faff40U);
+	KUNIT_EXPECT_EQ(test, dma.reference.subpixel, 0x00fafbf0U);
+	KUNIT_EXPECT_EQ(test, dma.reconstruction.luma, 0x00fafc00U);
+	KUNIT_EXPECT_EQ(test, dma.reconstruction.chroma, 0x00fafd40U);
+	KUNIT_EXPECT_EQ(test, dma.reconstruction.subpixel, 0x00fafbe0U);
+
+	ret = cedrus_a133_h264_dma_prepare(&source, &bitstream,
+					   &reference, &reconstructed,
+					   0xfafbd001, 0xfafbc000,
+					   &layout, &dma);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	layout.motion_vectors = 0;
+	ret = cedrus_a133_h264_dma_prepare(&source, &bitstream,
+					   &reference, &reconstructed,
+					   0xfafbd000, 0xfafbc000,
+					   &layout, &dma);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
+static void cedrus_enc_test_standard_controls(struct kunit *test)
+{
+	struct cedrus_h264_enc_controls controls = {
+		.profile = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH,
+		.level = V4L2_MPEG_VIDEO_H264_LEVEL_5_1,
+		.entropy_mode = V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC,
+		.gop_size = 30,
+		.i_qp = 30,
+		.p_qp = 30,
+	};
+	struct cedrus_h264_enc_params params;
+
+	KUNIT_ASSERT_EQ(test, cedrus_h264_enc_controls_prepare(&controls,
+							       &params), 0);
+	KUNIT_EXPECT_EQ(test, params.profile_idc, (u8)100);
+	KUNIT_EXPECT_EQ(test, params.level_idc, (u8)51);
+	KUNIT_EXPECT_TRUE(test, params.cabac);
+	KUNIT_EXPECT_EQ(test, params.qp, (u8)30);
+	KUNIT_EXPECT_EQ(test, params.gop_size, 30U);
+
+	controls.profile = V4L2_MPEG_VIDEO_H264_PROFILE_MAIN;
+	KUNIT_EXPECT_EQ(test, cedrus_h264_enc_controls_prepare(&controls,
+							       &params),
+			-EOPNOTSUPP);
+	controls.profile = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
+	controls.p_qp = 29;
+	KUNIT_EXPECT_EQ(test, cedrus_h264_enc_controls_prepare(&controls,
+							       &params),
+			-EOPNOTSUPP);
+	controls.p_qp = 30;
+	controls.frame_rc_enable = true;
+	KUNIT_EXPECT_EQ(test, cedrus_h264_enc_controls_prepare(&controls,
+							       &params),
+			-EOPNOTSUPP);
+}
+
+static void cedrus_enc_test_stock_headers(struct kunit *test)
+{
+	static const u8 expected[] = {
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x33,
+		0xac, 0x2c, 0xa8, 0x14, 0x1f, 0x10, 0x00, 0x00,
+		0x00, 0x01, 0x68, 0xee, 0x3c, 0x30,
+	};
+	static const u8 cropped_expected[] = {
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x33,
+		0xac, 0x2c, 0xa8, 0x15, 0x08, 0x59, 0x65, 0x40,
+		0x00, 0x00, 0x00, 0x01, 0x68, 0xee, 0x3c, 0x30,
+	};
+	struct cedrus_h264_enc_params params = {
+		.profile_idc = 100,
+		.level_idc = 51,
+		.qp = 30,
+		.cabac = true,
+		.gop_size = 30,
+	};
+	u8 header[64] = {};
+	size_t bytes_used = 0;
+	int ret;
+
+	ret = cedrus_h264_enc_headers(&params, 320, 240, header,
+				      sizeof(header), &bytes_used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, bytes_used, sizeof(expected));
+	KUNIT_EXPECT_MEMEQ(test, header, expected, sizeof(expected));
+
+	memset(header, 0, sizeof(header));
+	ret = cedrus_h264_enc_headers(&params, 328, 248, header,
+				      sizeof(header), &bytes_used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, bytes_used, sizeof(cropped_expected));
+	KUNIT_EXPECT_MEMEQ(test, header, cropped_expected,
+			   sizeof(cropped_expected));
+
+	ret = cedrus_h264_enc_headers(&params, 3072, 3072, header,
+				      sizeof(header), &bytes_used);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	ret = cedrus_h264_enc_headers(&params, 3088, 3072, header,
+				      sizeof(header), &bytes_used);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+
+	ret = cedrus_h264_enc_headers(&params, 320, 240, header, 8,
+				      &bytes_used);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	ret = cedrus_h264_enc_headers(&params, 321, 240, header,
+				      sizeof(header), &bytes_used);
+	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
+	ret = cedrus_h264_enc_headers(&params, 4096, 4096, header,
+				      sizeof(header), &bytes_used);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+}
+
+static void cedrus_enc_test_gop_policy(struct kunit *test)
+{
+	struct cedrus_h264_enc_gop gop = {};
+
+	KUNIT_EXPECT_TRUE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
+	KUNIT_EXPECT_FALSE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
+	KUNIT_EXPECT_FALSE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
+	KUNIT_EXPECT_TRUE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
+	KUNIT_EXPECT_TRUE(test, cedrus_h264_enc_gop_next(&gop, 3, true));
+	KUNIT_EXPECT_FALSE(test, cedrus_h264_enc_gop_next(&gop, 0, false));
+}
+
 static void cedrus_enc_test_frontend_contract(struct kunit *test)
 {
 	struct cedrus_enc_format format = cedrus_enc_test_formats[0];
@@ -260,6 +466,11 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_bitstream_window),
 	KUNIT_CASE(cedrus_enc_test_irq_contract),
 	KUNIT_CASE(cedrus_enc_test_qp_field),
+	KUNIT_CASE(cedrus_enc_test_buffer_layout),
+	KUNIT_CASE(cedrus_enc_test_dma_register_image),
+	KUNIT_CASE(cedrus_enc_test_standard_controls),
+	KUNIT_CASE(cedrus_enc_test_stock_headers),
+	KUNIT_CASE(cedrus_enc_test_gop_policy),
 	{}
 };
 
