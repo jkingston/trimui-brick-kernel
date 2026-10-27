@@ -76,9 +76,9 @@ properties:
   allwinner,stock-suspend:
     type: boolean
     description:
-      Save and reconstruct the A133 PIO context around the stock monitor's
-      system suspend flow. This requires matching main and R-CCU context
-      restoration and is intended only for the TrimUI Brick stock boot chain.
+      Save and reconstruct the A133 PIO context around a stock-compatible
+      system-suspend flow. This requires matching main and R-CCU context
+      restoration and is intended only for the TrimUI Brick.
 
   reg:
     maxItems: 1

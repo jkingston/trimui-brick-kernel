@@ -20,10 +20,10 @@ properties:
   allwinner,stock-suspend:
     type: boolean
     description:
-      Enable the A133 stock monitor/SCP clock-context contract. Both the A133
-      main CCU and its A100-compatible R-CCU must opt in together. The original
-      stock monitor, initialized SCP and service device tree must be retained.
-      This does not apply to a TF-A boot chain.
+      Enable the A133 stock-compatible clock-context contract. Both the A133
+      main CCU and its A100-compatible R-CCU must opt in together. Firmware must
+      be either the original stock monitor/SCP chain or a native service that
+      advertises the matching complete system-suspend capability.
 
   compatible:
     enum:
