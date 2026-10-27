@@ -8,6 +8,7 @@
 #include <linux/videodev2.h>
 
 #include "cedrus_enc.h"
+#include "cedrus_enc_regs.h"
 #include "cedrus_h264_enc.h"
 #include "cedrus_h264_enc_hw.h"
 
@@ -371,6 +372,39 @@ static void cedrus_enc_test_codec_register_image(struct kunit *test)
 		-EOPNOTSUPP);
 }
 
+static void cedrus_enc_test_header_put_bits(struct kunit *test)
+{
+	void __iomem *base;
+	u32 *registers;
+	int ret;
+
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	base = (void __iomem *)registers;
+
+	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY,
+	       base + VE_ENC_AVC_STATUS);
+	ret = cedrus_a133_h264_put_bits(base, 0x12345678, 32);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA),
+			0x12345678U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER),
+			0x00002001U);
+
+	writel(0, base + VE_ENC_AVC_STATUS);
+	writel(0, base + VE_ENC_AVC_PUT_BITS_DATA);
+	writel(0, base + VE_ENC_AVC_TRIGGER);
+	ret = cedrus_a133_h264_put_bits(base, 1, 1);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA), 0U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER), 0U);
+
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_put_bits(base, 0, 0),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_put_bits(base, 0, 33),
+			-EINVAL);
+}
+
 static void cedrus_enc_test_reference_rotation(struct kunit *test)
 {
 	const struct cedrus_a133_h264_enc_frame_slot slots[2] = {
@@ -557,6 +591,7 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_buffer_layout),
 	KUNIT_CASE(cedrus_enc_test_dma_register_image),
 	KUNIT_CASE(cedrus_enc_test_codec_register_image),
+	KUNIT_CASE(cedrus_enc_test_header_put_bits),
 	KUNIT_CASE(cedrus_enc_test_reference_rotation),
 	KUNIT_CASE(cedrus_enc_test_standard_controls),
 	KUNIT_CASE(cedrus_enc_test_stock_headers),

@@ -16,6 +16,7 @@
 #define CEDRUS_A133_ENC_LENGTH_STRIDE_MBS	48U
 #define CEDRUS_A133_ENC_MAX_DIMENSION	4096U
 #define CEDRUS_A133_ENC_MOTION_CONTROL	0x1200U
+#define CEDRUS_A133_ENC_PUT_BITS_POLLS	10000U
 
 int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
 				   bool idr,
@@ -214,6 +215,32 @@ void cedrus_a133_h264_program_codec(void __iomem *base,
 	writel(codec->picture_control, base + VE_ENC_AVC_PICTURE_CONTROL);
 	writel(codec->qp_control, base + VE_ENC_AVC_QP);
 	writel(codec->motion_control, base + VE_ENC_AVC_MOTION_CONTROL);
+}
+
+int cedrus_a133_h264_put_bits(void __iomem *base, u32 value,
+			      unsigned int count)
+{
+	unsigned int poll;
+
+	if (!base || !count || count > 32)
+		return -EINVAL;
+
+	/*
+	 * Stock PutBits waits for status bit 9 for at most 10000 reads, then
+	 * writes the payload before issuing start type 1 with a six-bit count.
+	 */
+	for (poll = 0; poll < CEDRUS_A133_ENC_PUT_BITS_POLLS; poll++) {
+		if (readl(base + VE_ENC_AVC_STATUS) &
+		    VE_ENC_AVC_STATUS_PUT_BITS_READY) {
+			writel(value, base + VE_ENC_AVC_PUT_BITS_DATA);
+			writel(VE_ENC_AVC_TRIGGER_PUT_BITS |
+			       FIELD_PREP(VE_ENC_AVC_TRIGGER_BIT_COUNT, count),
+			       base + VE_ENC_AVC_TRIGGER);
+			return 0;
+		}
+	}
+
+	return -ETIMEDOUT;
 }
 
 void cedrus_a133_h264_irq_arm(void __iomem *base)
