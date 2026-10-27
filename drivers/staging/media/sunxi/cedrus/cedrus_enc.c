@@ -88,7 +88,8 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 		return -EOPNOTSUPP;
 
 	if (!ops->formats || !ops->num_formats || !ops->controls ||
-	    !ops->num_controls || !ops->s_ctrl || !ops->supports_pair ||
+	    !ops->num_controls || !ops->bind || !ops->ctx_init ||
+	    !ops->ctx_cleanup || !ops->s_ctrl || !ops->supports_pair ||
 	    !ops->start_streaming ||
 	    !ops->stop_streaming || !ops->prepare_job || !ops->trigger ||
 	    !ops->irq_status || !ops->irq_ack || !ops->abort ||
@@ -130,6 +131,31 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 	}
 
 	return 0;
+}
+
+int cedrus_enc_bind(const struct cedrus_enc_backend_ops *ops,
+		    struct cedrus_dev *dev)
+{
+	if (!ops || !ops->bind || !dev)
+		return -EINVAL;
+
+	return ops->bind(dev);
+}
+
+int cedrus_enc_ctx_init(const struct cedrus_enc_backend_ops *ops,
+			struct cedrus_ctx *ctx)
+{
+	if (!ops || !ops->ctx_init || !ctx)
+		return -EINVAL;
+
+	return ops->ctx_init(ctx);
+}
+
+void cedrus_enc_ctx_cleanup(const struct cedrus_enc_backend_ops *ops,
+			    struct cedrus_ctx *ctx)
+{
+	if (ops && ops->ctx_cleanup && ctx)
+		ops->ctx_cleanup(ctx);
 }
 
 int cedrus_enc_abort(const struct cedrus_enc_backend_ops *ops,

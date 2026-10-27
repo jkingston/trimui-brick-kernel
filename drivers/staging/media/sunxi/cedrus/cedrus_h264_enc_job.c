@@ -363,3 +363,266 @@ int cedrus_a133_h264_job_resume(struct cedrus_a133_h264_job_lifecycle *lifecycle
 	lifecycle->state = CEDRUS_A133_H264_JOB_IDLE;
 	return 0;
 }
+
+struct cedrus_a133_h264_owned_range {
+	dma_addr_t start;
+	size_t size;
+};
+
+static int
+cedrus_a133_h264_owned_ranges_validate(struct cedrus_a133_h264_owned_range *ranges,
+				       unsigned int count)
+{
+	dma_addr_t ends[7];
+	unsigned int i, j;
+
+	if (count > ARRAY_SIZE(ends))
+		return -EINVAL;
+
+	for (i = 0; i < count; i++) {
+		if (!ranges[i].size || !IS_ALIGNED(ranges[i].start, 256))
+			return -EINVAL;
+		if (check_add_overflow(ranges[i].start,
+				       (dma_addr_t)ranges[i].size - 1, &ends[i]))
+			return -EOVERFLOW;
+		if ((ranges[i].start >> 8) > U32_MAX ||
+		    (ends[i] >> 8) > U32_MAX)
+			return -ERANGE;
+		for (j = 0; j < i; j++)
+			if (ranges[i].start <= ends[j] &&
+			    ranges[j].start <= ends[i])
+				return -EINVAL;
+	}
+
+	return 0;
+}
+
+void cedrus_a133_h264_backend_job_init(struct cedrus_a133_h264_backend_job *job)
+{
+	if (job)
+		*job = (struct cedrus_a133_h264_backend_job) {};
+}
+
+int cedrus_a133_h264_backend_buffers_set(struct cedrus_a133_h264_backend_job *job,
+					 u32 width, u32 height,
+					 const struct cedrus_a133_h264_job_buffers *buffers)
+{
+	struct cedrus_a133_h264_enc_buffer_layout layout;
+	struct cedrus_a133_h264_owned_range ranges[7];
+	int ret;
+
+	if (!job || !buffers || job->buffers_owned ||
+	    job->lifecycle.state != CEDRUS_A133_H264_JOB_IDLE ||
+	    job->lifecycle.active_generation || buffers->source ||
+	    buffers->source_size || buffers->bitstream ||
+	    buffers->bitstream_size)
+		return -EINVAL;
+
+	ret = cedrus_a133_h264_enc_buffer_layout(width, height, &layout);
+	if (ret)
+		return ret;
+	if (buffers->reconstruction_size[0] < layout.reconstruction ||
+	    buffers->reconstruction_size[1] < layout.reconstruction ||
+	    buffers->subpixel_size[0] < layout.subpixel ||
+	    buffers->subpixel_size[1] < layout.subpixel ||
+	    buffers->motion_vectors_size < layout.motion_vectors ||
+	    buffers->macroblock_info_size < layout.macroblock_info ||
+	    buffers->work_9c_size < layout.work_9c)
+		return -ENOSPC;
+
+	ranges[0] = (struct cedrus_a133_h264_owned_range) {
+		.start = buffers->reconstruction[0],
+		.size = buffers->reconstruction_size[0],
+	};
+	ranges[1] = (struct cedrus_a133_h264_owned_range) {
+		.start = buffers->reconstruction[1],
+		.size = buffers->reconstruction_size[1],
+	};
+	ranges[2] = (struct cedrus_a133_h264_owned_range) {
+		.start = buffers->subpixel[0],
+		.size = buffers->subpixel_size[0],
+	};
+	ranges[3] = (struct cedrus_a133_h264_owned_range) {
+		.start = buffers->subpixel[1],
+		.size = buffers->subpixel_size[1],
+	};
+	ranges[4] = (struct cedrus_a133_h264_owned_range) {
+		.start = buffers->motion_vectors,
+		.size = buffers->motion_vectors_size,
+	};
+	ranges[5] = (struct cedrus_a133_h264_owned_range) {
+		.start = buffers->macroblock_info,
+		.size = buffers->macroblock_info_size,
+	};
+	ranges[6] = (struct cedrus_a133_h264_owned_range) {
+		.start = buffers->work_9c,
+		.size = buffers->work_9c_size,
+	};
+	ret = cedrus_a133_h264_owned_ranges_validate(ranges, ARRAY_SIZE(ranges));
+	if (ret)
+		return ret;
+
+	job->buffers = *buffers;
+	job->width = width;
+	job->height = height;
+	job->buffers_owned = true;
+	return 0;
+}
+
+int cedrus_a133_h264_backend_buffers_clear(struct cedrus_a133_h264_backend_job *job)
+{
+	u64 generation;
+	enum cedrus_a133_h264_job_state state;
+
+	if (!job)
+		return -EINVAL;
+	if (!job->buffers_owned || job->lifecycle.active_generation ||
+	    (job->lifecycle.state != CEDRUS_A133_H264_JOB_IDLE &&
+	     job->lifecycle.state != CEDRUS_A133_H264_JOB_SUSPENDED))
+		return -EBUSY;
+
+	generation = job->lifecycle.generation;
+	state = job->lifecycle.state;
+	*job = (struct cedrus_a133_h264_backend_job) {
+		.lifecycle = {
+			.generation = generation,
+			.state = state,
+		},
+	};
+	return 0;
+}
+
+int cedrus_a133_h264_backend_job_prepare(struct cedrus_a133_h264_backend_job *job,
+					 const struct cedrus_h264_enc_params *params,
+					 const struct cedrus_a133_h264_job_request *request,
+					 dma_addr_t source, size_t source_size,
+					 dma_addr_t bitstream, size_t bitstream_size)
+{
+	struct cedrus_a133_h264_job_buffers buffers;
+	int ret;
+
+	if (!job || !request || !job->buffers_owned ||
+	    request->width != job->width || request->height != job->height)
+		return -EINVAL;
+
+	buffers = job->buffers;
+	buffers.source = source;
+	buffers.source_size = source_size;
+	buffers.bitstream = bitstream;
+	buffers.bitstream_size = bitstream_size;
+	ret = cedrus_a133_h264_job_plan_prepare(&job->lifecycle,
+						&job->rotation, params, request,
+						&buffers, &job->plan);
+	if (ret)
+		return ret;
+
+	job->buffers.source = source;
+	job->buffers.source_size = source_size;
+	job->buffers.bitstream = bitstream;
+	job->buffers.bitstream_size = bitstream_size;
+	job->completion = (struct cedrus_a133_h264_job_completion) {};
+	job->recovery_generation = 0;
+	job->reset_done = false;
+	return 0;
+}
+
+int cedrus_a133_h264_backend_job_trigger(struct cedrus_a133_h264_backend_job *job,
+					 void __iomem *base)
+{
+	if (!job)
+		return -EINVAL;
+
+	return cedrus_a133_h264_job_trigger(&job->lifecycle, base,
+					    job->plan.generation);
+}
+
+static void
+cedrus_a133_h264_backend_retire_buffers(struct cedrus_a133_h264_backend_job *job)
+{
+	job->buffers.source = 0;
+	job->buffers.source_size = 0;
+	job->buffers.bitstream = 0;
+	job->buffers.bitstream_size = 0;
+}
+
+int cedrus_a133_h264_backend_job_complete(struct cedrus_a133_h264_backend_job *job,
+					  size_t capture_capacity, u32 status,
+					  u32 produced_bits)
+{
+	u64 generation;
+	int ret;
+
+	if (!job)
+		return -EINVAL;
+
+	generation = job->plan.generation;
+	ret = cedrus_a133_h264_job_complete(&job->lifecycle, &job->rotation,
+					    generation, capture_capacity, status,
+					    produced_bits, &job->completion);
+	if (job->lifecycle.state == CEDRUS_A133_H264_JOB_RESET_REQUIRED) {
+		job->recovery_generation = generation;
+		job->reset_done = false;
+		cedrus_a133_h264_backend_retire_buffers(job);
+	} else if (!ret && job->lifecycle.state == CEDRUS_A133_H264_JOB_IDLE) {
+		job->recovery_generation = 0;
+		job->reset_done = false;
+		cedrus_a133_h264_backend_retire_buffers(job);
+	}
+
+	return ret;
+}
+
+int cedrus_a133_h264_backend_job_abort(struct cedrus_a133_h264_backend_job *job)
+{
+	u64 generation;
+	int ret;
+
+	if (!job)
+		return -EINVAL;
+
+	generation = job->plan.generation;
+	if (job->lifecycle.state == CEDRUS_A133_H264_JOB_RESET_REQUIRED &&
+	    !job->lifecycle.active_generation && generation &&
+	    job->recovery_generation == generation)
+		return 0;
+	if (job->lifecycle.state == CEDRUS_A133_H264_JOB_IDLE &&
+	    !job->lifecycle.active_generation && generation &&
+	    job->recovery_generation == generation && job->reset_done)
+		return 0;
+
+	ret = cedrus_a133_h264_job_abort(&job->lifecycle, &job->rotation,
+					 generation);
+	if (ret)
+		return ret;
+
+	job->recovery_generation = generation;
+	job->reset_done = false;
+	cedrus_a133_h264_backend_retire_buffers(job);
+	return 0;
+}
+
+int cedrus_a133_h264_backend_reset_complete(struct cedrus_a133_h264_backend_job *job)
+{
+	int ret;
+
+	if (!job || !job->recovery_generation)
+		return -EINVAL;
+	if (job->lifecycle.state == CEDRUS_A133_H264_JOB_IDLE &&
+	    !job->lifecycle.active_generation && job->reset_done)
+		return 0;
+
+	ret = cedrus_a133_h264_job_reset_complete(&job->lifecycle);
+	if (!ret)
+		job->reset_done = true;
+	return ret;
+}
+
+int cedrus_a133_h264_backend_suspend(struct cedrus_a133_h264_backend_job *job)
+{
+	return job ? cedrus_a133_h264_job_suspend(&job->lifecycle) : -EINVAL;
+}
+
+int cedrus_a133_h264_backend_resume(struct cedrus_a133_h264_backend_job *job)
+{
+	return job ? cedrus_a133_h264_job_resume(&job->lifecycle) : -EINVAL;
+}

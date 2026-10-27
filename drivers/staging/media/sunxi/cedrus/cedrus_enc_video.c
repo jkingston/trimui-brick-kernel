@@ -386,11 +386,14 @@ static int cedrus_enc_open(struct file *file)
 	ctx->dev = dev;
 	ctx->is_encoder = true;
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
+	ret = cedrus_enc_ctx_init(ops, ctx);
+	if (ret)
+		goto err_fh;
 	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(dev->m2m_dev, ctx,
 					   cedrus_enc_queue_init);
 	if (IS_ERR(ctx->fh.m2m_ctx)) {
 		ret = PTR_ERR(ctx->fh.m2m_ctx);
-		goto err_fh;
+		goto err_ctx;
 	}
 
 	ctx->src_fmt.pixelformat = 0;
@@ -427,6 +430,8 @@ static int cedrus_enc_open(struct file *file)
 err_m2m:
 	v4l2_ctrl_handler_free(&ctx->hdl);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
+err_ctx:
+	cedrus_enc_ctx_cleanup(ops, ctx);
 err_fh:
 	v4l2_fh_exit(&ctx->fh);
 	kfree(ctx);
@@ -447,6 +452,7 @@ static int cedrus_enc_release(struct file *file)
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	v4l2_ctrl_handler_free(&ctx->hdl);
+	cedrus_enc_ctx_cleanup(dev->enc_ops, ctx);
 	v4l2_fh_exit(&ctx->fh);
 	kfree(ctx);
 	mutex_unlock(&dev->dev_mutex);

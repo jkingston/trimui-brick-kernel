@@ -512,6 +512,11 @@ static int cedrus_probe(struct platform_device *pdev)
 			 "Failed to register IOMMU fault recovery: %d\n", ret);
 		goto err_m2m;
 	}
+	if (dev->enc_ops) {
+		ret = cedrus_enc_bind(dev->enc_ops, dev);
+		if (ret)
+			goto err_enc;
+	}
 
 	dev->mdev.dev = &pdev->dev;
 	strscpy(dev->mdev.model, CEDRUS_NAME, sizeof(dev->mdev.model));
@@ -558,6 +563,7 @@ err_video:
 	video_unregister_device(&dev->vfd);
 err_media:
 	media_device_cleanup(&dev->mdev);
+err_enc:
 	cedrus_iommu_fault_exit(dev);
 	cedrus_enc_unbind(dev->enc_ops, dev);
 err_m2m:

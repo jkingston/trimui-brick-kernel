@@ -93,6 +93,9 @@ struct cedrus_enc_backend_ops {
 	unsigned int num_formats;
 	const struct v4l2_ctrl_config *controls;
 	unsigned int num_controls;
+	int (*bind)(struct cedrus_dev *dev);
+	int (*ctx_init)(struct cedrus_ctx *ctx);
+	void (*ctx_cleanup)(struct cedrus_ctx *ctx);
 	int (*s_ctrl)(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl);
 	bool (*supports_pair)(u32 raw_pixelformat, u32 coded_pixelformat);
 	int (*start_streaming)(struct cedrus_ctx *ctx);
@@ -114,7 +117,8 @@ struct cedrus_enc_backend_ops {
  * must be idempotent if terminal handling has already retired the active
  * generation.  reset_complete is called only after the VE reset pulse
  * succeeds.  unbind runs after jobs and recovery work are drained and must
- * tolerate a partially initialized backend.
+ * tolerate a partially initialized backend.  ctx_cleanup runs after mem2mem
+ * has synchronously stopped the context and before its storage is released.
  */
 
 /* Values to program into the A133 input preprocessor for one raw frame. */
@@ -164,6 +168,13 @@ struct cedrus_a133_h264_enc_frame_slot {
 int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops);
 int cedrus_enc_format_validate(const struct cedrus_enc_format *format);
 bool cedrus_enc_control_is_standard(u32 id);
+
+int cedrus_enc_bind(const struct cedrus_enc_backend_ops *ops,
+		    struct cedrus_dev *dev);
+int cedrus_enc_ctx_init(const struct cedrus_enc_backend_ops *ops,
+			struct cedrus_ctx *ctx);
+void cedrus_enc_ctx_cleanup(const struct cedrus_enc_backend_ops *ops,
+			    struct cedrus_ctx *ctx);
 
 int cedrus_enc_abort(const struct cedrus_enc_backend_ops *ops,
 		     struct cedrus_ctx *ctx,

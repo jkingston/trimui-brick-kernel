@@ -78,6 +78,40 @@ struct cedrus_a133_h264_job_completion {
 	bool error;
 };
 
+/* Per-context ownership retained across jobs and overlapping recovery. */
+struct cedrus_a133_h264_backend_job {
+	struct cedrus_a133_h264_job_lifecycle lifecycle;
+	struct cedrus_a133_h264_enc_rotation rotation;
+	struct cedrus_a133_h264_job_buffers buffers;
+	struct cedrus_a133_h264_job_plan plan;
+	struct cedrus_a133_h264_job_completion completion;
+	u64 recovery_generation;
+	u32 width;
+	u32 height;
+	bool reset_done;
+	bool buffers_owned;
+};
+
+void cedrus_a133_h264_backend_job_init(struct cedrus_a133_h264_backend_job *job);
+int cedrus_a133_h264_backend_buffers_set(struct cedrus_a133_h264_backend_job *job,
+					 u32 width, u32 height,
+					 const struct cedrus_a133_h264_job_buffers *buffers);
+int cedrus_a133_h264_backend_buffers_clear(struct cedrus_a133_h264_backend_job *job);
+int cedrus_a133_h264_backend_job_prepare(struct cedrus_a133_h264_backend_job *job,
+					 const struct cedrus_h264_enc_params *params,
+					 const struct cedrus_a133_h264_job_request *request,
+					 dma_addr_t source, size_t source_size,
+					 dma_addr_t bitstream, size_t bitstream_size);
+int cedrus_a133_h264_backend_job_trigger(struct cedrus_a133_h264_backend_job *job,
+					 void __iomem *base);
+int cedrus_a133_h264_backend_job_complete(struct cedrus_a133_h264_backend_job *job,
+					  size_t capture_capacity, u32 status,
+					  u32 produced_bits);
+int cedrus_a133_h264_backend_job_abort(struct cedrus_a133_h264_backend_job *job);
+int cedrus_a133_h264_backend_reset_complete(struct cedrus_a133_h264_backend_job *job);
+int cedrus_a133_h264_backend_suspend(struct cedrus_a133_h264_backend_job *job);
+int cedrus_a133_h264_backend_resume(struct cedrus_a133_h264_backend_job *job);
+
 int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_job_lifecycle *lifecycle,
 				      struct cedrus_a133_h264_enc_rotation *rotation,
 				      const struct cedrus_h264_enc_params *params,

@@ -124,6 +124,7 @@ struct cedrus_ctx {
 	bool				is_encoder;
 	struct v4l2_fh			fh;
 	struct cedrus_dev		*dev;
+	void				*enc_priv;
 
 	struct v4l2_pix_format		src_fmt;
 	struct v4l2_pix_format		dst_fmt;
@@ -223,6 +224,7 @@ struct cedrus_dev {
 	unsigned int		capabilities;
 	bool		requires_iommu;
 	const struct cedrus_enc_backend_ops *enc_ops;
+	void		*enc_priv;
 	int		irq;
 	atomic_t	iommu_fault_state;
 	/* Keep process-context VE programming inside fault recovery. */

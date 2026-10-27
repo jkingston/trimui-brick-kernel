@@ -8,9 +8,11 @@
 #include <linux/sizes.h>
 #include <linux/videodev2.h>
 
+#include "cedrus.h"
 #include "cedrus_enc.h"
 #include "cedrus_enc_regs.h"
 #include "cedrus_h264_enc.h"
+#include "cedrus_h264_enc_backend.h"
 #include "cedrus_h264_enc_hw.h"
 #include "cedrus_h264_enc_job.h"
 
@@ -46,6 +48,27 @@ static bool cedrus_enc_test_pair(u32 raw_pixelformat, u32 coded_pixelformat)
 static int cedrus_enc_test_s_ctrl(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl)
 {
 	return 0;
+}
+
+static unsigned int cedrus_enc_test_bind_count;
+static unsigned int cedrus_enc_test_ctx_init_count;
+static unsigned int cedrus_enc_test_ctx_cleanup_count;
+
+static int cedrus_enc_test_bind(struct cedrus_dev *dev)
+{
+	cedrus_enc_test_bind_count++;
+	return 0;
+}
+
+static int cedrus_enc_test_ctx_init(struct cedrus_ctx *ctx)
+{
+	cedrus_enc_test_ctx_init_count++;
+	return 0;
+}
+
+static void cedrus_enc_test_ctx_cleanup(struct cedrus_ctx *ctx)
+{
+	cedrus_enc_test_ctx_cleanup_count++;
 }
 
 static int cedrus_enc_test_start(struct cedrus_ctx *ctx)
@@ -118,6 +141,9 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 		.num_formats = ARRAY_SIZE(cedrus_enc_test_formats),
 		.controls = cedrus_enc_test_controls,
 		.num_controls = ARRAY_SIZE(cedrus_enc_test_controls),
+		.bind = cedrus_enc_test_bind,
+		.ctx_init = cedrus_enc_test_ctx_init,
+		.ctx_cleanup = cedrus_enc_test_ctx_cleanup,
 		.s_ctrl = cedrus_enc_test_s_ctrl,
 		.supports_pair = cedrus_enc_test_pair,
 		.start_streaming = cedrus_enc_test_start,
@@ -139,6 +165,9 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 	ops.contract = CEDRUS_ENC_CONTRACT_REQUIRED;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), 0);
 
+	ops.ctx_init = NULL;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+	ops.ctx_init = cedrus_enc_test_ctx_init;
 	ops.abort = NULL;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
 	ops.abort = cedrus_enc_test_abort;
@@ -152,6 +181,9 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 static void cedrus_enc_test_recovery_dispatch(struct kunit *test)
 {
 	const struct cedrus_enc_backend_ops ops = {
+		.bind = cedrus_enc_test_bind,
+		.ctx_init = cedrus_enc_test_ctx_init,
+		.ctx_cleanup = cedrus_enc_test_ctx_cleanup,
 		.abort = cedrus_enc_test_abort,
 		.reset_complete = cedrus_enc_test_reset_complete,
 		.unbind = cedrus_enc_test_unbind,
@@ -164,6 +196,16 @@ static void cedrus_enc_test_recovery_dispatch(struct kunit *test)
 
 	cedrus_enc_test_reset_count = 0;
 	cedrus_enc_test_unbind_count = 0;
+	cedrus_enc_test_bind_count = 0;
+	cedrus_enc_test_ctx_init_count = 0;
+	cedrus_enc_test_ctx_cleanup_count = 0;
+
+	KUNIT_EXPECT_EQ(test, cedrus_enc_bind(&ops, dev), 0);
+	KUNIT_EXPECT_EQ(test, cedrus_enc_test_bind_count, 1U);
+	KUNIT_EXPECT_EQ(test, cedrus_enc_ctx_init(&ops, ctx), 0);
+	KUNIT_EXPECT_EQ(test, cedrus_enc_test_ctx_init_count, 1U);
+	cedrus_enc_ctx_cleanup(&ops, ctx);
+	KUNIT_EXPECT_EQ(test, cedrus_enc_test_ctx_cleanup_count, 1U);
 
 	for (reason = CEDRUS_ENC_ABORT_STREAMOFF;
 	     reason <= CEDRUS_ENC_ABORT_IOMMU_FAULT; reason++) {
@@ -1291,6 +1333,172 @@ static void cedrus_enc_test_job_teardown(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, lifecycle.state, CEDRUS_A133_H264_JOB_IDLE);
 }
 
+static void
+cedrus_enc_test_backend_buffers(struct kunit *test,
+				struct cedrus_a133_h264_job_buffers *buffers)
+{
+	struct cedrus_a133_h264_enc_buffer_layout layout;
+	dma_addr_t cursor = 0x22000000;
+	int ret;
+
+	ret = cedrus_a133_h264_enc_buffer_layout(320, 240, &layout);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	buffers->reconstruction[0] = cursor;
+	buffers->reconstruction_size[0] = PAGE_ALIGN(layout.reconstruction);
+	cursor += PAGE_ALIGN(layout.reconstruction);
+	buffers->reconstruction[1] = cursor;
+	buffers->reconstruction_size[1] = PAGE_ALIGN(layout.reconstruction);
+	cursor += PAGE_ALIGN(layout.reconstruction);
+	buffers->subpixel[0] = cursor;
+	buffers->subpixel_size[0] = PAGE_ALIGN(layout.subpixel);
+	cursor += PAGE_ALIGN(layout.subpixel);
+	buffers->subpixel[1] = cursor;
+	buffers->subpixel_size[1] = PAGE_ALIGN(layout.subpixel);
+	cursor += PAGE_ALIGN(layout.subpixel);
+	buffers->motion_vectors = cursor;
+	buffers->motion_vectors_size = PAGE_ALIGN(layout.motion_vectors);
+	cursor += PAGE_ALIGN(layout.motion_vectors);
+	buffers->macroblock_info = cursor;
+	buffers->macroblock_info_size = PAGE_ALIGN(layout.macroblock_info);
+	cursor += PAGE_ALIGN(layout.macroblock_info);
+	buffers->work_9c = cursor;
+	buffers->work_9c_size = PAGE_ALIGN(layout.work_9c);
+}
+
+static void cedrus_enc_test_backend_job_owner(struct kunit *test)
+{
+	struct cedrus_a133_h264_backend_job job;
+	struct cedrus_a133_h264_job_buffers buffers = {};
+	struct cedrus_h264_enc_params params = {
+		.profile_idc = 100,
+		.level_idc = 51,
+		.qp = 30,
+		.cabac = true,
+		.gop_size = 30,
+	};
+	struct cedrus_a133_h264_job_request request = {
+		.pixelformat = V4L2_PIX_FMT_NV12,
+		.width = 320,
+		.height = 240,
+		.bytesperline = 320,
+		.slice = { .qp = 30, .idr = true },
+	};
+	void __iomem *registers;
+	u64 generation;
+	int ret;
+
+	cedrus_a133_h264_backend_job_init(&job);
+	cedrus_enc_test_backend_buffers(test, &buffers);
+	ret = cedrus_a133_h264_backend_buffers_set(&job, 320, 240, &buffers);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_TRUE(test, job.buffers_owned);
+	ret = cedrus_a133_h264_backend_buffers_set(&job, 320, 240, &buffers);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+
+	ret = cedrus_a133_h264_backend_job_prepare(&job, &params, &request,
+						   0x20000000,
+						   320 * 240 * 3 / 2,
+						   0x21000000, SZ_1M);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	generation = job.plan.generation;
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	ret = cedrus_a133_h264_backend_job_trigger(&job, registers);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, job.lifecycle.state,
+			CEDRUS_A133_H264_JOB_RUNNING);
+
+	KUNIT_ASSERT_EQ(test, cedrus_a133_h264_backend_job_abort(&job), 0);
+	KUNIT_EXPECT_EQ(test, job.recovery_generation, generation);
+	KUNIT_EXPECT_EQ(test, job.lifecycle.state,
+			CEDRUS_A133_H264_JOB_RESET_REQUIRED);
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_backend_job_abort(&job), 0);
+	ret = cedrus_a133_h264_backend_reset_complete(&job);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_TRUE(test, job.reset_done);
+	ret = cedrus_a133_h264_backend_reset_complete(&job);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_backend_job_abort(&job), 0);
+
+	KUNIT_ASSERT_EQ(test, cedrus_a133_h264_backend_buffers_clear(&job), 0);
+	KUNIT_EXPECT_FALSE(test, job.buffers_owned);
+	KUNIT_EXPECT_EQ(test, job.lifecycle.generation, generation);
+	KUNIT_EXPECT_FALSE(test, job.rotation.started);
+}
+
+static void cedrus_enc_test_backend_buffer_rejects_alias(struct kunit *test)
+{
+	struct cedrus_a133_h264_backend_job job;
+	struct cedrus_a133_h264_job_buffers buffers = {};
+	size_t reconstruction_size;
+	int ret;
+
+	cedrus_a133_h264_backend_job_init(&job);
+	cedrus_enc_test_backend_buffers(test, &buffers);
+	reconstruction_size = buffers.reconstruction_size[0];
+	buffers.reconstruction_size[0]--;
+	ret = cedrus_a133_h264_backend_buffers_set(&job, 320, 240, &buffers);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	buffers.reconstruction_size[0] = reconstruction_size;
+	buffers.subpixel[0] = buffers.reconstruction[0];
+	ret = cedrus_a133_h264_backend_buffers_set(&job, 320, 240, &buffers);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
+static void cedrus_enc_test_backend_registry(struct kunit *test)
+{
+	const struct cedrus_enc_backend_ops *ops =
+		&cedrus_a133_h264_backend_candidate_ops;
+	struct cedrus_dev *dev;
+	struct cedrus_ctx *first, *second, *blocked;
+	struct cedrus_a133_h264_backend_job *first_job, *second_job;
+
+	dev = kunit_kzalloc(test, sizeof(*dev), GFP_KERNEL);
+	first = kunit_kzalloc(test, sizeof(*first), GFP_KERNEL);
+	second = kunit_kzalloc(test, sizeof(*second), GFP_KERNEL);
+	blocked = kunit_kzalloc(test, sizeof(*blocked), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, dev);
+	KUNIT_ASSERT_NOT_NULL(test, first);
+	KUNIT_ASSERT_NOT_NULL(test, second);
+	KUNIT_ASSERT_NOT_NULL(test, blocked);
+	first->dev = dev;
+	second->dev = dev;
+	blocked->dev = dev;
+
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(ops), -EOPNOTSUPP);
+	KUNIT_ASSERT_EQ(test, ops->bind(dev), 0);
+	KUNIT_ASSERT_NOT_NULL(test, dev->enc_priv);
+	KUNIT_ASSERT_EQ(test, ops->ctx_init(first), 0);
+	KUNIT_ASSERT_EQ(test, ops->ctx_init(second), 0);
+	first_job = cedrus_a133_h264_backend_test_job(first);
+	second_job = cedrus_a133_h264_backend_test_job(second);
+	KUNIT_ASSERT_NOT_NULL(test, first_job);
+	KUNIT_ASSERT_NOT_NULL(test, second_job);
+	KUNIT_EXPECT_EQ(test, first_job->lifecycle.state,
+			CEDRUS_A133_H264_JOB_IDLE);
+
+	second_job->lifecycle.state = CEDRUS_A133_H264_JOB_PREPARED;
+	second_job->lifecycle.active_generation = 1;
+	KUNIT_EXPECT_EQ(test, ops->suspend(dev), -EBUSY);
+	KUNIT_EXPECT_EQ(test, first_job->lifecycle.state,
+			CEDRUS_A133_H264_JOB_IDLE);
+	second_job->lifecycle.state = CEDRUS_A133_H264_JOB_IDLE;
+	second_job->lifecycle.active_generation = 0;
+	KUNIT_ASSERT_EQ(test, ops->suspend(dev), 0);
+	KUNIT_EXPECT_EQ(test, first_job->lifecycle.state,
+			CEDRUS_A133_H264_JOB_SUSPENDED);
+	KUNIT_EXPECT_EQ(test, ops->ctx_init(blocked), -EBUSY);
+	KUNIT_EXPECT_PTR_EQ(test, blocked->enc_priv, NULL);
+	KUNIT_ASSERT_EQ(test, ops->resume(dev), 0);
+	KUNIT_EXPECT_EQ(test, first_job->lifecycle.state,
+			CEDRUS_A133_H264_JOB_IDLE);
+
+	ops->ctx_cleanup(second);
+	ops->ctx_cleanup(first);
+	ops->unbind(dev);
+	KUNIT_EXPECT_PTR_EQ(test, dev->enc_priv, NULL);
+}
+
 static void cedrus_enc_test_frontend_contract(struct kunit *test)
 {
 	struct cedrus_enc_format format = cedrus_enc_test_formats[0];
@@ -1334,6 +1542,9 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_job_plan_fail_closed),
 	KUNIT_CASE(cedrus_enc_test_job_completion),
 	KUNIT_CASE(cedrus_enc_test_job_teardown),
+	KUNIT_CASE(cedrus_enc_test_backend_job_owner),
+	KUNIT_CASE(cedrus_enc_test_backend_buffer_rejects_alias),
+	KUNIT_CASE(cedrus_enc_test_backend_registry),
 	{}
 };
 
