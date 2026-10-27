@@ -12,6 +12,7 @@
 #define _CEDRUS_ENC_H_
 
 #include <linux/bits.h>
+#include <linux/errno.h>
 #include <linux/types.h>
 
 #include <media/v4l2-ctrls.h>
@@ -173,6 +174,7 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops);
 int cedrus_enc_format_validate(const struct cedrus_enc_format *format);
 bool cedrus_enc_control_is_standard(u32 id);
 
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
 int cedrus_enc_bind(const struct cedrus_enc_backend_ops *ops,
 		    struct cedrus_dev *dev);
 int cedrus_enc_ctx_init(const struct cedrus_enc_backend_ops *ops,
@@ -187,6 +189,31 @@ int cedrus_enc_reset_complete(const struct cedrus_enc_backend_ops *ops,
 			      struct cedrus_ctx *ctx);
 void cedrus_enc_unbind(const struct cedrus_enc_backend_ops *ops,
 		       struct cedrus_dev *dev);
+#else
+static inline int cedrus_enc_bind(const struct cedrus_enc_backend_ops *ops,
+				  struct cedrus_dev *dev)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int cedrus_enc_abort(const struct cedrus_enc_backend_ops *ops,
+				   struct cedrus_ctx *ctx,
+				   enum cedrus_enc_abort_reason reason)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int cedrus_enc_reset_complete(
+		const struct cedrus_enc_backend_ops *ops, struct cedrus_ctx *ctx)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void cedrus_enc_unbind(const struct cedrus_enc_backend_ops *ops,
+				     struct cedrus_dev *dev)
+{
+}
+#endif
 
 int cedrus_a133_h264_enc_source_prepare(u32 pixelformat, u32 width,
 					u32 height, u32 bytesperline,
