@@ -229,8 +229,7 @@ int cedrus_a133_h264_job_trigger(struct cedrus_a133_h264_job_lifecycle *lifecycl
 	if (lifecycle->state != CEDRUS_A133_H264_JOB_PREPARED)
 		return -EBUSY;
 
-	/* Clear stale W1C status before making an immediate completion possible. */
-	cedrus_a133_h264_irq_arm(base);
+	/* Programming has armed and cleared IRQ state before this final command. */
 	lifecycle->state = CEDRUS_A133_H264_JOB_RUNNING;
 	cedrus_a133_h264_trigger(base);
 
@@ -529,11 +528,25 @@ int cedrus_a133_h264_backend_job_prepare(struct cedrus_a133_h264_backend_job *jo
 int cedrus_a133_h264_backend_job_trigger(struct cedrus_a133_h264_backend_job *job,
 					 void __iomem *base)
 {
+	struct cedrus_a133_h264_job_plan *plan;
+	int ret;
+
 	if (!job)
 		return -EINVAL;
 
-	return cedrus_a133_h264_job_trigger(&job->lifecycle, base,
-					    job->plan.generation);
+	plan = &job->plan;
+	ret = cedrus_a133_h264_program_job(base, &plan->dma, &plan->codec,
+					   &plan->parameter_sets,
+					  &plan->slice_header,
+					  plan->emit_parameter_sets);
+	if (!ret)
+		ret = cedrus_a133_h264_job_trigger(&job->lifecycle, base,
+						   job->plan.generation);
+	if (!ret)
+		return 0;
+	if (cedrus_a133_h264_backend_job_abort(job))
+		return -EIO;
+	return ret;
 }
 
 static void

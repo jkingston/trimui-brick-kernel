@@ -101,7 +101,7 @@ struct cedrus_enc_backend_ops {
 	int (*start_streaming)(struct cedrus_ctx *ctx);
 	void (*stop_streaming)(struct cedrus_ctx *ctx);
 	int (*prepare_job)(struct cedrus_ctx *ctx);
-	void (*trigger)(struct cedrus_ctx *ctx);
+	int (*trigger)(struct cedrus_ctx *ctx);
 	enum cedrus_enc_irq_status (*irq_status)(struct cedrus_ctx *ctx);
 	void (*irq_ack)(struct cedrus_ctx *ctx);
 	int (*abort)(struct cedrus_ctx *ctx,

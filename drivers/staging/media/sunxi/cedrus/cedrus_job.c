@@ -56,15 +56,13 @@ void cedrus_job_mark_running(struct cedrus_ctx *ctx)
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 }
 
-void cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
-		       bool fault_owner)
+bool cedrus_job_finish_locked(struct cedrus_ctx *ctx,
+			      enum vb2_buffer_state state, bool fault_owner)
 {
 	struct cedrus_dev *dev = ctx->dev;
-	unsigned long flags;
 
-	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
-	if ((fault_owner || !cedrus_iommu_fault_pending(dev)) &&
-	    (dev->job_ctx == ctx || (fault_owner && !dev->job_ctx)) &&
+	lockdep_assert_held(&dev->iommu_completion_lock);
+	if ((dev->job_ctx == ctx || (fault_owner && !dev->job_ctx)) &&
 	    ctx == v4l2_m2m_get_curr_priv(dev->m2m_dev)) {
 		if (ctx->is_encoder)
 			cedrus_enc_job_finish(ctx);
@@ -72,7 +70,21 @@ void cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
 		dev->job_running = false;
 		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
 						 ctx->fh.m2m_ctx, state);
+		return true;
 	}
+
+	return false;
+}
+
+void cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
+		       bool fault_owner)
+{
+	struct cedrus_dev *dev = ctx->dev;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	if (fault_owner || !cedrus_iommu_fault_pending(dev))
+		cedrus_job_finish_locked(ctx, state, fault_owner);
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 }
 
@@ -147,7 +159,30 @@ void cedrus_encoder_device_run(struct cedrus_ctx *ctx)
 	if (!ret && cedrus_job_active(ctx)) {
 		schedule_delayed_work(&dev->watchdog_work, msecs_to_jiffies(2000));
 		cedrus_job_mark_running(ctx);
-		dev->enc_ops->trigger(ctx);
+		ret = dev->enc_ops->trigger(ctx);
+		if (ret) {
+			int abort_ret;
+			int reset_ret;
+
+			cancel_delayed_work(&dev->watchdog_work);
+			abort_ret = cedrus_enc_abort(dev->enc_ops, ctx,
+						     CEDRUS_ENC_ABORT_IRQ_ERROR);
+			if (abort_ret)
+				v4l2_warn(&dev->v4l2_dev,
+					  "encoder trigger abort returned %d\n",
+					  abort_ret);
+			reset_ret = reset_control_reset(dev->rstc);
+			if (reset_ret && dev->requires_iommu)
+				panic("%s: VE trigger reset failed (%d); DMA buffers remain owned",
+				      dev_name(dev->dev), reset_ret);
+			if (!reset_ret) {
+				abort_ret = cedrus_enc_reset_complete(dev->enc_ops, ctx);
+				if (abort_ret)
+					v4l2_warn(&dev->v4l2_dev,
+						  "encoder trigger reset completion returned %d\n",
+						  abort_ret);
+			}
+		}
 	}
 
 	if (dev->requires_iommu)

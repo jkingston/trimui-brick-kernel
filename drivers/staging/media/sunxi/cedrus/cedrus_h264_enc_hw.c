@@ -24,6 +24,12 @@
 	FIELD_MAX(VE_ENC_AVC_TRIGGER_BIT_COUNT)
 #define CEDRUS_A133_ENC_LEVEL_5_1_MAX_MBS	36864U
 #define CEDRUS_A133_ENC_PIC_INIT_QP	26
+#define CEDRUS_A133_ENC_320_PICTURE_SIZE	0x0028001eU
+#define CEDRUS_A133_ENC_320_QP30		0x0800051eU
+#define CEDRUS_A133_ENC_IDR_CONTROL	0x00000500U
+#define CEDRUS_A133_ENC_P_CONTROL	0x00000510U
+#define CEDRUS_A133_ENC_DYNAMIC_ME_48	0x000c0002U
+#define CEDRUS_A133_ENC_DYNAMIC_ME_4C	0x00400034U
 
 int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
 				   bool idr,
@@ -196,9 +202,9 @@ void cedrus_a133_h264_program_source(void __iomem *base,
 void cedrus_a133_h264_program_bitstream(void __iomem *base,
 					const struct cedrus_a133_h264_enc_dma *dma)
 {
+	writel(dma->bitstream.offset, base + VE_ENC_AVC_BITSTREAM_OFFSET);
 	writel(dma->bitstream.start, base + VE_ENC_AVC_BITSTREAM_START);
 	writel(dma->bitstream.end, base + VE_ENC_AVC_BITSTREAM_END);
-	writel(dma->bitstream.offset, base + VE_ENC_AVC_BITSTREAM_OFFSET);
 	writel(dma->bitstream.limit, base + VE_ENC_AVC_BITSTREAM_LIMIT);
 }
 
@@ -539,14 +545,13 @@ int cedrus_a133_h264_slice_header_prepare(const struct cedrus_h264_enc_params *p
 	return builder.error;
 }
 
-int cedrus_a133_h264_vlc_emit(void __iomem *base,
-			      const struct cedrus_a133_h264_vlc_sequence *sequence)
+static int
+cedrus_a133_h264_vlc_validate(const struct cedrus_a133_h264_vlc_sequence *sequence)
 {
 	unsigned int bit_count = 0;
 	unsigned int i;
-	int ret;
 
-	if (!base || !sequence || !sequence->count ||
+	if (!sequence || !sequence->count ||
 	    sequence->count > CEDRUS_A133_H264_VLC_MAX_COMMANDS)
 		return -EINVAL;
 
@@ -562,6 +567,20 @@ int cedrus_a133_h264_vlc_emit(void __iomem *base,
 	}
 	if (bit_count != sequence->bit_count)
 		return -EINVAL;
+	return 0;
+}
+
+int cedrus_a133_h264_vlc_emit(void __iomem *base,
+			      const struct cedrus_a133_h264_vlc_sequence *sequence)
+{
+	unsigned int i;
+	int ret;
+
+	if (!base)
+		return -EINVAL;
+	ret = cedrus_a133_h264_vlc_validate(sequence);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < sequence->count; i++) {
 		ret = cedrus_a133_h264_put_bits(base,
@@ -574,6 +593,94 @@ int cedrus_a133_h264_vlc_emit(void __iomem *base,
 	return 0;
 }
 
+int cedrus_a133_h264_program_job(void __iomem *base,
+				 const struct cedrus_a133_h264_enc_dma *dma,
+				 const struct cedrus_a133_h264_enc_codec *codec,
+				 const struct cedrus_a133_h264_vlc_sequence *parameter_sets,
+				 const struct cedrus_a133_h264_vlc_sequence *slice_header,
+				 bool emit_parameter_sets)
+{
+	struct cedrus_a133_h264_enc_dma frame_dma;
+	int ret;
+
+	if (!base || !dma || !codec || !slice_header ||
+	    (emit_parameter_sets && !parameter_sets))
+		return -EINVAL;
+	if (codec->picture_size != CEDRUS_A133_ENC_320_PICTURE_SIZE ||
+	    codec->qp_control != CEDRUS_A133_ENC_320_QP30 ||
+	    codec->motion_control != CEDRUS_A133_ENC_MOTION_CONTROL ||
+	    (codec->picture_control != CEDRUS_A133_ENC_IDR_CONTROL &&
+	     codec->picture_control != CEDRUS_A133_ENC_P_CONTROL) ||
+	    dma->source.input_size != CEDRUS_A133_ENC_320_PICTURE_SIZE ||
+	    dma->bitstream.offset)
+		return -EOPNOTSUPP;
+	ret = cedrus_a133_h264_vlc_validate(slice_header);
+	if (ret)
+		return ret;
+	if (emit_parameter_sets) {
+		ret = cedrus_a133_h264_vlc_validate(parameter_sets);
+		if (ret)
+			return ret;
+	}
+
+	if (emit_parameter_sets) {
+		writel(VE_ENC_AVC_TRIGGER_PARAMETER_SETS_BEGIN,
+		       base + VE_ENC_AVC_TRIGGER);
+		writel(dma->bitstream.offset,
+		       base + VE_ENC_AVC_BITSTREAM_OFFSET);
+		writel(dma->bitstream.start, base + VE_ENC_AVC_BITSTREAM_START);
+		writel(dma->bitstream.end, base + VE_ENC_AVC_BITSTREAM_END);
+		writel(dma->bitstream.limit, base + VE_ENC_AVC_BITSTREAM_LIMIT);
+		writel(codec->picture_control,
+		       base + VE_ENC_AVC_PICTURE_CONTROL);
+		ret = cedrus_a133_h264_vlc_emit(base, parameter_sets);
+		if (ret)
+			return ret;
+		writel(VE_ENC_AVC_TRIGGER_PARAMETER_SETS_END,
+		       base + VE_ENC_AVC_TRIGGER);
+	}
+
+	cedrus_a133_h264_program_source(base, dma);
+	cedrus_a133_h264_irq_arm(base);
+
+	/* h264_config_registers fixed setup, in observed stock call order. */
+	writel(0, base + VE_ENC_AVC_HP_FILTER);
+	writel(codec->picture_size, base + VE_ENC_AVC_PICTURE_SIZE);
+	writel(dma->work_9c, base + VE_ENC_AVC_WORK_9C);
+	writel(codec->picture_control & VE_ENC_AVC_PICTURE_CONTROL_P_SLICE ?
+	       0x120f0c09 : 0, base + VE_ENC_AVC_CLASSIFY_30);
+	writel(0x261e1814, base + VE_ENC_AVC_CLASSIFY_34);
+	writel(0xffff3630, base + VE_ENC_AVC_CLASSIFY_38);
+	writel(codec->qp_control & ~VE_ENC_AVC_QP_STOCK_VER2,
+	       base + VE_ENC_AVC_QP);
+	writel(CEDRUS_A133_ENC_DYNAMIC_ME_48,
+	       base + VE_ENC_AVC_DYNAMIC_ME_48);
+	writel(CEDRUS_A133_ENC_DYNAMIC_ME_4C,
+	       base + VE_ENC_AVC_DYNAMIC_ME_4C);
+	writel(0, base + VE_ENC_AVC_CLASSIFY_40);
+	writel(codec->picture_control & VE_ENC_AVC_PICTURE_CONTROL_P_SLICE ?
+	       0xc0001900 : 0x80001900, base + VE_ENC_AVC_FIXED_2C);
+	frame_dma = *dma;
+	frame_dma.bitstream.offset = emit_parameter_sets ?
+		parameter_sets->bit_count : 0;
+	cedrus_a133_h264_program_bitstream(base, &frame_dma);
+	cedrus_a133_h264_program_frames(base, dma);
+	writel(dma->macroblock_info, base + VE_ENC_AVC_MACROBLOCK_INFO);
+	writel(0, base + VE_ENC_AVC_DEBLOCK);
+	writel(0, base + VE_ENC_AVC_FIXED_28);
+
+	ret = cedrus_a133_h264_vlc_emit(base, slice_header);
+	if (ret)
+		return ret;
+	writel(codec->picture_control, base + VE_ENC_AVC_PICTURE_CONTROL);
+	writel(codec->qp_control, base + VE_ENC_AVC_QP);
+	writel(0, base + VE_ENC_AVC_HEADER_CONTROL);
+	writel(0, base + VE_ENC_AVC_VER2_24);
+	writel(dma->motion_vectors, base + VE_ENC_AVC_MOTION_VECTORS);
+	writel(codec->motion_control, base + VE_ENC_AVC_MOTION_CONTROL);
+	return 0;
+}
+
 void cedrus_a133_h264_irq_arm(void __iomem *base)
 {
 	u32 status;
@@ -583,11 +690,26 @@ void cedrus_a133_h264_irq_arm(void __iomem *base)
 	writel(status | VE_ENC_AVC_STATUS_LOW_MASK, base + VE_ENC_AVC_STATUS);
 }
 
+u32 cedrus_a133_h264_irq_read(void __iomem *base)
+{
+	return readl(base + VE_ENC_AVC_STATUS);
+}
+
+u32 cedrus_a133_h264_bitstream_length(void __iomem *base)
+{
+	return readl(base + VE_ENC_AVC_BITSTREAM_LENGTH);
+}
+
+void cedrus_a133_h264_irq_ack_status(void __iomem *base, u32 status)
+{
+	writel(status, base + VE_ENC_AVC_STATUS);
+}
+
 u32 cedrus_a133_h264_irq_ack(void __iomem *base)
 {
-	u32 status = readl(base + VE_ENC_AVC_STATUS);
+	u32 status = cedrus_a133_h264_irq_read(base);
 
-	writel(status, base + VE_ENC_AVC_STATUS);
+	cedrus_a133_h264_irq_ack_status(base, status);
 	return status;
 }
 

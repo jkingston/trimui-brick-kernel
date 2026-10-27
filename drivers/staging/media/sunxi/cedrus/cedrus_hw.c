@@ -162,23 +162,46 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 
 	if (!cancel_delayed_work(&dev->watchdog_work))
 		return IRQ_NONE;
-	if (unlikely(cedrus_iommu_fault_pending(dev)))
-		return IRQ_NONE;
-
-	if (ctx->is_encoder) {
-		switch (dev->enc_ops->irq_status(ctx)) {
-		case CEDRUS_ENC_IRQ_OK:
-			status = CEDRUS_IRQ_OK;
-			break;
-		case CEDRUS_ENC_IRQ_ERROR:
-			status = CEDRUS_IRQ_ERROR;
-			break;
-		default:
-			status = CEDRUS_IRQ_NONE;
-			break;
-		}
-	} else {
+	if (!ctx->is_encoder) {
+		if (unlikely(cedrus_iommu_fault_pending(dev)))
+			return IRQ_NONE;
 		status = ctx->current_codec->irq_status(ctx);
+		if (status == CEDRUS_IRQ_NONE) {
+			unsigned long now = jiffies;
+
+			schedule_delayed_work(&dev->watchdog_work,
+					      time_after(deadline, now) ? deadline - now : 1);
+			return IRQ_NONE;
+		}
+		ctx->current_codec->irq_disable(ctx);
+		ctx->current_codec->irq_clear(ctx);
+		state = status == CEDRUS_IRQ_ERROR ? VB2_BUF_STATE_ERROR :
+			VB2_BUF_STATE_DONE;
+		cedrus_job_finish(ctx, state, false);
+		return IRQ_HANDLED;
+	}
+
+	/*
+	 * Keep fault publication excluded through terminal metadata consumption,
+	 * reference promotion and generic job retirement.  Whichever path acquires
+	 * this lock first owns the terminal outcome.
+	 */
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	if (unlikely(cedrus_iommu_fault_pending(dev)) || dev->job_ctx != ctx ||
+	    !dev->job_running || ctx != v4l2_m2m_get_curr_priv(dev->m2m_dev)) {
+		spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+		return IRQ_NONE;
+	}
+	switch (dev->enc_ops->irq_status(ctx)) {
+	case CEDRUS_ENC_IRQ_OK:
+		status = CEDRUS_IRQ_OK;
+		break;
+	case CEDRUS_ENC_IRQ_ERROR:
+		status = CEDRUS_IRQ_ERROR;
+		break;
+	default:
+		status = CEDRUS_IRQ_NONE;
+		break;
 	}
 
 	if (status == CEDRUS_IRQ_NONE) {
@@ -186,23 +209,21 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 
 		schedule_delayed_work(&dev->watchdog_work,
 				      time_after(deadline, now) ? deadline - now : 1);
+		spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 		return IRQ_NONE;
 	}
 
-	if (ctx->is_encoder) {
-		dev->enc_ops->irq_ack(ctx);
-		if (status == CEDRUS_IRQ_ERROR) {
-			schedule_work(&dev->encoder_error_work);
-			return IRQ_HANDLED;
-		}
-	} else {
-		ctx->current_codec->irq_disable(ctx);
-		ctx->current_codec->irq_clear(ctx);
+	dev->enc_ops->irq_ack(ctx);
+	if (status == CEDRUS_IRQ_ERROR) {
+		schedule_work(&dev->encoder_error_work);
+		spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+		return IRQ_HANDLED;
 	}
 
 	state = status == CEDRUS_IRQ_ERROR ? VB2_BUF_STATE_ERROR :
 		VB2_BUF_STATE_DONE;
-	cedrus_job_finish(ctx, state, false);
+	cedrus_job_finish_locked(ctx, state, false);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 
 	return IRQ_HANDLED;
 }
@@ -300,15 +321,12 @@ static void cedrus_iommu_fault(struct device *device,
 	struct cedrus_dev *dev = data;
 	unsigned long flags;
 
-	if (atomic_cmpxchg(&dev->iommu_fault_state, CEDRUS_IOMMU_READY,
-			   CEDRUS_IOMMU_FAULT_PENDING) != CEDRUS_IOMMU_READY)
-		return;
-
-	/* Pair with the VE IRQ and watchdog completion critical sections. The
-	 * state is published first so an already-running completion recheck also
-	 * yields ownership to the fault path.
-	 */
 	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	if (atomic_cmpxchg(&dev->iommu_fault_state, CEDRUS_IOMMU_READY,
+			   CEDRUS_IOMMU_FAULT_PENDING) != CEDRUS_IOMMU_READY) {
+		spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+		return;
+	}
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 
 	v4l2_err(&dev->v4l2_dev,

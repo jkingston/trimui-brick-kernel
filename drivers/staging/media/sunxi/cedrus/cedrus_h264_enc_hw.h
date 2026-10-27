@@ -107,8 +107,17 @@ int cedrus_a133_h264_slice_header_prepare(const struct cedrus_h264_enc_params *p
 					  struct cedrus_a133_h264_vlc_sequence *sequence);
 int cedrus_a133_h264_vlc_emit(void __iomem *base,
 			      const struct cedrus_a133_h264_vlc_sequence *sequence);
+int cedrus_a133_h264_program_job(void __iomem *base,
+				 const struct cedrus_a133_h264_enc_dma *dma,
+				 const struct cedrus_a133_h264_enc_codec *codec,
+				 const struct cedrus_a133_h264_vlc_sequence *parameter_sets,
+				 const struct cedrus_a133_h264_vlc_sequence *slice_header,
+				 bool emit_parameter_sets);
 
 void cedrus_a133_h264_irq_arm(void __iomem *base);
+u32 cedrus_a133_h264_irq_read(void __iomem *base);
+u32 cedrus_a133_h264_bitstream_length(void __iomem *base);
+void cedrus_a133_h264_irq_ack_status(void __iomem *base, u32 status);
 u32 cedrus_a133_h264_irq_ack(void __iomem *base);
 void cedrus_a133_h264_trigger(void __iomem *base);
 
