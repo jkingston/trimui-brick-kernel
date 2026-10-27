@@ -8,9 +8,12 @@
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 
+#define AXP2202_CLOCK_ENABLE	0x0b
 #define AXP2202_INPUT_CURRENT	0x17
 #define AXP2202_CHARGE_CURRENT	0x62
 #define AXP2202_CURRENT_MASK	GENMASK(5, 0)
+#define AXP2202_BC12_CLOCK	BIT(4)
+#define AXP2202_BC12_DISABLE	BIT(7)
 #define AXP2202_CHARGE_STEP_UA	64000
 #define AXP2202_INPUT_STEP_UA	50000
 #define AXP2202_INPUT_MIN_UA	100000
@@ -22,6 +25,7 @@
  */
 #define BRICK_CHARGE_RUNTIME_UA	960000
 #define BRICK_CHARGE_MAX_UA	1920000
+#define BRICK_INPUT_PC_UA	500000
 #define BRICK_INPUT_MAX_UA	2500000
 
 struct axp2202_charger {
@@ -74,6 +78,40 @@ static int axp2202_write_current(struct axp2202_charger *charger,
 	if (!ret && (value & AXP2202_CURRENT_MASK) != selector)
 		ret = -EIO;
 	return ret;
+}
+
+static int axp2202_init_usb_input(struct axp2202_charger *charger)
+{
+	unsigned int selector, value;
+	int ret;
+
+	selector = (BRICK_INPUT_PC_UA - AXP2202_INPUT_MIN_UA) /
+		   AXP2202_INPUT_STEP_UA;
+
+	/* Stock disables BC1.2 before using its timed PC/adapter policy. */
+	ret = regmap_update_bits(charger->map, AXP2202_CLOCK_ENABLE,
+				 AXP2202_BC12_CLOCK, 0);
+	if (ret)
+		return ret;
+	ret = regmap_read(charger->map, AXP2202_CLOCK_ENABLE, &value);
+	if (ret)
+		return ret;
+	if (value & AXP2202_BC12_CLOCK)
+		return -EIO;
+
+	ret = regmap_update_bits(charger->map, AXP2202_INPUT_CURRENT,
+				 AXP2202_BC12_DISABLE | AXP2202_CURRENT_MASK,
+				 AXP2202_BC12_DISABLE | selector);
+	if (ret)
+		return ret;
+	ret = regmap_read(charger->map, AXP2202_INPUT_CURRENT, &value);
+	if (ret)
+		return ret;
+	if ((value & (AXP2202_BC12_DISABLE | AXP2202_CURRENT_MASK)) !=
+	    (AXP2202_BC12_DISABLE | selector))
+		return -EIO;
+
+	return 0;
 }
 
 static int axp2202_set_current(struct power_supply *psy, unsigned int reg,
@@ -448,6 +486,9 @@ static int axp2202_telemetry_probe(struct platform_device *pdev)
 				    BRICK_CHARGE_RUNTIME_UA / AXP2202_CHARGE_STEP_UA);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to set runtime charge current\n");
+	ret = axp2202_init_usb_input(charger);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to set safe USB input current\n");
 	config.drv_data = charger;
 	monitor = devm_kzalloc(&pdev->dev, sizeof(*monitor), GFP_KERNEL);
 	if (!monitor)

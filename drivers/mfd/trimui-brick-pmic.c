@@ -15,6 +15,7 @@
 
 #define AXP2202_STATUS		0x00
 #define AXP2202_CHARGE_STATUS	0x01
+#define AXP2202_CLOCK_ENABLE	0x0b
 #define AXP2202_MODULE_EN	0x19
 #define AXP2202_IRQ_ENABLE	0x40
 #define AXP2202_IRQ_STATUS	0x48
@@ -36,6 +37,7 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 		return true;
 	switch (reg) {
 	case AXP2202_SOFT_PWROFF:
+	case AXP2202_CLOCK_ENABLE:
 	case 0x0f: /* VBUS implementation selector */
 	case 0x13: /* VBUS output switch */
 	case 0x17: /* USB input current limit */
@@ -64,6 +66,7 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 static bool brick_writeable(struct device *dev, unsigned int reg)
 {
 	return reg == AXP2202_SOFT_PWROFF ||
+	       reg == AXP2202_CLOCK_ENABLE ||
 	       reg == 0x17 || reg == 0x62 || reg == 0x13 || reg == AXP2202_MODULE_EN ||
 	       reg == AXP2202_LDO_EN1 ||
 	       (reg >= AXP2202_IRQ_ENABLE && reg < AXP2202_IRQ_ENABLE + 5) ||
