@@ -112,9 +112,15 @@ int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rota
 	if (request->slice.idr) {
 		/* Only the independently observed startup IDR is admitted. */
 		if (rotation->started || request->slice.frame_num ||
-		    request->slice.pic_order_cnt_lsb)
+		    request->slice.pic_order_cnt_lsb ||
+		    rotation->next_frame_num)
 			return -EOPNOTSUPP;
 	} else if (!rotation->started) {
+		return -EINVAL;
+	} else if (request->slice.frame_num != rotation->next_frame_num ||
+		   request->slice.pic_order_cnt_lsb !=
+		   (u8)(rotation->next_frame_num * 2)) {
+		/* The emitted SPS forbids gaps and uses an eight-bit type-0 POC. */
 		return -EINVAL;
 	}
 

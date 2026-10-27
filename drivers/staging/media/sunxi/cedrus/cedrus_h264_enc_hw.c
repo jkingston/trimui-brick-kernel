@@ -114,6 +114,7 @@ int cedrus_a133_h264_frame_complete(struct cedrus_a133_h264_enc_rotation *rotati
 
 	if (success) {
 		rotation->reference = rotation->pending_reference;
+		rotation->next_frame_num++;
 		rotation->started = true;
 	}
 	rotation->pending = false;

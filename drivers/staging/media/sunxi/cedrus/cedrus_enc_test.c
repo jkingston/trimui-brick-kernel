@@ -870,6 +870,7 @@ static void cedrus_enc_test_job_plan(struct kunit *test)
 
 	KUNIT_ASSERT_EQ(test,
 			cedrus_a133_h264_frame_complete(&rotation, true), 0);
+	KUNIT_EXPECT_EQ(test, rotation.next_frame_num, (u8)1);
 	request.slice = (struct cedrus_a133_h264_slice_header) {
 		.frame_num = 1,
 		.pic_order_cnt_lsb = 2,
@@ -887,6 +888,22 @@ static void cedrus_enc_test_job_plan(struct kunit *test)
 	KUNIT_ASSERT_EQ(test,
 			cedrus_a133_h264_frame_complete(&rotation, false), 0);
 	KUNIT_EXPECT_EQ(test, rotation.reference, (u8)0);
+	KUNIT_EXPECT_EQ(test, rotation.next_frame_num, (u8)1);
+
+	/* A failed P frame is retried with the same frame_num and POC. */
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_frame_complete(&rotation, true), 0);
+	KUNIT_EXPECT_EQ(test, rotation.next_frame_num, (u8)2);
+	request.slice.frame_num = 2;
+	request.slice.pic_order_cnt_lsb = 4;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_frame_complete(&rotation, false), 0);
 }
 
 static void cedrus_enc_test_job_plan_fail_closed(struct kunit *test)
@@ -960,6 +977,15 @@ static void cedrus_enc_test_job_plan_fail_closed(struct kunit *test)
 						&buffers, &plan);
 	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
 	KUNIT_EXPECT_TRUE(test, rotation.started);
+	KUNIT_EXPECT_FALSE(test, rotation.pending);
+
+	request.slice.idr = false;
+	request.slice.frame_num = 2;
+	request.slice.pic_order_cnt_lsb = 4;
+	rotation.next_frame_num = 1;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 	KUNIT_EXPECT_FALSE(test, rotation.pending);
 }
 

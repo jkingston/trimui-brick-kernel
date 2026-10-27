@@ -29,10 +29,11 @@ struct cedrus_a133_h264_enc_dma {
 	u32 macroblock_info;
 };
 
-/* Two-slot reference state.  A slot becomes a reference on completion. */
+/* Two-slot reference and frame sequence state, committed on completion. */
 struct cedrus_a133_h264_enc_rotation {
 	u8 reference;
 	u8 pending_reference;
+	u8 next_frame_num;
 	bool started;
 	bool pending;
 };
