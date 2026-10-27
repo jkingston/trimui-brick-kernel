@@ -2,6 +2,7 @@
 
 #include <kunit/test.h>
 
+#include <linux/bitfield.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sizes.h>
@@ -347,6 +348,10 @@ static void cedrus_enc_test_codec_register_image(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, codec.picture_size, 0x0028001eU);
 	KUNIT_EXPECT_EQ(test, codec.picture_control, 0x00000500U);
+	KUNIT_EXPECT_EQ(test,
+			FIELD_GET(VE_ENC_AVC_PICTURE_CONTROL_FIX_MODE_NUM,
+				  codec.picture_control),
+			1U);
 	KUNIT_EXPECT_EQ(test, codec.qp_control, 0x0800051eU);
 	KUNIT_EXPECT_EQ(test, codec.motion_control, 0x00001200U);
 

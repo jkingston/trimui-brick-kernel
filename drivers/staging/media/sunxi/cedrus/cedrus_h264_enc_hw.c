@@ -46,15 +46,16 @@ int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
 
 	/*
 	 * h264InitRegInfo derives the length stride from 48 macroblocks, enables
-	 * dynamic ME above 192 pixels and sets bit 27.  The remaining constants
-	 * are common to every successful fixed-QP A133 capture; only bit 4
-	 * changes for P.
+	 * dynamic ME above 192 pixels and sets bit 27.  The tested path selects
+	 * fixModeNum 1.  The remaining constants are common to every successful
+	 * fixed-QP A133 capture; only bit 4 changes for P.
 	 */
 	*codec = (struct cedrus_a133_h264_enc_codec) {
 		.picture_size = (width / CEDRUS_A133_ENC_DIMENSION_UNIT) << 16 |
 				height / CEDRUS_A133_ENC_DIMENSION_UNIT,
 		.picture_control = VE_ENC_AVC_PICTURE_CONTROL_CABAC |
-				   VE_ENC_AVC_PICTURE_CONTROL_FIXED_MODE |
+				   FIELD_PREP(VE_ENC_AVC_PICTURE_CONTROL_FIX_MODE_NUM,
+					      1) |
 				   (idr ? 0 :
 				    VE_ENC_AVC_PICTURE_CONTROL_P_SLICE),
 		.qp_control = VE_ENC_AVC_QP_STOCK_VER2 |
