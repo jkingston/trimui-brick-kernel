@@ -12,6 +12,7 @@
 #include "cedrus_enc_regs.h"
 #include "cedrus_h264_enc.h"
 #include "cedrus_h264_enc_hw.h"
+#include "cedrus_h264_enc_job.h"
 
 static const struct cedrus_enc_format cedrus_enc_test_formats[] = {
 	{
@@ -819,6 +820,149 @@ static void cedrus_enc_test_gop_policy(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, cedrus_h264_enc_gop_next(&gop, 0, false));
 }
 
+static void cedrus_enc_test_job_plan(struct kunit *test)
+{
+	struct cedrus_h264_enc_params params = {
+		.profile_idc = 100,
+		.level_idc = 51,
+		.qp = 30,
+		.cabac = true,
+		.gop_size = 30,
+	};
+	struct cedrus_a133_h264_job_request request = {
+		.pixelformat = V4L2_PIX_FMT_NV12,
+		.width = 320,
+		.height = 240,
+		.bytesperline = 320,
+		.slice = { .qp = 30, .idr = true },
+	};
+	struct cedrus_a133_h264_job_buffers buffers = {
+		.source = 0x20000000,
+		.source_size = 320 * 240 * 3 / 2,
+		.bitstream = 0x21000000,
+		.bitstream_size = SZ_1M,
+		.reconstruction = { 0x22000000, 0x22020000 },
+		.subpixel = { 0x22040000, 0x22041000 },
+		.motion_vectors = 0x22042000,
+		.macroblock_info = 0x22043000,
+	};
+	struct cedrus_a133_h264_enc_rotation rotation = {};
+	struct cedrus_a133_h264_job_plan plan;
+	int ret;
+
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_TRUE(test, plan.emit_parameter_sets);
+	KUNIT_EXPECT_EQ(test, plan.parameter_sets.bit_count, (u16)176);
+	KUNIT_EXPECT_EQ(test, plan.slice_header.bit_count, (u16)78);
+	KUNIT_EXPECT_EQ(test, plan.dma.source.luma, (dma_addr_t)0x20000000);
+	KUNIT_EXPECT_EQ(test, plan.dma.source.chroma,
+			(dma_addr_t)0x20012c00);
+	KUNIT_EXPECT_EQ(test, plan.dma.bitstream.start, 0x00210000U);
+	KUNIT_EXPECT_EQ(test, plan.codec.picture_size, 0x0028001eU);
+	KUNIT_EXPECT_EQ(test, plan.codec.picture_control, 0x00000500U);
+	KUNIT_EXPECT_EQ(test, plan.codec.qp_control, 0x0800051eU);
+	KUNIT_EXPECT_EQ(test, plan.dma.reference.luma, 0x00220000U);
+	KUNIT_EXPECT_EQ(test, plan.dma.reconstruction.luma, 0x00220000U);
+	KUNIT_EXPECT_TRUE(test, rotation.pending);
+	KUNIT_EXPECT_FALSE(test, rotation.started);
+
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_frame_complete(&rotation, true), 0);
+	request.slice = (struct cedrus_a133_h264_slice_header) {
+		.frame_num = 1,
+		.pic_order_cnt_lsb = 2,
+		.qp = 30,
+	};
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_FALSE(test, plan.emit_parameter_sets);
+	KUNIT_EXPECT_EQ(test, plan.parameter_sets.count, (u16)0);
+	KUNIT_EXPECT_EQ(test, plan.slice_header.bit_count, (u16)79);
+	KUNIT_EXPECT_EQ(test, plan.codec.picture_control, 0x00000510U);
+	KUNIT_EXPECT_EQ(test, plan.dma.reference.luma, 0x00220000U);
+	KUNIT_EXPECT_EQ(test, plan.dma.reconstruction.luma, 0x00220200U);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_frame_complete(&rotation, false), 0);
+	KUNIT_EXPECT_EQ(test, rotation.reference, (u8)0);
+}
+
+static void cedrus_enc_test_job_plan_fail_closed(struct kunit *test)
+{
+	struct cedrus_h264_enc_params params = {
+		.profile_idc = 100,
+		.level_idc = 51,
+		.qp = 30,
+		.cabac = true,
+		.gop_size = 30,
+	};
+	struct cedrus_a133_h264_job_request request = {
+		.pixelformat = V4L2_PIX_FMT_YUV420,
+		.width = 320,
+		.height = 240,
+		.bytesperline = 320,
+		.slice = { .qp = 30, .idr = true },
+	};
+	struct cedrus_a133_h264_job_buffers buffers = {
+		.source = 0x20000000,
+		.source_size = 320 * 240 * 3 / 2,
+		.bitstream = 0x21000000,
+		.bitstream_size = SZ_1M,
+		.reconstruction = { 0x22000000, 0x22020000 },
+		.subpixel = { 0x22040000, 0x22041000 },
+		.motion_vectors = 0x22042000,
+		.macroblock_info = 0x22043000,
+	};
+	const struct cedrus_a133_h264_enc_rotation initial = {};
+	struct cedrus_a133_h264_enc_rotation rotation = initial;
+	struct cedrus_a133_h264_job_plan plan = {};
+	int ret;
+
+	request.height = 0;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_MEMEQ(test, &rotation, &initial, sizeof(rotation));
+
+	request.height = 240;
+	buffers.source_size--;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	KUNIT_EXPECT_MEMEQ(test, &rotation, &initial, sizeof(rotation));
+
+	buffers.source_size++;
+	request.slice.qp = 29;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_MEMEQ(test, &rotation, &initial, sizeof(rotation));
+
+	request.slice.qp = 30;
+	buffers.macroblock_info = buffers.motion_vectors;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_MEMEQ(test, &rotation, &initial, sizeof(rotation));
+
+	buffers.macroblock_info = 0x22043000;
+	buffers.source = 0xffff0000;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+	KUNIT_EXPECT_MEMEQ(test, &rotation, &initial, sizeof(rotation));
+
+	buffers.source = 0x20000000;
+	rotation.started = true;
+	ret = cedrus_a133_h264_job_plan_prepare(&rotation, &params, &request,
+						&buffers, &plan);
+	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
+	KUNIT_EXPECT_TRUE(test, rotation.started);
+	KUNIT_EXPECT_FALSE(test, rotation.pending);
+}
+
 static void cedrus_enc_test_frontend_contract(struct kunit *test)
 {
 	struct cedrus_enc_format format = cedrus_enc_test_formats[0];
@@ -857,6 +1001,8 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_standard_controls),
 	KUNIT_CASE(cedrus_enc_test_stock_headers),
 	KUNIT_CASE(cedrus_enc_test_gop_policy),
+	KUNIT_CASE(cedrus_enc_test_job_plan),
+	KUNIT_CASE(cedrus_enc_test_job_plan_fail_closed),
 	{}
 };
 

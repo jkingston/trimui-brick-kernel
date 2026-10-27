@@ -1,0 +1,187 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Fail-closed A133 H.264 encoder job planning. */
+
+#include <linux/errno.h>
+#include <linux/kernel.h>
+#include <linux/overflow.h>
+
+#include "cedrus_h264_enc_job.h"
+
+static int
+cedrus_a133_h264_source_buffer_prepare(const struct cedrus_a133_h264_job_request *request,
+				       const struct cedrus_a133_h264_job_buffers *buffers,
+				       struct cedrus_a133_enc_source *source,
+				       size_t *used)
+{
+	dma_addr_t chroma;
+	dma_addr_t last;
+	size_t luma_size;
+	size_t source_size;
+
+	if (check_mul_overflow((size_t)request->bytesperline,
+			       (size_t)request->height, &luma_size) ||
+	    check_mul_overflow(luma_size, (size_t)3, &source_size))
+		return -EOVERFLOW;
+	source_size /= 2;
+	if (!source_size)
+		return -EINVAL;
+	if (buffers->source_size < source_size)
+		return -ENOSPC;
+	if (check_add_overflow(buffers->source, (dma_addr_t)source_size - 1,
+			       &last))
+		return -EOVERFLOW;
+	if (last > U32_MAX)
+		return -ERANGE;
+	if (check_add_overflow(buffers->source, (dma_addr_t)luma_size,
+			       &chroma))
+		return -EOVERFLOW;
+
+	*used = source_size;
+	return cedrus_a133_h264_enc_source_prepare(request->pixelformat,
+			request->width, request->height, request->bytesperline,
+			buffers->source, chroma, source);
+}
+
+struct cedrus_a133_h264_dma_range {
+	dma_addr_t start;
+	dma_addr_t end;
+};
+
+static int
+cedrus_a133_h264_dma_ranges_validate(const struct cedrus_a133_h264_job_buffers *buffers,
+				     const struct cedrus_a133_h264_enc_buffer_layout *layout,
+				     size_t source_size)
+{
+	struct cedrus_a133_h264_dma_range ranges[] = {
+		{ .start = buffers->source },
+		{ .start = buffers->bitstream },
+		{ .start = buffers->reconstruction[0] },
+		{ .start = buffers->reconstruction[1] },
+		{ .start = buffers->subpixel[0] },
+		{ .start = buffers->subpixel[1] },
+		{ .start = buffers->motion_vectors },
+		{ .start = buffers->macroblock_info },
+	};
+	const size_t sizes[] = {
+		source_size,
+		buffers->bitstream_size,
+		layout->reconstruction,
+		layout->reconstruction,
+		layout->subpixel,
+		layout->subpixel,
+		layout->motion_vectors,
+		layout->macroblock_info,
+	};
+	unsigned int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(ranges); i++) {
+		if (!sizes[i])
+			return -EINVAL;
+		if (check_add_overflow(ranges[i].start, (dma_addr_t)sizes[i],
+				       &ranges[i].end))
+			return -EOVERFLOW;
+		for (j = 0; j < i; j++)
+			if (ranges[i].start < ranges[j].end &&
+			    ranges[j].start < ranges[i].end)
+				return -EINVAL;
+	}
+
+	return 0;
+}
+
+int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rotation,
+				      const struct cedrus_h264_enc_params *params,
+				      const struct cedrus_a133_h264_job_request *request,
+				      const struct cedrus_a133_h264_job_buffers *buffers,
+				      struct cedrus_a133_h264_job_plan *plan)
+{
+	struct cedrus_a133_h264_enc_rotation next_rotation;
+	struct cedrus_a133_h264_enc_frame_slot reference;
+	struct cedrus_a133_h264_enc_frame_slot reconstruction;
+	struct cedrus_a133_h264_job_plan next = {};
+	struct cedrus_a133_enc_bitstream bitstream;
+	struct cedrus_a133_enc_source source;
+	size_t source_size;
+	unsigned int i;
+	int ret;
+
+	if (!rotation || !params || !request || !buffers || !plan)
+		return -EINVAL;
+	if (request->slice.qp != params->qp)
+		return -EINVAL;
+	if (request->slice.idr) {
+		/* Only the independently observed startup IDR is admitted. */
+		if (rotation->started || request->slice.frame_num ||
+		    request->slice.pic_order_cnt_lsb)
+			return -EOPNOTSUPP;
+	} else if (!rotation->started) {
+		return -EINVAL;
+	}
+
+	ret = cedrus_a133_h264_source_buffer_prepare(request, buffers,
+						     &source, &source_size);
+	if (ret)
+		return ret;
+	ret = cedrus_a133_h264_enc_bitstream_prepare(buffers->bitstream,
+						     buffers->bitstream_size,
+						     &bitstream);
+	if (ret)
+		return ret;
+	ret = cedrus_a133_h264_enc_buffer_layout(request->width,
+						 request->height, &next.layout);
+	if (ret)
+		return ret;
+	ret = cedrus_a133_h264_dma_ranges_validate(buffers, &next.layout,
+						   source_size);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < ARRAY_SIZE(next.slots); i++) {
+		struct cedrus_a133_h264_enc_frame_slot *slot = &next.slots[i];
+		dma_addr_t rec = buffers->reconstruction[i];
+		dma_addr_t sub = buffers->subpixel[i];
+
+		ret = cedrus_a133_h264_enc_frame_slot_prepare(rec, sub, &next.layout, slot);
+		if (ret)
+			return ret;
+	}
+
+	next_rotation = *rotation;
+	ret = cedrus_a133_h264_frame_prepare(&next_rotation, next.slots,
+					     request->slice.idr, &reference,
+					     &reconstruction);
+	if (ret)
+		return ret;
+	ret = cedrus_a133_h264_dma_prepare(&source, &bitstream, &reference,
+					   &reconstruction,
+					   buffers->motion_vectors,
+					   buffers->macroblock_info,
+					   &next.layout, &next.dma);
+	if (ret)
+		return ret;
+	ret = cedrus_a133_h264_codec_prepare(request->width, request->height,
+					     params->qp, request->slice.idr,
+					     &next.codec);
+	if (ret)
+		return ret;
+
+	next.emit_parameter_sets = !rotation->started;
+	if (next.emit_parameter_sets) {
+		struct cedrus_a133_h264_vlc_sequence *sets = &next.parameter_sets;
+		u32 width = request->width;
+		u32 height = request->height;
+
+		ret = cedrus_a133_h264_headers_prepare(params, width, height, sets);
+		if (ret)
+			return ret;
+	}
+	ret = cedrus_a133_h264_slice_header_prepare(params, &request->slice,
+						    &next.slice_header);
+	if (ret)
+		return ret;
+
+	/* Publish both outputs only after every check has succeeded. */
+	*rotation = next_rotation;
+	*plan = next;
+	return 0;
+}
