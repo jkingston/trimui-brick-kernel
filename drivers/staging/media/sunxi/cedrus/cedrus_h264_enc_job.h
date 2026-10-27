@@ -36,10 +36,28 @@ struct cedrus_a133_h264_job_request {
 	struct cedrus_a133_h264_slice_header slice;
 };
 
+enum cedrus_a133_h264_job_state {
+	CEDRUS_A133_H264_JOB_IDLE,
+	CEDRUS_A133_H264_JOB_PREPARED,
+	CEDRUS_A133_H264_JOB_RUNNING,
+	CEDRUS_A133_H264_JOB_RESET_REQUIRED,
+	CEDRUS_A133_H264_JOB_SUSPENDED,
+};
+
+/*
+ * Generation-tagged ownership for one hardware context.  A generation is
+ * retired before reset so a delayed completion cannot publish an old frame.
+ */
+struct cedrus_a133_h264_job_lifecycle {
+	u64 generation;
+	u64 active_generation;
+	enum cedrus_a133_h264_job_state state;
+};
+
 /*
  * A complete image of every currently proven part of one A133 H.264 job.
- * There is deliberately no function which triggers this plan: reset, abort
- * and fault containment still keep the backend closed.
+ * The trigger and terminal lifecycle are complete enough for backend use, but
+ * the backend remains closed until all register programming is proven.
  */
 struct cedrus_a133_h264_job_plan {
 	struct cedrus_a133_h264_enc_buffer_layout layout;
@@ -48,6 +66,7 @@ struct cedrus_a133_h264_job_plan {
 	struct cedrus_a133_h264_enc_codec codec;
 	struct cedrus_a133_h264_vlc_sequence parameter_sets;
 	struct cedrus_a133_h264_vlc_sequence slice_header;
+	u64 generation;
 	bool emit_parameter_sets;
 };
 
@@ -59,15 +78,29 @@ struct cedrus_a133_h264_job_completion {
 	bool error;
 };
 
-int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rotation,
+int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+				      struct cedrus_a133_h264_enc_rotation *rotation,
 				      const struct cedrus_h264_enc_params *params,
 				      const struct cedrus_a133_h264_job_request *request,
 				      const struct cedrus_a133_h264_job_buffers *buffers,
 				      struct cedrus_a133_h264_job_plan *plan);
 
-int cedrus_a133_h264_job_complete(struct cedrus_a133_h264_enc_rotation *rotation,
+int cedrus_a133_h264_job_trigger(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+				 void __iomem *base, u64 generation);
+int cedrus_a133_h264_job_complete(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+				  struct cedrus_a133_h264_enc_rotation *rotation,
+				  u64 generation,
 				  size_t capture_capacity, u32 status,
 				  u32 produced_bits,
 				  struct cedrus_a133_h264_job_completion *completion);
+/* Call with IRQ completion excluded, before streamoff/watchdog reset. */
+int cedrus_a133_h264_job_abort(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+			       struct cedrus_a133_h264_enc_rotation *rotation,
+			       u64 generation);
+/* Release RESET_REQUIRED only after reset_control_reset() succeeded. */
+int cedrus_a133_h264_job_reset_complete(struct cedrus_a133_h264_job_lifecycle *lifecycle);
+/* The mem2mem scheduler must be drained before entering SUSPENDED. */
+int cedrus_a133_h264_job_suspend(struct cedrus_a133_h264_job_lifecycle *lifecycle);
+int cedrus_a133_h264_job_resume(struct cedrus_a133_h264_job_lifecycle *lifecycle);
 
 #endif /* _CEDRUS_H264_ENC_JOB_H_ */

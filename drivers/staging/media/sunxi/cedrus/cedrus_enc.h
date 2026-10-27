@@ -122,8 +122,8 @@ struct cedrus_a133_enc_bitstream {
 
 /*
  * Sizes used by the A133 Ver2 H.264 path. The fixed-QP path owns work_9c and
- * leaves the deblock address zero. The other derived work sizes remain
- * explicit until a register consumer is proven.
+ * leaves the deblock address zero. filter_history is the size of one of the
+ * two history slots used only by the disabled vendor 3D-filter path.
  */
 struct cedrus_a133_h264_enc_buffer_layout {
 	size_t reconstruction_luma;
@@ -134,7 +134,7 @@ struct cedrus_a133_h264_enc_buffer_layout {
 	size_t macroblock_info;
 	size_t deblock;
 	size_t work_9c;
-	size_t work_frame;
+	size_t filter_history;
 };
 
 /* Register values for one reconstructed/reference frame slot. */

@@ -102,12 +102,14 @@ cedrus_a133_h264_dma_ranges_validate(const struct cedrus_a133_h264_job_buffers *
 	return 0;
 }
 
-int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rotation,
+int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+				      struct cedrus_a133_h264_enc_rotation *rotation,
 				      const struct cedrus_h264_enc_params *params,
 				      const struct cedrus_a133_h264_job_request *request,
 				      const struct cedrus_a133_h264_job_buffers *buffers,
 				      struct cedrus_a133_h264_job_plan *plan)
 {
+	struct cedrus_a133_h264_job_lifecycle next_lifecycle;
 	struct cedrus_a133_h264_enc_rotation next_rotation;
 	struct cedrus_a133_h264_enc_frame_slot reference;
 	struct cedrus_a133_h264_enc_frame_slot reconstruction;
@@ -118,8 +120,10 @@ int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rota
 	unsigned int i;
 	int ret;
 
-	if (!rotation || !params || !request || !buffers || !plan)
+	if (!lifecycle || !rotation || !params || !request || !buffers || !plan)
 		return -EINVAL;
+	if (lifecycle->state != CEDRUS_A133_H264_JOB_IDLE)
+		return -EBUSY;
 	if (request->slice.qp != params->qp)
 		return -EINVAL;
 	if (request->slice.idr) {
@@ -200,17 +204,47 @@ int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rota
 	if (ret)
 		return ret;
 
-	/* Publish both outputs only after every check has succeeded. */
+	next_lifecycle = *lifecycle;
+	next_lifecycle.generation++;
+	if (!next_lifecycle.generation)
+		next_lifecycle.generation++;
+	next_lifecycle.active_generation = next_lifecycle.generation;
+	next_lifecycle.state = CEDRUS_A133_H264_JOB_PREPARED;
+	next.generation = next_lifecycle.generation;
+
+	/* Publish every part of the prepared generation as one transaction. */
 	*rotation = next_rotation;
 	*plan = next;
+	*lifecycle = next_lifecycle;
 	return 0;
 }
 
-int cedrus_a133_h264_job_complete(struct cedrus_a133_h264_enc_rotation *rotation,
+int cedrus_a133_h264_job_trigger(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+				 void __iomem *base, u64 generation)
+{
+	if (!lifecycle || !base || !generation)
+		return -EINVAL;
+	if (generation != lifecycle->active_generation)
+		return -ESTALE;
+	if (lifecycle->state != CEDRUS_A133_H264_JOB_PREPARED)
+		return -EBUSY;
+
+	/* Clear stale W1C status before making an immediate completion possible. */
+	cedrus_a133_h264_irq_arm(base);
+	lifecycle->state = CEDRUS_A133_H264_JOB_RUNNING;
+	cedrus_a133_h264_trigger(base);
+
+	return 0;
+}
+
+int cedrus_a133_h264_job_complete(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+				  struct cedrus_a133_h264_enc_rotation *rotation,
+				  u64 generation,
 				  size_t capture_capacity, u32 status,
 				  u32 produced_bits,
 				  struct cedrus_a133_h264_job_completion *completion)
 {
+	struct cedrus_a133_h264_job_lifecycle next_lifecycle;
 	struct cedrus_a133_h264_enc_rotation next_rotation;
 	struct cedrus_a133_h264_job_completion next = {
 		.status = status,
@@ -218,8 +252,14 @@ int cedrus_a133_h264_job_complete(struct cedrus_a133_h264_enc_rotation *rotation
 	enum cedrus_enc_irq_status irq;
 	int ret;
 
-	if (!rotation || !completion || !rotation->pending ||
+	if (!lifecycle || !rotation || !completion || !generation ||
 	    !capture_capacity)
+		return -EINVAL;
+	if (generation != lifecycle->active_generation)
+		return -ESTALE;
+	if (lifecycle->state != CEDRUS_A133_H264_JOB_RUNNING)
+		return -EBUSY;
+	if (!rotation->pending)
 		return -EINVAL;
 
 	irq = cedrus_a133_h264_enc_irq_status(status);
@@ -248,9 +288,78 @@ int cedrus_a133_h264_job_complete(struct cedrus_a133_h264_enc_rotation *rotation
 
 	if (cedrus_a133_h264_frame_complete(&next_rotation, !ret))
 		return -EINVAL;
+	next_lifecycle = *lifecycle;
+	next_lifecycle.active_generation = 0;
+	next_lifecycle.state = ret ? CEDRUS_A133_H264_JOB_RESET_REQUIRED :
+				       CEDRUS_A133_H264_JOB_IDLE;
 
 	/* Retire the pending reference and metadata as one transaction. */
 	*rotation = next_rotation;
 	*completion = next;
+	*lifecycle = next_lifecycle;
 	return ret;
+}
+
+int cedrus_a133_h264_job_abort(struct cedrus_a133_h264_job_lifecycle *lifecycle,
+			       struct cedrus_a133_h264_enc_rotation *rotation,
+			       u64 generation)
+{
+	struct cedrus_a133_h264_enc_rotation next_rotation;
+
+	if (!lifecycle || !rotation || !generation)
+		return -EINVAL;
+	if (generation != lifecycle->active_generation)
+		return -ESTALE;
+	if (lifecycle->state != CEDRUS_A133_H264_JOB_PREPARED &&
+	    lifecycle->state != CEDRUS_A133_H264_JOB_RUNNING)
+		return -EBUSY;
+	if (!rotation->pending)
+		return -EINVAL;
+
+	next_rotation = *rotation;
+	if (cedrus_a133_h264_frame_complete(&next_rotation, false))
+		return -EINVAL;
+
+	/* The caller must keep IRQs quiesced until reset has completed. */
+	*rotation = next_rotation;
+	lifecycle->active_generation = 0;
+	lifecycle->state = CEDRUS_A133_H264_JOB_RESET_REQUIRED;
+
+	return 0;
+}
+
+int cedrus_a133_h264_job_reset_complete(struct cedrus_a133_h264_job_lifecycle *lifecycle)
+{
+	if (!lifecycle)
+		return -EINVAL;
+	if (lifecycle->state != CEDRUS_A133_H264_JOB_RESET_REQUIRED ||
+	    lifecycle->active_generation)
+		return -EBUSY;
+
+	lifecycle->state = CEDRUS_A133_H264_JOB_IDLE;
+	return 0;
+}
+
+int cedrus_a133_h264_job_suspend(struct cedrus_a133_h264_job_lifecycle *lifecycle)
+{
+	if (!lifecycle)
+		return -EINVAL;
+	if (lifecycle->state != CEDRUS_A133_H264_JOB_IDLE ||
+	    lifecycle->active_generation)
+		return -EBUSY;
+
+	lifecycle->state = CEDRUS_A133_H264_JOB_SUSPENDED;
+	return 0;
+}
+
+int cedrus_a133_h264_job_resume(struct cedrus_a133_h264_job_lifecycle *lifecycle)
+{
+	if (!lifecycle)
+		return -EINVAL;
+	if (lifecycle->state != CEDRUS_A133_H264_JOB_SUSPENDED ||
+	    lifecycle->active_generation)
+		return -EBUSY;
+
+	lifecycle->state = CEDRUS_A133_H264_JOB_IDLE;
+	return 0;
 }

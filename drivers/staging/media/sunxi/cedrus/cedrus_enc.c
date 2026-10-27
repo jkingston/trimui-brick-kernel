@@ -316,7 +316,7 @@ int cedrus_a133_h264_enc_buffer_layout(u32 width, u32 height,
 	if (check_mul_overflow(ALIGN(mb_width, 8), mb_height, &value) ||
 	    check_mul_overflow(value, (size_t)12, &value))
 		return -EOVERFLOW;
-	layout->work_frame = value;
+	layout->filter_history = value;
 
 	return 0;
 }
