@@ -26,6 +26,17 @@ config VIDEO_SUNXI_CEDRUS_ENCODER_CORE
 	  required lifecycle callback, standard format and standard control, and
 	  satisfies the complete encoder contract. No current variant does so.
 
+config VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION
+	bool "A133 bounded H.264 and JPEG encoder qualification"
+	depends on VIDEO_SUNXI_CEDRUS_ENCODER_CORE
+	help
+	  Register the internal A133 encoder backend only when the video-engine
+	  device tree node carries the exact bounded qualification marker. This
+	  is for isolated 320x240 High/CABAC QP30 H.264 IDR/P and NV12/YUV420
+	  Q95 JPEG tests only. It must not be enabled for production kernels;
+	  arbitrary geometry, H.264 QP/rate control and unqualified inputs remain
+	  unsupported.
+
 config VIDEO_SUNXI_CEDRUS_ENCODER_CORE_KUNIT_TEST
 	bool "KUnit tests for Cedrus encoder contract helpers" if !KUNIT_ALL_TESTS
 	depends on KUNIT

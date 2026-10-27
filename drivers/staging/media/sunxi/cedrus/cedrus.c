@@ -31,6 +31,13 @@
 #include "cedrus_job.h"
 #include "cedrus_enc_video.h"
 #include "cedrus_enc.h"
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+#include "cedrus_a133_enc_backend.h"
+#define CEDRUS_A133_QUALIFICATION_OPS \
+	(&cedrus_a133_enc_backend_candidate_ops)
+#else
+#define CEDRUS_A133_QUALIFICATION_OPS NULL
+#endif
 
 static int cedrus_try_ctrl(struct v4l2_ctrl *ctrl)
 {
@@ -688,6 +695,7 @@ static const struct cedrus_variant sun50i_a133_cedrus_variant = {
 	.mod_rate	= 432000000,
 	.requires_iommu	= true,
 	.shared_domain	= true,
+	.enc_ops	= CEDRUS_A133_QUALIFICATION_OPS,
 };
 
 static const struct cedrus_variant sun50i_h6_cedrus_variant = {

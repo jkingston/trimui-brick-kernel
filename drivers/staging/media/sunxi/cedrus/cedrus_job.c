@@ -111,6 +111,10 @@ void cedrus_job_abort(void *priv)
 		goto out;
 
 	if (ctx->is_encoder) {
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		v4l2_info(&dev->v4l2_dev,
+			  "encoder qualification streamoff reset begin\n");
+#endif
 		ret = cedrus_enc_abort(dev->enc_ops, ctx,
 				       CEDRUS_ENC_ABORT_STREAMOFF);
 	} else {
@@ -126,6 +130,11 @@ void cedrus_job_abort(void *priv)
 		if (ret)
 			v4l2_warn(&dev->v4l2_dev,
 				  "encoder reset completion returned %d\n", ret);
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		else
+			v4l2_info(&dev->v4l2_dev,
+				  "encoder qualification streamoff reset complete\n");
+#endif
 	}
 
 	if (reset_ret && dev->requires_iommu)

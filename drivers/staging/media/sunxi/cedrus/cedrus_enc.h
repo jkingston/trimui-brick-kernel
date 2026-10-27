@@ -52,12 +52,17 @@ enum cedrus_enc_contract {
 	 CEDRUS_ENC_CONTRACT_SYSTEM_SLEEP | \
 	 CEDRUS_ENC_CONTRACT_QP_FIELD)
 
-/* Contract implemented by this source slice. */
+/* The isolated qualification image opts into the complete bounded backend. */
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+#define CEDRUS_A133_ENC_CONTRACT CEDRUS_ENC_CONTRACT_REQUIRED
+#else
+/* Contract implemented by the unexposed production source. */
 #define CEDRUS_A133_ENC_CONTRACT ( \
 	 CEDRUS_ENC_CONTRACT_SOURCE_LAYOUT | \
 	 CEDRUS_ENC_CONTRACT_BITSTREAM_WINDOW | \
 	 CEDRUS_ENC_CONTRACT_IRQ | \
 	 CEDRUS_ENC_CONTRACT_QP_FIELD)
+#endif
 
 enum cedrus_enc_irq_status {
 	CEDRUS_ENC_IRQ_NONE,

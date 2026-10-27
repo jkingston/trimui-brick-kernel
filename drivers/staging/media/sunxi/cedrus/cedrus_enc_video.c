@@ -15,6 +15,14 @@
 #include "cedrus_enc_video.h"
 #include "cedrus_hw.h"
 
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+#define CEDRUS_ENCODER_CARD_NAME	"Cedrus encoder qualification"
+#define CEDRUS_ENCODER_NODE_NAME	"cedrus-encoder-qualification"
+#else
+#define CEDRUS_ENCODER_CARD_NAME	"Cedrus encoder"
+#define CEDRUS_ENCODER_NODE_NAME	"cedrus-encoder"
+#endif
+
 static const struct v4l2_event cedrus_enc_eos_event = {
 	.type = V4L2_EVENT_EOS,
 };
@@ -141,7 +149,7 @@ static int cedrus_enc_querycap(struct file *file, void *priv,
 			       struct v4l2_capability *cap)
 {
 	strscpy(cap->driver, CEDRUS_NAME, sizeof(cap->driver));
-	strscpy(cap->card, "Cedrus encoder", sizeof(cap->card));
+	strscpy(cap->card, CEDRUS_ENCODER_CARD_NAME, sizeof(cap->card));
 	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s", CEDRUS_NAME);
 	return 0;
 }
@@ -769,7 +777,7 @@ int cedrus_enc_video_register(struct cedrus_dev *dev)
 	if (!dev->enc_ops)
 		return 0;
 
-	strscpy(vfd->name, "cedrus-encoder", sizeof(vfd->name));
+	strscpy(vfd->name, CEDRUS_ENCODER_NODE_NAME, sizeof(vfd->name));
 	vfd->vfl_dir = VFL_DIR_M2M;
 	vfd->fops = &cedrus_enc_fops;
 	vfd->ioctl_ops = &cedrus_enc_ioctl_ops;

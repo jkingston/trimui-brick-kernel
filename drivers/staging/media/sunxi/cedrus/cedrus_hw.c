@@ -627,6 +627,17 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 	atomic_set(&dev->ve_domain_owned, 0);
 #if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
 	if (variant->enc_ops) {
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		const char *qualification;
+
+		ret = of_property_read_string(dev->dev->of_node,
+					      "allwinner,encoder-qualification",
+					      &qualification);
+		if (ret || strcmp(qualification,
+				  "bounded-320x240-h264-qp30-jpeg-q95"))
+			return dev_err_probe(dev->dev, -EPERM,
+					     "missing encoder qualification marker\n");
+#endif
 		ret = cedrus_enc_backend_validate(variant->enc_ops);
 		if (ret)
 			return dev_err_probe(dev->dev, ret,
