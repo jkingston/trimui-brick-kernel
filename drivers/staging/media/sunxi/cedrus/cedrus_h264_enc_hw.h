@@ -27,6 +27,7 @@ struct cedrus_a133_h264_enc_dma {
 	struct cedrus_a133_h264_enc_frame_slot reconstruction;
 	u32 motion_vectors;
 	u32 macroblock_info;
+	u32 work_9c;
 };
 
 /* Two-slot reference and frame sequence state, committed on completion. */
@@ -36,6 +37,7 @@ struct cedrus_a133_h264_enc_rotation {
 	u8 next_frame_num;
 	bool started;
 	bool pending;
+	bool pending_keyframe;
 };
 
 #define CEDRUS_A133_H264_VLC_MAX_COMMANDS	64
@@ -77,6 +79,7 @@ int cedrus_a133_h264_dma_prepare(const struct cedrus_a133_enc_source *source,
 				 const struct cedrus_a133_h264_enc_frame_slot *reconstruction,
 				 dma_addr_t motion_vectors,
 				 dma_addr_t macroblock_info,
+				 dma_addr_t work_9c,
 				 const struct cedrus_a133_h264_enc_buffer_layout *layout,
 				 struct cedrus_a133_h264_enc_dma *dma);
 

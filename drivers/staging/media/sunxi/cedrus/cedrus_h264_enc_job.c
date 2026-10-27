@@ -61,8 +61,20 @@ cedrus_a133_h264_dma_ranges_validate(const struct cedrus_a133_h264_job_buffers *
 		{ .start = buffers->subpixel[1] },
 		{ .start = buffers->motion_vectors },
 		{ .start = buffers->macroblock_info },
+		{ .start = buffers->work_9c },
 	};
 	const size_t sizes[] = {
+		buffers->source_size,
+		buffers->bitstream_size,
+		buffers->reconstruction_size[0],
+		buffers->reconstruction_size[1],
+		buffers->subpixel_size[0],
+		buffers->subpixel_size[1],
+		buffers->motion_vectors_size,
+		buffers->macroblock_info_size,
+		buffers->work_9c_size,
+	};
+	const size_t required[] = {
 		source_size,
 		buffers->bitstream_size,
 		layout->reconstruction,
@@ -71,12 +83,13 @@ cedrus_a133_h264_dma_ranges_validate(const struct cedrus_a133_h264_job_buffers *
 		layout->subpixel,
 		layout->motion_vectors,
 		layout->macroblock_info,
+		layout->work_9c,
 	};
 	unsigned int i, j;
 
 	for (i = 0; i < ARRAY_SIZE(ranges); i++) {
-		if (!sizes[i])
-			return -EINVAL;
+		if (sizes[i] < required[i])
+			return -ENOSPC;
 		if (check_add_overflow(ranges[i].start, (dma_addr_t)sizes[i],
 				       &ranges[i].end))
 			return -EOVERFLOW;
@@ -162,6 +175,7 @@ int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rota
 					   &reconstruction,
 					   buffers->motion_vectors,
 					   buffers->macroblock_info,
+					   buffers->work_9c,
 					   &next.layout, &next.dma);
 	if (ret)
 		return ret;
@@ -190,4 +204,53 @@ int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_enc_rotation *rota
 	*rotation = next_rotation;
 	*plan = next;
 	return 0;
+}
+
+int cedrus_a133_h264_job_complete(struct cedrus_a133_h264_enc_rotation *rotation,
+				  size_t capture_capacity, u32 status,
+				  u32 produced_bits,
+				  struct cedrus_a133_h264_job_completion *completion)
+{
+	struct cedrus_a133_h264_enc_rotation next_rotation;
+	struct cedrus_a133_h264_job_completion next = {
+		.status = status,
+	};
+	enum cedrus_enc_irq_status irq;
+	int ret;
+
+	if (!rotation || !completion || !rotation->pending ||
+	    !capture_capacity)
+		return -EINVAL;
+
+	irq = cedrus_a133_h264_enc_irq_status(status);
+	if (irq == CEDRUS_ENC_IRQ_NONE)
+		return -EAGAIN;
+
+	next_rotation = *rotation;
+	if (irq == CEDRUS_ENC_IRQ_ERROR) {
+		next.error = true;
+		ret = -EIO;
+	} else if (!produced_bits) {
+		next.error = true;
+		ret = -ENODATA;
+	} else if (!IS_ALIGNED(produced_bits, 8)) {
+		/* A complete H.264 access unit includes byte-alignment bits. */
+		next.error = true;
+		ret = -EPROTO;
+	} else if ((size_t)(produced_bits / 8) > capture_capacity) {
+		next.error = true;
+		ret = -ENOSPC;
+	} else {
+		next.payload = produced_bits / 8;
+		next.keyframe = rotation->pending_keyframe;
+		ret = 0;
+	}
+
+	if (cedrus_a133_h264_frame_complete(&next_rotation, !ret))
+		return -EINVAL;
+
+	/* Retire the pending reference and metadata as one transaction. */
+	*rotation = next_rotation;
+	*completion = next;
+	return ret;
 }

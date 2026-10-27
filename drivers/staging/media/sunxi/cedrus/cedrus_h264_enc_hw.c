@@ -102,6 +102,7 @@ int cedrus_a133_h264_frame_prepare(struct cedrus_a133_h264_enc_rotation *rotatio
 	}
 
 	rotation->pending_reference = next;
+	rotation->pending_keyframe = idr;
 	rotation->pending = true;
 	return 0;
 }
@@ -118,6 +119,7 @@ int cedrus_a133_h264_frame_complete(struct cedrus_a133_h264_enc_rotation *rotati
 		rotation->started = true;
 	}
 	rotation->pending = false;
+	rotation->pending_keyframe = false;
 	return 0;
 }
 
@@ -143,6 +145,7 @@ int cedrus_a133_h264_dma_prepare(const struct cedrus_a133_enc_source *source,
 				 const struct cedrus_a133_h264_enc_frame_slot *reconstruction,
 				 dma_addr_t motion_vectors,
 				 dma_addr_t macroblock_info,
+				 dma_addr_t work_9c,
 				 const struct cedrus_a133_h264_enc_buffer_layout *layout,
 				 struct cedrus_a133_h264_enc_dma *dma)
 {
@@ -150,7 +153,7 @@ int cedrus_a133_h264_dma_prepare(const struct cedrus_a133_enc_source *source,
 
 	if (!source || !bitstream || !reference || !reconstruction ||
 	    !layout || !dma || !layout->motion_vectors ||
-	    !layout->macroblock_info)
+	    !layout->macroblock_info || !layout->work_9c)
 		return -EINVAL;
 
 	ret = cedrus_a133_h264_dma_address(motion_vectors,
@@ -161,6 +164,10 @@ int cedrus_a133_h264_dma_prepare(const struct cedrus_a133_enc_source *source,
 	ret = cedrus_a133_h264_dma_address(macroblock_info,
 					   layout->macroblock_info,
 					   &dma->macroblock_info);
+	if (ret)
+		return ret;
+	ret = cedrus_a133_h264_dma_address(work_9c, layout->work_9c,
+					   &dma->work_9c);
 	if (ret)
 		return ret;
 
@@ -215,6 +222,9 @@ void cedrus_a133_h264_program_aux(void __iomem *base,
 {
 	writel(dma->motion_vectors, base + VE_ENC_AVC_MOTION_VECTORS);
 	writel(dma->macroblock_info, base + VE_ENC_AVC_MACROBLOCK_INFO);
+	writel(dma->work_9c, base + VE_ENC_AVC_WORK_9C);
+	/* The successful stock fixed-QP path leaves the deblock address zero. */
+	writel(0, base + VE_ENC_AVC_DEBLOCK);
 }
 
 void cedrus_a133_h264_program_codec(void __iomem *base,

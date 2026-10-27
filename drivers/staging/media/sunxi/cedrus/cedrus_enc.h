@@ -121,9 +121,9 @@ struct cedrus_a133_enc_bitstream {
 };
 
 /*
- * Sizes used by the A133 Ver2 H.264 path. The unnamed work areas remain
- * explicit: their allocation formula is known from the matching stock code,
- * but their contents are not yet understood well enough to name or program.
+ * Sizes used by the A133 Ver2 H.264 path. The fixed-QP path owns work_9c and
+ * leaves the deblock address zero. The other derived work sizes remain
+ * explicit until a register consumer is proven.
  */
 struct cedrus_a133_h264_enc_buffer_layout {
 	size_t reconstruction_luma;
