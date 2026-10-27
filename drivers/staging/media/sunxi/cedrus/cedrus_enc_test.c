@@ -337,6 +337,94 @@ static void cedrus_enc_test_dma_register_image(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
+static void cedrus_enc_test_codec_register_image(struct kunit *test)
+{
+	struct cedrus_a133_h264_enc_codec codec;
+	int ret;
+
+	ret = cedrus_a133_h264_codec_prepare(320, 240, 30, true, &codec);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, codec.picture_size, 0x0028001eU);
+	KUNIT_EXPECT_EQ(test, codec.picture_control, 0x00000500U);
+	KUNIT_EXPECT_EQ(test, codec.qp_control, 0x0800051eU);
+	KUNIT_EXPECT_EQ(test, codec.motion_control, 0x00001200U);
+
+	ret = cedrus_a133_h264_codec_prepare(320, 240, 30, false, &codec);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, codec.picture_control, 0x00000510U);
+	ret = cedrus_a133_h264_codec_prepare(128, 128, 30, true, &codec);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, codec.picture_size, 0x00100010U);
+	KUNIT_EXPECT_EQ(test, codec.qp_control, 0x0800041eU);
+
+	/* 64 macroblocks require two stock 48-macroblock length units. */
+	ret = cedrus_a133_h264_codec_prepare(1024, 240, 30, true, &codec);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, codec.picture_size, 0x0080001eU);
+	KUNIT_EXPECT_EQ(test, codec.qp_control, 0x0800091eU);
+
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_h264_codec_prepare(320, 240, 52, true, &codec),
+		-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_h264_codec_prepare(321, 240, 30, true, &codec),
+		-EOPNOTSUPP);
+}
+
+static void cedrus_enc_test_reference_rotation(struct kunit *test)
+{
+	const struct cedrus_a133_h264_enc_frame_slot slots[2] = {
+		{ .luma = 0x00fafe00, .chroma = 0x00faff40,
+		  .subpixel = 0x00fafbf0 },
+		{ .luma = 0x00fafc00, .chroma = 0x00fafd40,
+		  .subpixel = 0x00fafbe0 },
+	};
+	struct cedrus_a133_h264_enc_rotation rotation = {};
+	struct cedrus_a133_h264_enc_frame_slot reference;
+	struct cedrus_a133_h264_enc_frame_slot reconstruction;
+	unsigned int frame;
+	int ret;
+
+	ret = cedrus_a133_h264_frame_prepare(&rotation, slots, true,
+					     &reference, &reconstruction);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, reference.luma, slots[0].luma);
+	KUNIT_EXPECT_EQ(test, reconstruction.luma, slots[0].luma);
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_h264_frame_prepare(&rotation, slots, true,
+						       &reference, &reconstruction),
+		-EBUSY);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_frame_complete(&rotation, true), 0);
+
+	/* Five captured P frames alternate 0->1, 1->0, 0->1, 1->0, 0->1. */
+	for (frame = 1; frame < 6; frame++) {
+		u8 old = (frame - 1) & 1;
+		u8 next = frame & 1;
+
+		ret = cedrus_a133_h264_frame_prepare(&rotation, slots, false,
+						     &reference,
+						     &reconstruction);
+		KUNIT_ASSERT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, reference.luma, slots[old].luma);
+		KUNIT_EXPECT_EQ(test, reconstruction.luma, slots[next].luma);
+		KUNIT_ASSERT_EQ(test,
+				cedrus_a133_h264_frame_complete(&rotation, true), 0);
+	}
+
+	ret = cedrus_a133_h264_frame_prepare(&rotation, slots, false,
+					     &reference, &reconstruction);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_frame_complete(&rotation, false), 0);
+	KUNIT_EXPECT_EQ(test, rotation.reference, (u8)1);
+
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_h264_frame_prepare(&rotation, slots, true,
+						       &reference, &reconstruction),
+		-EOPNOTSUPP);
+}
+
 static void cedrus_enc_test_standard_controls(struct kunit *test)
 {
 	struct cedrus_h264_enc_controls controls = {
@@ -468,6 +556,8 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_qp_field),
 	KUNIT_CASE(cedrus_enc_test_buffer_layout),
 	KUNIT_CASE(cedrus_enc_test_dma_register_image),
+	KUNIT_CASE(cedrus_enc_test_codec_register_image),
+	KUNIT_CASE(cedrus_enc_test_reference_rotation),
 	KUNIT_CASE(cedrus_enc_test_standard_controls),
 	KUNIT_CASE(cedrus_enc_test_stock_headers),
 	KUNIT_CASE(cedrus_enc_test_gop_policy),

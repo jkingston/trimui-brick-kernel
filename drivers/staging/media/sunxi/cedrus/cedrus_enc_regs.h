@@ -25,7 +25,10 @@
 #define VE_ENC_ISP_CONTROL_PLANAR	GENMASK(31, 30)
 
 /* AVC encoder.  Bitstream addresses are expressed in 256-byte units. */
+#define VE_ENC_AVC_PICTURE_SIZE		0xb00
+#define VE_ENC_AVC_PICTURE_CONTROL	0xb04
 #define VE_ENC_AVC_QP			0xb08
+#define VE_ENC_AVC_MOTION_CONTROL	0xb10
 #define VE_ENC_AVC_IRQ_CONTROL		0xb14
 #define VE_ENC_AVC_TRIGGER		0xb18
 #define VE_ENC_AVC_STATUS		0xb1c
@@ -47,6 +50,15 @@
 #define VE_ENC_AVC_DEBLOCK		0xbc4
 
 #define VE_ENC_AVC_TRIGGER_SLICE		0x8
+
+/* Fields isolated on the stock A133 fixed-QP High/CABAC path. */
+#define VE_ENC_AVC_PICTURE_CONTROL_P_SLICE	BIT(4)
+#define VE_ENC_AVC_PICTURE_CONTROL_CABAC	BIT(8)
+#define VE_ENC_AVC_PICTURE_CONTROL_FIXED_MODE	BIT(10)
+#define VE_ENC_AVC_QP_VALUE		GENMASK(5, 0)
+#define VE_ENC_AVC_QP_DYNAMIC_ME	BIT(8)
+#define VE_ENC_AVC_QP_LENGTH_STRIDE	GENMASK(13, 10)
+#define VE_ENC_AVC_QP_STOCK_VER2	BIT(27)
 
 /* Low status bits are write-one-to-clear. */
 #define VE_ENC_AVC_STATUS_DONE		BIT(0)
