@@ -123,6 +123,19 @@ static int cedrus_jpeg_write_dqt(struct cedrus_jpeg_writer *writer, u8 id,
 	return 0;
 }
 
+static int cedrus_jpeg_write_app0(struct cedrus_jpeg_writer *writer)
+{
+	static const u8 jfif[] = {
+		0xff, 0xe0, 0x00, 0x10,
+		'J', 'F', 'I', 'F', 0x00,
+		0x01, 0x01, 0x00,
+		0x00, 0x01, 0x00, 0x01,
+		0x00, 0x00,
+	};
+
+	return cedrus_jpeg_put_data(writer, jfif, sizeof(jfif));
+}
+
 static int cedrus_jpeg_write_sof(struct cedrus_jpeg_writer *writer,
 				 unsigned int width, unsigned int height)
 {
@@ -192,6 +205,7 @@ int cedrus_jpeg_write_header(void *buffer, size_t size, unsigned int width,
 	writer.end = writer.cur + CEDRUS_JPEG_HEADER_SIZE;
 
 	ret = cedrus_jpeg_put_be16(&writer, 0xffd8);
+	ret |= cedrus_jpeg_write_app0(&writer);
 	ret |= cedrus_jpeg_write_dqt(&writer, 0, tables->luma);
 	ret |= cedrus_jpeg_write_dqt(&writer, 1, tables->chroma);
 	ret |= cedrus_jpeg_write_sof(&writer, width, height);
@@ -305,14 +319,13 @@ int cedrus_jpeg_prepare_capture(struct cedrus_jpeg_capture *capture,
 	return 0;
 }
 
-int cedrus_jpeg_finish_capture(void *buffer,
-			       const struct cedrus_jpeg_capture *capture,
-			       u32 status, u32 produced_bits, size_t *bytesused)
+int cedrus_jpeg_validate_capture(const struct cedrus_jpeg_capture *capture,
+				 u32 status, u32 produced_bits,
+				 size_t *bytesused)
 {
 	size_t produced;
-	u8 *data = buffer;
 
-	if (!buffer || !capture || !bytesused)
+	if (!capture || !bytesused)
 		return -EINVAL;
 	if (capture->capacity < 2 || capture->prefix > capture->capacity - 2)
 		return -EINVAL;
@@ -320,6 +333,8 @@ int cedrus_jpeg_finish_capture(void *buffer,
 		return -ENOSPC;
 	if (status & CEDRUS_JPEG_STATUS_MB_OVERFLOW)
 		return -EIO;
+	if (status & CEDRUS_JPEG_STATUS_TIMEOUT)
+		return -ETIMEDOUT;
 	if (!(status & CEDRUS_JPEG_STATUS_FINISH))
 		return -EIO;
 	if (produced_bits > capture->limit)
@@ -333,10 +348,36 @@ int cedrus_jpeg_finish_capture(void *buffer,
 	if (produced > capture->capacity - 2)
 		return -ENOSPC;
 
-	/* The A133 encoder reports entropy bytes without the EOI marker. */
-	data[produced] = 0xff;
-	data[produced + 1] = 0xd9;
 	*bytesused = produced + 2;
 
 	return 0;
+}
+
+int cedrus_jpeg_append_eoi(void *buffer, size_t capacity, size_t bytesused)
+{
+	u8 *data = buffer;
+
+	if (!buffer || bytesused < 2 || bytesused > capacity)
+		return -EINVAL;
+
+	/* Append only after the capture buffer has been synchronized for CPU. */
+	data[bytesused - 2] = 0xff;
+	data[bytesused - 1] = 0xd9;
+	return 0;
+}
+
+int cedrus_jpeg_finish_capture(void *buffer,
+			       const struct cedrus_jpeg_capture *capture,
+			       u32 status, u32 produced_bits, size_t *bytesused)
+{
+	int ret;
+
+	if (!buffer)
+		return -EINVAL;
+	ret = cedrus_jpeg_validate_capture(capture, status, produced_bits,
+					   bytesused);
+	if (ret)
+		return ret;
+
+	return cedrus_jpeg_append_eoi(buffer, capture->capacity, *bytesused);
 }

@@ -10,6 +10,7 @@
 #include "cedrus_jpeg.h"
 #include "cedrus_enc_regs.h"
 #include "cedrus_jpeg_enc_hw.h"
+#include "cedrus_jpeg_enc_job.h"
 
 static const u8 stock_quality_95_luma_zigzag[CEDRUS_JPEG_QUANT_SIZE] = {
 	2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 2, 2, 2, 2, 2, 4,
@@ -77,6 +78,11 @@ static void cedrus_jpeg_quality_bounds(struct kunit *test)
 
 static void cedrus_jpeg_header_is_standard_baseline(struct kunit *test)
 {
+	static const u8 stock_plain_jpeg_prefix[] = {
+		0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10,
+		'J', 'F', 'I', 'F', 0x00, 0x01, 0x01, 0x00,
+		0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+	};
 	struct v4l2_jpeg_reference quantization_tables[V4L2_JPEG_MAX_TABLES] = {};
 	struct v4l2_jpeg_reference huffman_tables[V4L2_JPEG_MAX_TABLES] = {};
 	struct v4l2_jpeg_scan_header scan = {};
@@ -96,6 +102,8 @@ static void cedrus_jpeg_header_is_standard_baseline(struct kunit *test)
 			cedrus_jpeg_write_header(header, CEDRUS_JPEG_HEADER_SIZE,
 						 320, 240, &tables),
 			(int)CEDRUS_JPEG_HEADER_SIZE);
+	KUNIT_EXPECT_MEMEQ(test, header, stock_plain_jpeg_prefix,
+			   sizeof(stock_plain_jpeg_prefix));
 
 	ret = v4l2_jpeg_parse_header(header, CEDRUS_JPEG_HEADER_SIZE, &parsed);
 	KUNIT_ASSERT_EQ(test, ret, 0);
@@ -275,7 +283,6 @@ static void cedrus_jpeg_a133_command_profile(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, (int)CEDRUS_JPEG_HEADER_SIZE);
 	ret = cedrus_a133_jpeg_codec_prepare(320, 240, 95, &tables, &codec);
 	KUNIT_ASSERT_EQ(test, ret, 0);
-	KUNIT_EXPECT_EQ(test, codec.picture_size, 0x0028001eU);
 	KUNIT_EXPECT_EQ(test, codec.picture_control, 0xc2000200U);
 	KUNIT_EXPECT_EQ(test, codec.optimization, 0xc0000000U);
 
@@ -283,11 +290,12 @@ static void cedrus_jpeg_a133_command_profile(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY,
 	       base + VE_ENC_AVC_STATUS);
-	ret = cedrus_a133_jpeg_start_phase(base, &codec, &capture, &tables,
-					   header, CEDRUS_JPEG_HEADER_SIZE);
+	cedrus_a133_jpeg_select(base);
+	ret = cedrus_a133_jpeg_prepare_phase(base, &codec, &capture, &tables,
+					     header, CEDRUS_JPEG_HEADER_SIZE);
 	KUNIT_ASSERT_EQ(test, ret, 0);
-	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PICTURE_SIZE),
-			codec.picture_size);
+	cedrus_a133_jpeg_trigger(base);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PICTURE_SIZE), 0U);
 	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PICTURE_CONTROL),
 			codec.picture_control);
 	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_QP),
@@ -305,8 +313,9 @@ static void cedrus_jpeg_a133_command_profile(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
 	capture.prefix = CEDRUS_JPEG_HEADER_SIZE;
 	capture.offset = CEDRUS_JPEG_HEADER_SIZE * 8U;
-	ret = cedrus_a133_jpeg_start_phase(base, &codec, &capture, &tables,
-					   header, CEDRUS_JPEG_HEADER_SIZE);
+	cedrus_a133_jpeg_select(base);
+	ret = cedrus_a133_jpeg_prepare_phase(base, &codec, &capture, &tables,
+					     header, CEDRUS_JPEG_HEADER_SIZE);
 	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
 }
 
@@ -332,11 +341,180 @@ static void cedrus_jpeg_a133_command_timeout(struct kunit *test)
 	ret = cedrus_jpeg_prepare_capture(&capture, 0xfbc00000, SZ_4M, 0);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 
-	ret = cedrus_a133_jpeg_start_phase(base, &codec, &capture, &tables,
-					   header, CEDRUS_JPEG_HEADER_SIZE);
+	cedrus_a133_jpeg_select(base);
+	ret = cedrus_a133_jpeg_prepare_phase(base, &codec, &capture, &tables,
+					     header, CEDRUS_JPEG_HEADER_SIZE);
 	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
 	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER),
 			VE_ENC_JPEG_TRIGGER_PUT_BYTE);
+}
+
+static void cedrus_jpeg_a133_plain_isp_contract(struct kunit *test)
+{
+	struct cedrus_a133_jpeg_isp isp;
+	struct cedrus_jpeg_source source;
+	u32 *registers;
+	void __iomem *base;
+	int ret;
+
+	ret = cedrus_jpeg_prepare_source(&source, V4L2_PIX_FMT_NV12,
+					 320, 240, 320,
+					 320 * 240 * 3 / 2, 0xfbbe0000);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_isp_prepare(&source, &isp), 0);
+	KUNIT_EXPECT_EQ(test, isp.input_size, 0x0028001eU);
+	KUNIT_EXPECT_EQ(test, isp.input_stride, 0x00140014U);
+	KUNIT_EXPECT_EQ(test, isp.control, 0U);
+	KUNIT_EXPECT_EQ(test, isp.mb_width, 0x14U);
+	KUNIT_EXPECT_EQ(test, isp.input_size_reversed, 0x001e0028U);
+	KUNIT_EXPECT_EQ(test, isp.input_chroma2, (dma_addr_t)0xfbbf7700);
+
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	base = (void __iomem *)registers;
+	cedrus_a133_jpeg_program_isp(base, &isp);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_OUTPUT_LUMA), 0U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_OUTPUT_CHROMA), 0U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_INPUT_LUMA),
+			0xfbbe0000U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_INPUT_CHROMA),
+			0xfbbf2c00U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_INPUT_CHROMA2),
+			0xfbbf7700U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_FIXED_38), 0U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_SRAM_OFFSET), 0U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_ISP_SRAM_DATA),
+			0x00f80008U);
+}
+
+static void cedrus_jpeg_a133_job_lifecycle(struct kunit *test)
+{
+	struct cedrus_a133_jpeg_job_buffers buffers = {
+		.source = 0xfbbe0000,
+		.source_size = 320 * 240 * 3 / 2,
+		.bitstream = 0xf7000000,
+		.bitstream_size = SZ_4M,
+	};
+	const struct cedrus_a133_jpeg_job_request request = {
+		.pixelformat = V4L2_PIX_FMT_NV12,
+		.width = 320,
+		.height = 240,
+		.bytesperline = 320,
+		.quality = 95,
+	};
+	struct cedrus_a133_jpeg_job_completion completion;
+	struct cedrus_a133_jpeg_job_lifecycle lifecycle;
+	struct cedrus_a133_jpeg_job_plan plan;
+	u32 *registers;
+	void __iomem *base;
+	u64 generation;
+	int ret;
+
+	cedrus_a133_jpeg_job_init(&lifecycle);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_prepare(&lifecycle, &request, &buffers, &plan), 0);
+	KUNIT_EXPECT_EQ(test, lifecycle.state, CEDRUS_A133_JPEG_JOB_PREPARED);
+	generation = plan.generation;
+
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	base = (void __iomem *)registers;
+	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY, base + VE_ENC_AVC_STATUS);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_trigger(&lifecycle, base, &plan), 0);
+	KUNIT_EXPECT_EQ(test, lifecycle.state, CEDRUS_A133_JPEG_JOB_RUNNING);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER),
+			VE_ENC_JPEG_TRIGGER_START);
+
+	ret = cedrus_a133_jpeg_job_complete(&lifecycle, generation, &plan, 0,
+					    4096 * 8, &completion);
+	KUNIT_EXPECT_EQ(test, ret, -EAGAIN);
+	ret = cedrus_a133_jpeg_job_complete(&lifecycle, generation, &plan,
+					    CEDRUS_JPEG_STATUS_FINISH,
+					    4096 * 8, &completion);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, completion.payload, (size_t)4098);
+	KUNIT_EXPECT_EQ(test, lifecycle.state, CEDRUS_A133_JPEG_JOB_IDLE);
+	KUNIT_EXPECT_EQ(test, lifecycle.active_generation, 0ULL);
+	ret = cedrus_a133_jpeg_job_complete(&lifecycle, generation, &plan,
+					    CEDRUS_JPEG_STATUS_FINISH,
+					    4096 * 8, &completion);
+	KUNIT_EXPECT_EQ(test, ret, -ESTALE);
+
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_prepare(&lifecycle, &request,
+						     &buffers, &plan), 0);
+	generation = plan.generation;
+	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY,
+	       base + VE_ENC_AVC_STATUS);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_trigger(&lifecycle, base, &plan), 0);
+	ret = cedrus_a133_jpeg_job_complete(&lifecycle, generation, &plan,
+					    CEDRUS_JPEG_STATUS_FINISH |
+					    CEDRUS_JPEG_STATUS_BUFFER_FULL,
+					    0, &completion);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	KUNIT_EXPECT_EQ(test, completion.payload, (size_t)0);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_reset_complete(&lifecycle), 0);
+
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_prepare(&lifecycle, &request,
+						     &buffers, &plan), 0);
+	generation = plan.generation;
+	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY,
+	       base + VE_ENC_AVC_STATUS);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_trigger(&lifecycle, base, &plan), 0);
+	ret = cedrus_a133_jpeg_job_complete(&lifecycle, generation, &plan,
+					    CEDRUS_JPEG_STATUS_FINISH, 0,
+					    &completion);
+	KUNIT_EXPECT_EQ(test, ret, -ENODATA);
+	KUNIT_EXPECT_EQ(test, completion.payload, (size_t)0);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_reset_complete(&lifecycle), 0);
+
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_jpeg_job_prepare(&lifecycle, &request, &buffers, &plan), 0);
+	generation = plan.generation;
+	KUNIT_ASSERT_EQ(test, cedrus_a133_jpeg_job_abort(&lifecycle, generation), 0);
+	KUNIT_EXPECT_EQ(test, cedrus_a133_jpeg_job_abort(&lifecycle, generation), 0);
+	KUNIT_EXPECT_EQ(test, lifecycle.state,
+			CEDRUS_A133_JPEG_JOB_RESET_REQUIRED);
+	KUNIT_ASSERT_EQ(test, cedrus_a133_jpeg_job_reset_complete(&lifecycle), 0);
+	KUNIT_ASSERT_EQ(test, cedrus_a133_jpeg_job_suspend(&lifecycle), 0);
+	KUNIT_EXPECT_EQ(test, lifecycle.state, CEDRUS_A133_JPEG_JOB_SUSPENDED);
+	KUNIT_ASSERT_EQ(test, cedrus_a133_jpeg_job_resume(&lifecycle), 0);
+}
+
+static void cedrus_jpeg_a133_job_rejects_unproven_or_aliasing(struct kunit *test)
+{
+	struct cedrus_a133_jpeg_job_buffers buffers = {
+		.source = 0xfbbe0000,
+		.source_size = 320 * 240 * 3 / 2,
+		.bitstream = 0xf7000000,
+		.bitstream_size = SZ_4M,
+	};
+	struct cedrus_a133_jpeg_job_request request = {
+		.pixelformat = V4L2_PIX_FMT_NV12,
+		.width = 320,
+		.height = 240,
+		.bytesperline = 320,
+		.quality = 95,
+	};
+	struct cedrus_a133_jpeg_job_lifecycle lifecycle = {};
+	struct cedrus_a133_jpeg_job_plan plan;
+
+	request.quality = 94;
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_jpeg_job_prepare(&lifecycle, &request, &buffers, &plan),
+		-EOPNOTSUPP);
+	request.quality = 95;
+	buffers.bitstream = buffers.source;
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_jpeg_job_prepare(&lifecycle, &request, &buffers, &plan),
+		-EINVAL);
 }
 
 static struct kunit_case cedrus_jpeg_test_cases[] = {
@@ -348,6 +526,9 @@ static struct kunit_case cedrus_jpeg_test_cases[] = {
 	KUNIT_CASE(cedrus_jpeg_capture_completion),
 	KUNIT_CASE(cedrus_jpeg_a133_command_profile),
 	KUNIT_CASE(cedrus_jpeg_a133_command_timeout),
+	KUNIT_CASE(cedrus_jpeg_a133_plain_isp_contract),
+	KUNIT_CASE(cedrus_jpeg_a133_job_lifecycle),
+	KUNIT_CASE(cedrus_jpeg_a133_job_rejects_unproven_or_aliasing),
 	{},
 };
 
