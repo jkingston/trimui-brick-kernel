@@ -11,3 +11,20 @@
 &r_intc {
 	interrupt-parent = <&wakeupgen>;
 };
+
+/* Reconstruct the context that the SCP-powered deep state does not retain. */
+&ccu {
+	allwinner,stock-suspend;
+};
+
+&r_ccu {
+	allwinner,stock-suspend;
+};
+
+&pio {
+	allwinner,stock-suspend;
+};
+
+&r_pio {
+	allwinner,stock-suspend;
+};
