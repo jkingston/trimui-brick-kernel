@@ -218,6 +218,15 @@ static int gpio_vibrator_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(gpio_vibrator_pm_ops,
 				gpio_vibrator_suspend, gpio_vibrator_resume);
 
+static void gpio_vibrator_shutdown(struct platform_device *pdev)
+{
+	int err;
+
+	err = gpio_vibrator_suspend(&pdev->dev);
+	if (err)
+		dev_err(&pdev->dev, "failed to stop vibrator: %d\n", err);
+}
+
 #ifdef CONFIG_OF
 static const struct of_device_id gpio_vibra_dt_match_table[] = {
 	{ .compatible = "gpio-vibrator" },
@@ -227,7 +236,8 @@ MODULE_DEVICE_TABLE(of, gpio_vibra_dt_match_table);
 #endif
 
 static struct platform_driver gpio_vibrator_driver = {
-	.probe	= gpio_vibrator_probe,
+	.probe		= gpio_vibrator_probe,
+	.shutdown	= gpio_vibrator_shutdown,
 	.driver	= {
 		.name	= "gpio-vibrator",
 		.pm	= pm_sleep_ptr(&gpio_vibrator_pm_ops),
