@@ -154,25 +154,6 @@ int cedrus_h264_enc_controls_prepare(const struct cedrus_h264_enc_controls *cont
 	return 0;
 }
 
-bool cedrus_h264_enc_gop_next(struct cedrus_h264_enc_gop *gop,
-			      u32 gop_size, bool force_keyframe)
-{
-	bool idr;
-
-	if (!gop || !gop_size)
-		return false;
-
-	idr = !gop->started || force_keyframe ||
-	      gop->frames_since_idr >= gop_size;
-	gop->started = true;
-	if (idr)
-		gop->frames_since_idr = 1;
-	else
-		gop->frames_since_idr++;
-
-	return idr;
-}
-
 int cedrus_h264_enc_headers(const struct cedrus_h264_enc_params *params,
 			    u32 width, u32 height, u8 *dst, size_t capacity,
 			    size_t *bytes_used)

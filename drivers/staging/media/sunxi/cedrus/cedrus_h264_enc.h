@@ -26,16 +26,8 @@ struct cedrus_h264_enc_params {
 	u32 gop_size;
 };
 
-struct cedrus_h264_enc_gop {
-	u32 frames_since_idr;
-	bool started;
-};
-
 int cedrus_h264_enc_controls_prepare(const struct cedrus_h264_enc_controls *controls,
 				     struct cedrus_h264_enc_params *params);
-
-bool cedrus_h264_enc_gop_next(struct cedrus_h264_enc_gop *gop,
-			      u32 gop_size, bool force_keyframe);
 
 int cedrus_h264_enc_headers(const struct cedrus_h264_enc_params *params,
 			    u32 width, u32 height, u8 *dst, size_t capacity,

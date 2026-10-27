@@ -45,6 +45,9 @@ struct cedrus_a133_enc_backend_ctx {
 	struct cedrus_a133_jpeg_job_lifecycle jpeg_lifecycle;
 	struct cedrus_a133_jpeg_job_plan jpeg_plan;
 	struct cedrus_h264_enc_controls controls;
+	u64 force_keyframe_requested;
+	u64 force_keyframe_completed;
+	u64 active_force_keyframe_request;
 	u32 jpeg_quality;
 	u32 active_pixelformat;
 	u32 terminal_status;
@@ -150,6 +153,18 @@ static const struct v4l2_ctrl_config cedrus_a133_enc_controls[] = {
 		.max = 0,
 		.step = 1,
 		.def = 0,
+	}, {
+		.id = V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+		.name = "Group of Pictures Size",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.min = CEDRUS_A133_H264_FIXED_GOP,
+		.max = CEDRUS_A133_H264_FIXED_GOP,
+		.step = 1,
+		.def = CEDRUS_A133_H264_FIXED_GOP,
+	}, {
+		.id = V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
+		.name = "Force Key Frame",
+		.type = V4L2_CTRL_TYPE_BUTTON,
 	}, {
 		.id = V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
 		.name = "H.264 I-Frame QP Value",
@@ -273,6 +288,16 @@ cedrus_a133_enc_backend_s_ctrl(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDEO_B_FRAMES:
 		controls.b_frames = ctrl->val;
 		break;
+	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+		controls.gop_size = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
+		backend_ctx->force_keyframe_requested++;
+		if (backend_ctx->force_keyframe_requested ==
+		    backend_ctx->force_keyframe_completed)
+			backend_ctx->force_keyframe_requested++;
+		ret = 0;
+		goto out;
 	case V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP:
 		controls.i_qp = ctrl->val;
 		break;
@@ -393,6 +418,7 @@ static int cedrus_a133_enc_backend_prepare_h264_job(struct cedrus_ctx *ctx)
 	size_t source_size;
 	size_t bitstream_size;
 	bool idr;
+	bool force_keyframe;
 	int ret;
 
 	if (!ctx || !ctx->dev || !ctx->enc_priv)
@@ -412,16 +438,19 @@ static int cedrus_a133_enc_backend_prepare_h264_job(struct cedrus_ctx *ctx)
 	ret = cedrus_h264_enc_controls_prepare(&backend_ctx->controls, &params);
 	if (ret)
 		goto out;
-	/* A later IDR transition is not yet established by stock evidence. */
-	idr = !backend_ctx->job.rotation.started;
+	force_keyframe = backend_ctx->force_keyframe_requested !=
+			 backend_ctx->force_keyframe_completed;
+	idr = cedrus_a133_h264_frame_is_idr(&backend_ctx->job.rotation,
+					    params.gop_size, force_keyframe);
 	request = (struct cedrus_a133_h264_job_request) {
 		.pixelformat = ctx->src_fmt.pixelformat,
 		.width = ctx->src_fmt.width,
 		.height = ctx->src_fmt.height,
 		.bytesperline = ctx->src_fmt.bytesperline,
 		.slice = {
-			.frame_num = backend_ctx->job.rotation.next_frame_num,
-			.pic_order_cnt_lsb =
+			.frame_num = idr ? 0 :
+				backend_ctx->job.rotation.next_frame_num,
+			.pic_order_cnt_lsb = idr ? 0 :
 				backend_ctx->job.rotation.next_frame_num * 2,
 			.qp = idr ? params.qp : backend_ctx->controls.p_qp,
 			.idr = idr,
@@ -431,8 +460,11 @@ static int cedrus_a133_enc_backend_prepare_h264_job(struct cedrus_ctx *ctx)
 						   &request, source,
 						   source_size, bitstream,
 						   bitstream_size);
-	if (!ret)
+	if (!ret) {
 		backend_ctx->active_pixelformat = V4L2_PIX_FMT_H264;
+		backend_ctx->active_force_keyframe_request = force_keyframe ?
+			backend_ctx->force_keyframe_requested : 0;
+	}
 out:
 	spin_unlock_irqrestore(&backend_ctx->job_lock, flags);
 	return ret;
@@ -514,6 +546,8 @@ static int cedrus_a133_enc_backend_trigger_h264(struct cedrus_ctx *ctx)
 	spin_lock_irqsave(&backend_ctx->job_lock, flags);
 	ret = cedrus_a133_h264_backend_job_trigger(&backend_ctx->job,
 						   ctx->dev->base);
+	if (ret)
+		backend_ctx->active_force_keyframe_request = 0;
 	spin_unlock_irqrestore(&backend_ctx->job_lock, flags);
 	return ret;
 }
@@ -554,6 +588,10 @@ cedrus_a133_enc_backend_irq_status_h264(struct cedrus_ctx *ctx)
 	backend_ctx->terminal_pixelformat = V4L2_PIX_FMT_H264;
 	backend_ctx->terminal_error = ret && ret != -EAGAIN;
 	if (!ret) {
+		if (backend_ctx->job.completion.keyframe &&
+		    backend_ctx->active_force_keyframe_request)
+			backend_ctx->force_keyframe_completed =
+				backend_ctx->active_force_keyframe_request;
 		vb2_set_plane_payload(&dst->vb2_buf, 0,
 				      backend_ctx->job.completion.payload);
 		dst->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
@@ -561,6 +599,8 @@ cedrus_a133_enc_backend_irq_status_h264(struct cedrus_ctx *ctx)
 		dst->flags |= backend_ctx->job.completion.keyframe ?
 			V4L2_BUF_FLAG_KEYFRAME : V4L2_BUF_FLAG_PFRAME;
 	}
+	if (ret != -EAGAIN)
+		backend_ctx->active_force_keyframe_request = 0;
 	spin_unlock_irqrestore(&backend_ctx->job_lock, flags);
 
 	return ret == -EAGAIN ? CEDRUS_ENC_IRQ_NONE :
@@ -963,6 +1003,8 @@ cedrus_a133_enc_abort(struct cedrus_ctx *ctx,
 	switch (pixelformat) {
 	case V4L2_PIX_FMT_H264:
 		ret = cedrus_a133_h264_backend_job_abort(&backend_ctx->job);
+		if (!ret)
+			backend_ctx->active_force_keyframe_request = 0;
 		break;
 	case V4L2_PIX_FMT_JPEG:
 		generation = backend_ctx->jpeg_lifecycle.active_generation;

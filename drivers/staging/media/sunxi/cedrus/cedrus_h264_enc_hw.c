@@ -78,6 +78,16 @@ int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
 	return 0;
 }
 
+bool cedrus_a133_h264_frame_is_idr(const struct cedrus_a133_h264_enc_rotation *rotation,
+				   u32 gop_size, bool force_keyframe)
+{
+	if (!rotation || !gop_size)
+		return false;
+
+	return !rotation->started || force_keyframe ||
+	       rotation->frames_since_idr >= gop_size;
+}
+
 int cedrus_a133_h264_frame_prepare(struct cedrus_a133_h264_enc_rotation *rotation,
 				   const struct cedrus_a133_h264_enc_frame_slot slots[2], bool idr,
 				   struct cedrus_a133_h264_enc_frame_slot *reference,
@@ -99,9 +109,6 @@ int cedrus_a133_h264_frame_prepare(struct cedrus_a133_h264_enc_rotation *rotatio
 		*reference = slots[0];
 		*reconstruction = slots[0];
 	} else {
-		/* Stock evidence does not yet establish a later-IDR transition. */
-		if (idr)
-			return -EOPNOTSUPP;
 		next = rotation->reference ^ 1;
 		*reference = slots[rotation->reference];
 		*reconstruction = slots[next];
@@ -121,7 +128,13 @@ int cedrus_a133_h264_frame_complete(struct cedrus_a133_h264_enc_rotation *rotati
 
 	if (success) {
 		rotation->reference = rotation->pending_reference;
-		rotation->next_frame_num++;
+		if (rotation->pending_keyframe) {
+			rotation->next_frame_num = 1;
+			rotation->frames_since_idr = 1;
+		} else {
+			rotation->next_frame_num++;
+			rotation->frames_since_idr++;
+		}
 		rotation->started = true;
 	}
 	rotation->pending = false;

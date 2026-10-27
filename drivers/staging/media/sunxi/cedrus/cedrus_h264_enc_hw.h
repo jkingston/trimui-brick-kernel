@@ -32,6 +32,7 @@ struct cedrus_a133_h264_enc_dma {
 
 /* Two-slot reference and frame sequence state, committed on completion. */
 struct cedrus_a133_h264_enc_rotation {
+	u32 frames_since_idr;
 	u8 reference;
 	u8 pending_reference;
 	u8 next_frame_num;
@@ -66,6 +67,8 @@ int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
 				   bool idr,
 				   struct cedrus_a133_h264_enc_codec *codec);
 
+bool cedrus_a133_h264_frame_is_idr(const struct cedrus_a133_h264_enc_rotation *rotation,
+				   u32 gop_size, bool force_keyframe);
 int cedrus_a133_h264_frame_prepare(struct cedrus_a133_h264_enc_rotation *rotation,
 				   const struct cedrus_a133_h264_enc_frame_slot slots[2], bool idr,
 				   struct cedrus_a133_h264_enc_frame_slot *reference,

@@ -863,6 +863,7 @@ static void cedrus_enc_test_reference_rotation(struct kunit *test)
 		-EBUSY);
 	KUNIT_ASSERT_EQ(test,
 			cedrus_a133_h264_frame_complete(&rotation, true), 0);
+	KUNIT_EXPECT_EQ(test, rotation.frames_since_idr, 1U);
 
 	/* Five captured P frames alternate 0->1, 1->0, 0->1, 1->0, 0->1. */
 	for (frame = 1; frame < 6; frame++) {
@@ -886,10 +887,39 @@ static void cedrus_enc_test_reference_rotation(struct kunit *test)
 			cedrus_a133_h264_frame_complete(&rotation, false), 0);
 	KUNIT_EXPECT_EQ(test, rotation.reference, (u8)1);
 
-	KUNIT_EXPECT_EQ(test,
-			cedrus_a133_h264_frame_prepare(&rotation, slots, true,
-						       &reference, &reconstruction),
-		-EOPNOTSUPP);
+	ret = cedrus_a133_h264_frame_prepare(&rotation, slots, true,
+					     &reference, &reconstruction);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, reference.luma, slots[1].luma);
+	KUNIT_EXPECT_EQ(test, reconstruction.luma, slots[0].luma);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_frame_complete(&rotation, true), 0);
+	KUNIT_EXPECT_EQ(test, rotation.reference, (u8)0);
+	KUNIT_EXPECT_EQ(test, rotation.next_frame_num, (u8)1);
+	KUNIT_EXPECT_EQ(test, rotation.frames_since_idr, 1U);
+}
+
+static void cedrus_enc_test_idr_policy(struct kunit *test)
+{
+	struct cedrus_a133_h264_enc_rotation rotation = {};
+	bool idr;
+
+	idr = cedrus_a133_h264_frame_is_idr(NULL, 30, false);
+	KUNIT_EXPECT_FALSE(test, idr);
+	idr = cedrus_a133_h264_frame_is_idr(&rotation, 0, false);
+	KUNIT_EXPECT_FALSE(test, idr);
+	idr = cedrus_a133_h264_frame_is_idr(&rotation, 30, false);
+	KUNIT_EXPECT_TRUE(test, idr);
+
+	rotation.started = true;
+	rotation.frames_since_idr = 29;
+	idr = cedrus_a133_h264_frame_is_idr(&rotation, 30, false);
+	KUNIT_EXPECT_FALSE(test, idr);
+	idr = cedrus_a133_h264_frame_is_idr(&rotation, 30, true);
+	KUNIT_EXPECT_TRUE(test, idr);
+	rotation.frames_since_idr = 30;
+	idr = cedrus_a133_h264_frame_is_idr(&rotation, 30, false);
+	KUNIT_EXPECT_TRUE(test, idr);
 }
 
 static void cedrus_enc_test_standard_controls(struct kunit *test)
@@ -983,18 +1013,6 @@ static void cedrus_enc_test_stock_headers(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
 }
 
-static void cedrus_enc_test_gop_policy(struct kunit *test)
-{
-	struct cedrus_h264_enc_gop gop = {};
-
-	KUNIT_EXPECT_TRUE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
-	KUNIT_EXPECT_FALSE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
-	KUNIT_EXPECT_FALSE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
-	KUNIT_EXPECT_TRUE(test, cedrus_h264_enc_gop_next(&gop, 3, false));
-	KUNIT_EXPECT_TRUE(test, cedrus_h264_enc_gop_next(&gop, 3, true));
-	KUNIT_EXPECT_FALSE(test, cedrus_h264_enc_gop_next(&gop, 0, false));
-}
-
 static void cedrus_enc_test_job_plan(struct kunit *test)
 {
 	struct cedrus_h264_enc_params params = {
@@ -1077,6 +1095,7 @@ static void cedrus_enc_test_job_plan(struct kunit *test)
 					    &completion);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, rotation.next_frame_num, (u8)1);
+	KUNIT_EXPECT_EQ(test, rotation.frames_since_idr, 1U);
 	request.slice = (struct cedrus_a133_h264_slice_header) {
 		.frame_num = 1,
 		.pic_order_cnt_lsb = 2,
@@ -1113,6 +1132,7 @@ static void cedrus_enc_test_job_plan(struct kunit *test)
 						      VE_ENC_AVC_STATUS_DONE,
 						      8, &completion), 0);
 	KUNIT_EXPECT_EQ(test, rotation.next_frame_num, (u8)2);
+	KUNIT_EXPECT_EQ(test, rotation.frames_since_idr, 2U);
 	request.slice.frame_num = 2;
 	request.slice.pic_order_cnt_lsb = 4;
 	ret = cedrus_a133_h264_job_plan_prepare(&lifecycle, &rotation,
@@ -1123,6 +1143,32 @@ static void cedrus_enc_test_job_plan(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_ASSERT_EQ(test,
 			cedrus_a133_h264_job_reset_complete(&lifecycle), 0);
+
+	/* A later IDR replaces the reference only after terminal success. */
+	request.slice = (struct cedrus_a133_h264_slice_header) {
+		.qp = 30,
+		.idr = true,
+	};
+	ret = cedrus_a133_h264_job_plan_prepare(&lifecycle, &rotation,
+						&params, &request,
+						&buffers, &plan);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_FALSE(test, plan.emit_parameter_sets);
+	KUNIT_EXPECT_EQ(test, plan.slice_header.bit_count, (u16)78);
+	KUNIT_EXPECT_EQ(test, plan.dma.reference.luma, 0x00220200U);
+	KUNIT_EXPECT_EQ(test, plan.dma.reconstruction.luma, 0x00220000U);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_job_trigger(&lifecycle, registers,
+						     plan.generation), 0);
+	KUNIT_ASSERT_EQ(test,
+			cedrus_a133_h264_job_complete(&lifecycle, &rotation,
+						      plan.generation, SZ_1M,
+						      VE_ENC_AVC_STATUS_DONE,
+						      8, &completion), 0);
+	KUNIT_EXPECT_TRUE(test, completion.keyframe);
+	KUNIT_EXPECT_EQ(test, rotation.reference, (u8)0);
+	KUNIT_EXPECT_EQ(test, rotation.next_frame_num, (u8)1);
+	KUNIT_EXPECT_EQ(test, rotation.frames_since_idr, 1U);
 }
 
 static void cedrus_enc_test_job_plan_fail_closed(struct kunit *test)
@@ -1223,10 +1269,11 @@ static void cedrus_enc_test_job_plan_fail_closed(struct kunit *test)
 
 	buffers.source = 0x20000000;
 	rotation.started = true;
+	request.slice.frame_num = 1;
 	ret = cedrus_a133_h264_job_plan_prepare(&lifecycle, &rotation,
 						&params, &request,
 						&buffers, &plan);
-	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 	KUNIT_EXPECT_TRUE(test, rotation.started);
 	KUNIT_EXPECT_FALSE(test, rotation.pending);
 
@@ -1687,6 +1734,10 @@ static void cedrus_enc_test_frontend_contract(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, standard);
 	standard = cedrus_enc_control_is_standard(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE);
 	KUNIT_EXPECT_TRUE(test, standard);
+	standard = cedrus_enc_control_is_standard(V4L2_CID_MPEG_VIDEO_GOP_SIZE);
+	KUNIT_EXPECT_TRUE(test, standard);
+	standard = cedrus_enc_control_is_standard(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
+	KUNIT_EXPECT_TRUE(test, standard);
 	standard = cedrus_enc_control_is_standard(V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP);
 	KUNIT_EXPECT_TRUE(test, standard);
 	standard = cedrus_enc_control_is_standard(V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP);
@@ -1724,9 +1775,9 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_slice_vlc_sequences),
 	KUNIT_CASE(cedrus_enc_test_vlc_emit_failure),
 	KUNIT_CASE(cedrus_enc_test_reference_rotation),
+	KUNIT_CASE(cedrus_enc_test_idr_policy),
 	KUNIT_CASE(cedrus_enc_test_standard_controls),
 	KUNIT_CASE(cedrus_enc_test_stock_headers),
-	KUNIT_CASE(cedrus_enc_test_gop_policy),
 	KUNIT_CASE(cedrus_enc_test_job_plan),
 	KUNIT_CASE(cedrus_enc_test_job_plan_fail_closed),
 	KUNIT_CASE(cedrus_enc_test_job_completion),

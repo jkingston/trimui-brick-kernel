@@ -127,11 +127,9 @@ int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_job_lifecycle *lif
 	if (request->slice.qp != params->qp)
 		return -EINVAL;
 	if (request->slice.idr) {
-		/* Only the independently observed startup IDR is admitted. */
-		if (rotation->started || request->slice.frame_num ||
-		    request->slice.pic_order_cnt_lsb ||
-		    rotation->next_frame_num)
-			return -EOPNOTSUPP;
+		/* IDR resets the independently tracked frame_num and type-0 POC. */
+		if (request->slice.frame_num || request->slice.pic_order_cnt_lsb)
+			return -EINVAL;
 	} else if (!rotation->started) {
 		return -EINVAL;
 	} else if (request->slice.frame_num != rotation->next_frame_num ||
