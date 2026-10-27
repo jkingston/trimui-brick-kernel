@@ -297,7 +297,7 @@ static void cedrus_jpeg_a133_command_profile(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_BITSTREAM_END),
 			capture.end);
 	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER),
-			VE_ENC_JPEG_TRIGGER_START);
+			0x00010008U);
 	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA),
 			(u32)header[CEDRUS_JPEG_HEADER_SIZE - 1]);
 
