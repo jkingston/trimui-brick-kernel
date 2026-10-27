@@ -59,7 +59,12 @@ struct cedrus_a133_enc_backend_ctx {
 
 #define CEDRUS_A133_H264_FIXED_QP	30
 #define CEDRUS_A133_H264_FIXED_GOP	30
-#define CEDRUS_A133_H264_STOCK_BITSTREAM_SIZE	(12 * 1024 * 1024)
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+/* The exact six-frame QP30 stock stream is 9,262 bytes. */
+#define CEDRUS_A133_H264_MIN_CAPTURE_SIZE	(64 * 1024)
+#else
+#define CEDRUS_A133_H264_MIN_CAPTURE_SIZE	(12 * 1024 * 1024)
+#endif
 #define CEDRUS_A133_JPEG_STOCK_BITSTREAM_SIZE	(4 * 1024 * 1024)
 
 static const struct cedrus_enc_format cedrus_a133_enc_formats[] = {
@@ -95,8 +100,8 @@ static const struct cedrus_enc_format cedrus_a133_enc_formats[] = {
 		.width_align = 8,
 		.height_align = 8,
 		.buffer_align = 256,
-		/* Preserve the only measured stock capacity until bounded lower. */
-		.min_sizeimage = CEDRUS_A133_H264_STOCK_BITSTREAM_SIZE,
+		/* Preserve the measured stock capacity outside qualification. */
+		.min_sizeimage = CEDRUS_A133_H264_MIN_CAPTURE_SIZE,
 	}, {
 		.pixelformat = V4L2_PIX_FMT_JPEG,
 		.direction = CEDRUS_ENC_FORMAT_CODED,
@@ -296,6 +301,14 @@ cedrus_a133_enc_backend_s_ctrl(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl)
 		if (backend_ctx->force_keyframe_requested ==
 		    backend_ctx->force_keyframe_completed)
 			backend_ctx->force_keyframe_requested++;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		v4l2_info(&ctx->dev->v4l2_dev,
+			  "encoder qualification force requested=%llu completed=%llu\n",
+			  (unsigned long long)
+				backend_ctx->force_keyframe_requested,
+			  (unsigned long long)
+				backend_ctx->force_keyframe_completed);
+#endif
 		ret = 0;
 		goto out;
 	case V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP:
@@ -488,6 +501,26 @@ static int cedrus_a133_enc_backend_prepare_h264_job(struct cedrus_ctx *ctx)
 		backend_ctx->active_pixelformat = V4L2_PIX_FMT_H264;
 		backend_ctx->active_force_keyframe_request = force_keyframe ?
 			backend_ctx->force_keyframe_requested : 0;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		v4l2_info(&ctx->dev->v4l2_dev,
+			  "encoder qualification prepare codec=h264 generation=%llu frame=%u poc=%u idr=%u ref_slot=%u recon_slot=%u ref_luma=%#x ref_chroma=%#x recon_luma=%#x recon_chroma=%#x force_requested=%llu force_completed=%llu force_active=%llu\n",
+			  (unsigned long long)backend_ctx->job.plan.generation,
+			  request.slice.frame_num,
+			  request.slice.pic_order_cnt_lsb, request.slice.idr,
+			  backend_ctx->job.rotation.started ?
+				backend_ctx->job.rotation.reference : 0,
+			  backend_ctx->job.rotation.pending_reference,
+			  backend_ctx->job.plan.dma.reference.luma,
+			  backend_ctx->job.plan.dma.reference.chroma,
+			  backend_ctx->job.plan.dma.reconstruction.luma,
+			  backend_ctx->job.plan.dma.reconstruction.chroma,
+			  (unsigned long long)
+				backend_ctx->force_keyframe_requested,
+			  (unsigned long long)
+				backend_ctx->force_keyframe_completed,
+			  (unsigned long long)
+				backend_ctx->active_force_keyframe_request);
+#endif
 	}
 out:
 	spin_unlock_irqrestore(&backend_ctx->job_lock, flags);
@@ -530,8 +563,15 @@ static int cedrus_a133_enc_backend_prepare_jpeg_job(struct cedrus_ctx *ctx)
 	ret = cedrus_a133_jpeg_job_prepare(&backend_ctx->jpeg_lifecycle,
 					   &request, &buffers,
 					   &backend_ctx->jpeg_plan);
-	if (!ret)
+	if (!ret) {
 		backend_ctx->active_pixelformat = V4L2_PIX_FMT_JPEG;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		v4l2_info(&ctx->dev->v4l2_dev,
+			  "encoder qualification prepare codec=jpeg generation=%llu quality=%u\n",
+			  (unsigned long long)backend_ctx->jpeg_plan.generation,
+			  request.quality);
+#endif
+	}
 	spin_unlock_irqrestore(&backend_ctx->job_lock, flags);
 	return ret;
 }
@@ -622,6 +662,22 @@ cedrus_a133_enc_backend_irq_status_h264(struct cedrus_ctx *ctx)
 				V4L2_BUF_FLAG_BFRAME);
 		dst->flags |= backend_ctx->job.completion.keyframe ?
 			V4L2_BUF_FLAG_KEYFRAME : V4L2_BUF_FLAG_PFRAME;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		v4l2_info(&ctx->dev->v4l2_dev,
+			  "encoder qualification completion codec=h264 generation=%llu key=%u promoted_reference=%u next_frame=%u frames_since_idr=%u payload=%zu force_requested=%llu force_completed=%llu force_active=%llu\n",
+			  (unsigned long long)backend_ctx->job.plan.generation,
+			  backend_ctx->job.completion.keyframe,
+			  backend_ctx->job.rotation.reference,
+			  backend_ctx->job.rotation.next_frame_num,
+			  backend_ctx->job.rotation.frames_since_idr,
+			  backend_ctx->job.completion.payload,
+			  (unsigned long long)
+				backend_ctx->force_keyframe_requested,
+			  (unsigned long long)
+				backend_ctx->force_keyframe_completed,
+			  (unsigned long long)
+				backend_ctx->active_force_keyframe_request);
+#endif
 	}
 	if (ret != -EAGAIN)
 		backend_ctx->active_force_keyframe_request = 0;
@@ -724,6 +780,12 @@ cedrus_a133_enc_backend_irq_status_jpeg(struct cedrus_ctx *ctx)
 		dst->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
 				V4L2_BUF_FLAG_BFRAME);
 		dst->flags |= V4L2_BUF_FLAG_KEYFRAME;
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+		v4l2_info(&ctx->dev->v4l2_dev,
+			  "encoder qualification completion codec=jpeg generation=%llu payload=%zu\n",
+			  (unsigned long long)backend_ctx->jpeg_plan.generation,
+			  completion.payload);
+#endif
 	}
 	spin_unlock_irqrestore(&backend_ctx->job_lock, flags);
 
@@ -1011,6 +1073,7 @@ cedrus_a133_enc_abort(struct cedrus_ctx *ctx,
 	struct cedrus_a133_enc_backend_ctx *backend_ctx;
 	unsigned long flags;
 	u64 generation;
+	u64 force_active;
 	u32 pixelformat;
 	int ret;
 
@@ -1026,9 +1089,21 @@ cedrus_a133_enc_abort(struct cedrus_ctx *ctx,
 	pixelformat = backend_ctx->active_pixelformat;
 	switch (pixelformat) {
 	case V4L2_PIX_FMT_H264:
+		force_active = backend_ctx->active_force_keyframe_request;
 		ret = cedrus_a133_h264_backend_job_abort(&backend_ctx->job);
-		if (!ret)
+		if (!ret) {
+#if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION)
+			v4l2_info(&ctx->dev->v4l2_dev,
+				  "encoder qualification abort codec=h264 reason=%u force_requested=%llu force_completed=%llu force_active=%llu\n",
+				  reason,
+				  (unsigned long long)
+					backend_ctx->force_keyframe_requested,
+				  (unsigned long long)
+					backend_ctx->force_keyframe_completed,
+				  (unsigned long long)force_active);
+#endif
 			backend_ctx->active_force_keyframe_request = 0;
+		}
 		break;
 	case V4L2_PIX_FMT_JPEG:
 		generation = backend_ctx->jpeg_lifecycle.active_generation;

@@ -1684,7 +1684,9 @@ static void cedrus_enc_test_backend_registry(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, second_jpeg);
 	KUNIT_EXPECT_EQ(test, ops->num_formats, 4U);
 	KUNIT_EXPECT_EQ(test, ops->num_controls, 10U);
-	KUNIT_EXPECT_EQ(test, ops->formats[2].min_sizeimage, 12U * SZ_1M);
+	KUNIT_EXPECT_EQ(test, ops->formats[2].min_sizeimage,
+			IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION) ?
+			64U * SZ_1K : 12U * SZ_1M);
 	KUNIT_EXPECT_EQ(test, ops->formats[3].min_sizeimage, 4U * SZ_1M);
 	KUNIT_EXPECT_EQ(test, ops->formats[3].max_sizeimage, 4U * SZ_1M);
 	for (i = 0; i < ops->num_formats; i++)
