@@ -9,6 +9,8 @@
 
 #include "cedrus_enc.h"
 
+struct cedrus_h264_enc_params;
+
 /* Packed words established for the stock fixed-QP High/CABAC path. */
 struct cedrus_a133_h264_enc_codec {
 	u32 picture_size;
@@ -33,6 +35,28 @@ struct cedrus_a133_h264_enc_rotation {
 	u8 pending_reference;
 	bool started;
 	bool pending;
+};
+
+#define CEDRUS_A133_H264_VLC_MAX_COMMANDS	64
+
+/* One stock PUT_BITS transaction: b20 payload followed by b18 command. */
+struct cedrus_a133_h264_vlc_command {
+	u32 value;
+	u8 bits;
+};
+
+struct cedrus_a133_h264_vlc_sequence {
+	struct cedrus_a133_h264_vlc_command
+		commands[CEDRUS_A133_H264_VLC_MAX_COMMANDS];
+	u16 count;
+	u16 bit_count;
+};
+
+struct cedrus_a133_h264_slice_header {
+	u8 frame_num;
+	u8 pic_order_cnt_lsb;
+	u8 qp;
+	bool idr;
 };
 
 int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
@@ -70,6 +94,15 @@ int cedrus_a133_h264_put_bits(void __iomem *base, u32 value,
 			      unsigned int count);
 int cedrus_a133_h264_put_ue(void __iomem *base, u32 value);
 int cedrus_a133_h264_put_se(void __iomem *base, s32 value);
+
+int cedrus_a133_h264_headers_prepare(const struct cedrus_h264_enc_params *params,
+				     u32 width, u32 height,
+				     struct cedrus_a133_h264_vlc_sequence *sequence);
+int cedrus_a133_h264_slice_header_prepare(const struct cedrus_h264_enc_params *params,
+					  const struct cedrus_a133_h264_slice_header *slice,
+					  struct cedrus_a133_h264_vlc_sequence *sequence);
+int cedrus_a133_h264_vlc_emit(void __iomem *base,
+			      const struct cedrus_a133_h264_vlc_sequence *sequence);
 
 void cedrus_a133_h264_irq_arm(void __iomem *base);
 u32 cedrus_a133_h264_irq_ack(void __iomem *base);

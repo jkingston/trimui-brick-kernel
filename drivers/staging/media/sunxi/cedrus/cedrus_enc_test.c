@@ -449,6 +449,219 @@ static void cedrus_enc_test_header_exp_golomb(struct kunit *test)
 			-EOVERFLOW);
 }
 
+static const struct cedrus_a133_h264_vlc_command stock_header_commands[] = {
+	{ 0x00, 8 }, { 0x00, 8 }, { 0x00, 8 }, { 0x01, 8 },
+	{ 0x67, 8 }, { 0x64, 8 }, { 0x00, 8 }, { 0x33, 8 },
+	{ 0x01, 1 }, { 0x02, 3 }, { 0x01, 1 }, { 0x01, 1 },
+	{ 0x00, 1 }, { 0x00, 1 }, { 0x05, 5 }, { 0x01, 1 },
+	{ 0x05, 5 }, { 0x02, 3 }, { 0x00, 1 }, { 0x14, 9 },
+	{ 0x0f, 7 }, { 0x01, 1 }, { 0x00, 1 }, { 0x00, 1 },
+	{ 0x00, 1 }, { 0x01, 1 }, { 0x00, 4 }, { 0x00, 8 },
+	{ 0x00, 8 }, { 0x00, 8 }, { 0x01, 8 }, { 0x68, 8 },
+	{ 0x01, 1 }, { 0x01, 1 }, { 0x01, 1 }, { 0x00, 1 },
+	{ 0x01, 1 }, { 0x01, 1 }, { 0x01, 1 }, { 0x00, 1 },
+	{ 0x00, 2 }, { 0x01, 1 }, { 0x01, 1 }, { 0x01, 1 },
+	{ 0x01, 1 }, { 0x00, 1 }, { 0x00, 1 }, { 0x00, 1 },
+	{ 0x00, 1 }, { 0x01, 1 }, { 0x01, 1 }, { 0x00, 4 },
+};
+
+static const struct cedrus_a133_h264_vlc_command stock_idr_commands[] = {
+	{ 0x00, 8 }, { 0x00, 8 }, { 0x00, 8 }, { 0x01, 8 },
+	{ 0x65, 8 }, { 0x01, 1 }, { 0x08, 7 }, { 0x01, 1 },
+	{ 0x00, 8 }, { 0x01, 1 }, { 0x00, 8 }, { 0x00, 1 },
+	{ 0x00, 1 }, { 0x08, 7 }, { 0x01, 1 }, { 0x01, 1 },
+	{ 0x01, 1 },
+};
+
+static const struct cedrus_a133_h264_vlc_command stock_first_p_commands[] = {
+	{ 0x00, 8 }, { 0x00, 8 }, { 0x00, 8 }, { 0x01, 8 },
+	{ 0x41, 8 }, { 0x01, 1 }, { 0x06, 5 }, { 0x01, 1 },
+	{ 0x01, 8 }, { 0x02, 8 }, { 0x00, 1 }, { 0x00, 1 },
+	{ 0x00, 1 }, { 0x02, 3 }, { 0x08, 7 }, { 0x01, 1 },
+	{ 0x01, 1 }, { 0x01, 1 },
+};
+
+static void
+cedrus_enc_test_vlc_commands(struct kunit *test,
+			     const struct cedrus_a133_h264_vlc_sequence *sequence,
+			     const struct cedrus_a133_h264_vlc_command *expected,
+			     size_t expected_count)
+{
+	unsigned int i;
+
+	KUNIT_ASSERT_EQ(test, (size_t)sequence->count, expected_count);
+	for (i = 0; i < expected_count; i++) {
+		KUNIT_EXPECT_EQ_MSG(test, sequence->commands[i].value,
+				    expected[i].value, "command %u payload", i);
+		KUNIT_EXPECT_EQ_MSG(test, sequence->commands[i].bits,
+				    expected[i].bits, "command %u length", i);
+	}
+}
+
+static size_t
+cedrus_enc_test_vlc_render(const struct cedrus_a133_h264_vlc_sequence *sequence,
+			   u8 *data, size_t size)
+{
+	size_t bit = 0;
+	unsigned int i, remaining;
+
+	memset(data, 0, size);
+	if (DIV_ROUND_UP(sequence->bit_count, 8) > size)
+		return 0;
+
+	for (i = 0; i < sequence->count; i++) {
+		for (remaining = sequence->commands[i].bits;
+		     remaining; remaining--) {
+			u8 value = remaining > 32 ? 0 :
+				   (sequence->commands[i].value >>
+				    (remaining - 1)) & 1;
+
+			data[bit / 8] |= value << (7 - bit % 8);
+			bit++;
+		}
+	}
+
+	return DIV_ROUND_UP(bit, 8);
+}
+
+static void cedrus_enc_test_header_vlc_sequence(struct kunit *test)
+{
+	static const u8 stock_headers[] = {
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x33,
+		0xac, 0x2c, 0xa8, 0x14, 0x1f, 0x10,
+		0x00, 0x00, 0x00, 0x01, 0x68, 0xee, 0x3c, 0x30,
+	};
+	struct cedrus_h264_enc_params params = {
+		.profile_idc = 100,
+		.level_idc = 51,
+		.qp = 30,
+		.cabac = true,
+		.gop_size = 30,
+	};
+	struct cedrus_a133_h264_vlc_sequence sequence;
+	u8 rendered[64];
+	int ret;
+
+	ret = cedrus_a133_h264_headers_prepare(&params, 320, 240,
+					       &sequence);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, sequence.bit_count, (u16)176);
+	cedrus_enc_test_vlc_commands(test, &sequence, stock_header_commands,
+				     ARRAY_SIZE(stock_header_commands));
+	KUNIT_ASSERT_EQ(test,
+			cedrus_enc_test_vlc_render(&sequence, rendered,
+						   sizeof(rendered)),
+			sizeof(stock_headers));
+	KUNIT_EXPECT_MEMEQ(test, rendered, stock_headers, sizeof(stock_headers));
+
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_h264_headers_prepare(&params, 0, 240,
+							 &sequence),
+			-EINVAL);
+	params.profile_idc = 77;
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_h264_headers_prepare(&params, 320, 240,
+							 &sequence),
+			-EOPNOTSUPP);
+}
+
+static void cedrus_enc_test_slice_vlc_sequences(struct kunit *test)
+{
+	static const u8 stock_idr_prefix[] = {
+		0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x80, 0x40, 0x01, 0x1c,
+	};
+	static const u8 stock_p_prefix[] = {
+		0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x02, 0x04, 0x10, 0x8e,
+	};
+	struct cedrus_h264_enc_params params = {
+		.profile_idc = 100,
+		.level_idc = 51,
+		.qp = 30,
+		.cabac = true,
+		.gop_size = 30,
+	};
+	struct cedrus_a133_h264_slice_header slice = {
+		.qp = 30,
+		.idr = true,
+	};
+	struct cedrus_a133_h264_vlc_sequence sequence;
+	u8 rendered[32];
+	int ret;
+
+	ret = cedrus_a133_h264_slice_header_prepare(&params, &slice,
+						    &sequence);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, sequence.bit_count, (u16)78);
+	cedrus_enc_test_vlc_commands(test, &sequence, stock_idr_commands,
+				     ARRAY_SIZE(stock_idr_commands));
+	KUNIT_ASSERT_EQ(test,
+			cedrus_enc_test_vlc_render(&sequence, rendered,
+						   sizeof(rendered)),
+			sizeof(stock_idr_prefix));
+	KUNIT_EXPECT_MEMEQ(test, rendered, stock_idr_prefix,
+			   sizeof(stock_idr_prefix));
+
+	slice = (struct cedrus_a133_h264_slice_header) {
+		.frame_num = 1,
+		.pic_order_cnt_lsb = 2,
+		.qp = 30,
+	};
+	ret = cedrus_a133_h264_slice_header_prepare(&params, &slice,
+						    &sequence);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, sequence.bit_count, (u16)79);
+	cedrus_enc_test_vlc_commands(test, &sequence, stock_first_p_commands,
+				     ARRAY_SIZE(stock_first_p_commands));
+	KUNIT_ASSERT_EQ(test,
+			cedrus_enc_test_vlc_render(&sequence, rendered,
+						   sizeof(rendered)),
+			sizeof(stock_p_prefix));
+	KUNIT_EXPECT_MEMEQ(test, rendered, stock_p_prefix,
+			   sizeof(stock_p_prefix));
+
+	slice.qp = 52;
+	KUNIT_EXPECT_EQ(test,
+			cedrus_a133_h264_slice_header_prepare(&params, &slice,
+							      &sequence),
+			-ERANGE);
+}
+
+static void cedrus_enc_test_vlc_emit_failure(struct kunit *test)
+{
+	struct cedrus_a133_h264_vlc_sequence sequence = {
+		.commands = { { 0x67, 8 }, { 1, 1 } },
+		.count = 2,
+		.bit_count = 9,
+	};
+	void __iomem *base;
+	u32 *registers;
+	int ret;
+
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	base = (void __iomem *)registers;
+
+	ret = cedrus_a133_h264_vlc_emit(base, &sequence);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA), 0U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER), 0U);
+
+	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY,
+	       base + VE_ENC_AVC_STATUS);
+	ret = cedrus_a133_h264_vlc_emit(base, &sequence);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA), 1U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER), 0x00000101U);
+
+	sequence.commands[0].bits = 0;
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_vlc_emit(base, &sequence),
+			-EINVAL);
+	sequence.commands[0].bits = 8;
+	sequence.bit_count = 8;
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_vlc_emit(base, &sequence),
+			-EINVAL);
+}
+
 static void cedrus_enc_test_reference_rotation(struct kunit *test)
 {
 	const struct cedrus_a133_h264_enc_frame_slot slots[2] = {
@@ -637,6 +850,9 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_codec_register_image),
 	KUNIT_CASE(cedrus_enc_test_header_put_bits),
 	KUNIT_CASE(cedrus_enc_test_header_exp_golomb),
+	KUNIT_CASE(cedrus_enc_test_header_vlc_sequence),
+	KUNIT_CASE(cedrus_enc_test_slice_vlc_sequences),
+	KUNIT_CASE(cedrus_enc_test_vlc_emit_failure),
 	KUNIT_CASE(cedrus_enc_test_reference_rotation),
 	KUNIT_CASE(cedrus_enc_test_standard_controls),
 	KUNIT_CASE(cedrus_enc_test_stock_headers),

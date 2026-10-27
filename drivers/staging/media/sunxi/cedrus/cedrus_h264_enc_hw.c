@@ -9,6 +9,7 @@
 #include <linux/overflow.h>
 
 #include "cedrus_enc_regs.h"
+#include "cedrus_h264_enc.h"
 #include "cedrus_h264_enc_hw.h"
 
 #define CEDRUS_A133_ENC_ADDR_UNIT	256U
@@ -21,6 +22,8 @@
 #define CEDRUS_A133_ENC_PUT_BITS_POLLS	10000U
 #define CEDRUS_A133_ENC_PUT_BITS_MAX	\
 	FIELD_MAX(VE_ENC_AVC_TRIGGER_BIT_COUNT)
+#define CEDRUS_A133_ENC_LEVEL_5_1_MAX_MBS	36864U
+#define CEDRUS_A133_ENC_PIC_INIT_QP	26
 
 int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
 				   bool idr,
@@ -283,6 +286,281 @@ int cedrus_a133_h264_put_se(void __iomem *base, s32 value)
 	bits = fls(code_num);
 
 	return cedrus_a133_h264_put_bits(base, code_num, 2 * bits - 1);
+}
+
+struct cedrus_a133_h264_vlc_builder {
+	struct cedrus_a133_h264_vlc_sequence *sequence;
+	int error;
+};
+
+static int cedrus_a133_h264_vlc_append(struct cedrus_a133_h264_vlc_sequence *sequence,
+				       u32 value, unsigned int bits)
+{
+	if (!bits || bits > CEDRUS_A133_ENC_PUT_BITS_MAX)
+		return -EINVAL;
+	if (bits < 32 && value >= BIT(bits))
+		return -ERANGE;
+	if (sequence->count == CEDRUS_A133_H264_VLC_MAX_COMMANDS)
+		return -EOVERFLOW;
+	if (sequence->bit_count > U16_MAX - bits)
+		return -EOVERFLOW;
+
+	sequence->commands[sequence->count++] =
+		(struct cedrus_a133_h264_vlc_command) {
+			.value = value,
+			.bits = bits,
+		};
+	sequence->bit_count += bits;
+	return 0;
+}
+
+static void cedrus_a133_h264_vlc_bits(struct cedrus_a133_h264_vlc_builder *builder,
+				      u32 value, unsigned int bits)
+{
+	if (!builder->error)
+		builder->error = cedrus_a133_h264_vlc_append(builder->sequence,
+							     value, bits);
+}
+
+static void cedrus_a133_h264_vlc_ue(struct cedrus_a133_h264_vlc_builder *builder,
+				    u32 value)
+{
+	u32 code_num;
+	unsigned int bits;
+
+	if (builder->error)
+		return;
+	if (value == U32_MAX) {
+		builder->error = -EOVERFLOW;
+		return;
+	}
+
+	code_num = value + 1;
+	bits = fls(code_num);
+	cedrus_a133_h264_vlc_bits(builder, code_num, 2 * bits - 1);
+}
+
+static void cedrus_a133_h264_vlc_se(struct cedrus_a133_h264_vlc_builder *builder,
+				    s32 value)
+{
+	u32 code_num;
+	unsigned int bits;
+
+	if (builder->error)
+		return;
+	if (value == S32_MIN) {
+		builder->error = -EOVERFLOW;
+		return;
+	}
+
+	if (value > 0)
+		code_num = (u32)value * 2;
+	else
+		code_num = (u32)-value * 2 + 1;
+	bits = fls(code_num);
+	cedrus_a133_h264_vlc_bits(builder, code_num, 2 * bits - 1);
+}
+
+static void cedrus_a133_h264_vlc_nal_start(struct cedrus_a133_h264_vlc_builder *builder,
+					   u8 header)
+{
+	static const u8 start[] = { 0, 0, 0, 1 };
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(start); i++)
+		cedrus_a133_h264_vlc_bits(builder, start[i], 8);
+	cedrus_a133_h264_vlc_bits(builder, header, 8);
+}
+
+static void
+cedrus_a133_h264_vlc_trailing_bits(struct cedrus_a133_h264_vlc_builder *builder)
+{
+	unsigned int zero_bits;
+
+	cedrus_a133_h264_vlc_bits(builder, 1, 1);
+	if (builder->error)
+		return;
+
+	/* Stock emits a second PUT_BITS transaction to reach a byte boundary. */
+	zero_bits = 8 - builder->sequence->bit_count % 8;
+	cedrus_a133_h264_vlc_bits(builder, 0, zero_bits);
+}
+
+static int
+cedrus_a133_h264_vlc_params_check(const struct cedrus_h264_enc_params *params)
+{
+	if (!params)
+		return -EINVAL;
+	if (params->profile_idc != 100 || params->constraint_flags ||
+	    params->level_idc != 51 || !params->cabac || params->qp > 51 ||
+	    !params->gop_size)
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+int cedrus_a133_h264_headers_prepare(const struct cedrus_h264_enc_params *params,
+				     u32 width, u32 height,
+				     struct cedrus_a133_h264_vlc_sequence *sequence)
+{
+	struct cedrus_a133_h264_vlc_builder builder = { .sequence = sequence };
+	u32 coded_width, coded_height;
+	u32 crop_right, crop_bottom;
+	int ret;
+
+	if (!sequence || !width || !height)
+		return -EINVAL;
+	ret = cedrus_a133_h264_vlc_params_check(params);
+	if (ret)
+		return ret;
+	if (width > CEDRUS_A133_ENC_MAX_DIMENSION ||
+	    height > CEDRUS_A133_ENC_MAX_DIMENSION)
+		return -ERANGE;
+	if (width % CEDRUS_A133_ENC_DIMENSION_UNIT ||
+	    height % CEDRUS_A133_ENC_DIMENSION_UNIT)
+		return -EOPNOTSUPP;
+
+	coded_width = ALIGN(width, CEDRUS_A133_ENC_MB_UNIT);
+	coded_height = ALIGN(height, CEDRUS_A133_ENC_MB_UNIT);
+	if (coded_width / CEDRUS_A133_ENC_MB_UNIT *
+	    (coded_height / CEDRUS_A133_ENC_MB_UNIT) >
+	    CEDRUS_A133_ENC_LEVEL_5_1_MAX_MBS)
+		return -ERANGE;
+	crop_right = (coded_width - width) / 2;
+	crop_bottom = (coded_height - height) / 2;
+	*sequence = (struct cedrus_a133_h264_vlc_sequence) {};
+
+	/* _InitSPS: exact stock High/CABAC/Level-5.1 software-header path. */
+	cedrus_a133_h264_vlc_nal_start(&builder, 0x67);
+	cedrus_a133_h264_vlc_bits(&builder, params->profile_idc, 8);
+	cedrus_a133_h264_vlc_bits(&builder, params->constraint_flags, 8);
+	cedrus_a133_h264_vlc_bits(&builder, params->level_idc, 8);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_ue(&builder, 1);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_ue(&builder, 4);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_ue(&builder, 4);
+	cedrus_a133_h264_vlc_ue(&builder, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_ue(&builder, coded_width / 16 - 1);
+	cedrus_a133_h264_vlc_ue(&builder, coded_height / 16 - 1);
+	cedrus_a133_h264_vlc_bits(&builder, 1, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_bits(&builder, crop_right || crop_bottom, 1);
+	if (crop_right || crop_bottom) {
+		cedrus_a133_h264_vlc_ue(&builder, 0);
+		cedrus_a133_h264_vlc_ue(&builder, crop_right);
+		cedrus_a133_h264_vlc_ue(&builder, 0);
+		cedrus_a133_h264_vlc_ue(&builder, crop_bottom);
+	}
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_trailing_bits(&builder);
+
+	/* _InitPPS: exact one-reference, no-weighting stock path. */
+	cedrus_a133_h264_vlc_nal_start(&builder, 0x68);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_bits(&builder, 1, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 2);
+	cedrus_a133_h264_vlc_se(&builder, 0);
+	cedrus_a133_h264_vlc_se(&builder, 0);
+	cedrus_a133_h264_vlc_se(&builder, 0);
+	cedrus_a133_h264_vlc_bits(&builder, 1, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	cedrus_a133_h264_vlc_se(&builder, 0);
+	cedrus_a133_h264_vlc_trailing_bits(&builder);
+
+	return builder.error;
+}
+
+int cedrus_a133_h264_slice_header_prepare(const struct cedrus_h264_enc_params *params,
+					  const struct cedrus_a133_h264_slice_header *slice,
+					  struct cedrus_a133_h264_vlc_sequence *sequence)
+{
+	struct cedrus_a133_h264_vlc_builder builder = { .sequence = sequence };
+	int ret;
+
+	if (!slice || !sequence)
+		return -EINVAL;
+	ret = cedrus_a133_h264_vlc_params_check(params);
+	if (ret)
+		return ret;
+	if (slice->qp > 51)
+		return -ERANGE;
+	*sequence = (struct cedrus_a133_h264_vlc_sequence) {};
+
+	/* SliceHeader: the stock first-reference IDR/P branch. */
+	cedrus_a133_h264_vlc_nal_start(&builder, slice->idr ? 0x65 : 0x41);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_ue(&builder, slice->idr ? 7 : 5);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_bits(&builder, slice->frame_num, 8);
+	if (slice->idr)
+		cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_bits(&builder, slice->pic_order_cnt_lsb, 8);
+	if (slice->idr) {
+		cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+		cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+	} else {
+		cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+		cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+		cedrus_a133_h264_vlc_bits(&builder, 0, 1);
+		cedrus_a133_h264_vlc_ue(&builder, 1);
+	}
+	cedrus_a133_h264_vlc_se(&builder,
+				slice->qp - CEDRUS_A133_ENC_PIC_INIT_QP);
+	cedrus_a133_h264_vlc_ue(&builder, 0);
+	cedrus_a133_h264_vlc_se(&builder, 0);
+	cedrus_a133_h264_vlc_se(&builder, 0);
+
+	return builder.error;
+}
+
+int cedrus_a133_h264_vlc_emit(void __iomem *base,
+			      const struct cedrus_a133_h264_vlc_sequence *sequence)
+{
+	unsigned int bit_count = 0;
+	unsigned int i;
+	int ret;
+
+	if (!base || !sequence || !sequence->count ||
+	    sequence->count > CEDRUS_A133_H264_VLC_MAX_COMMANDS)
+		return -EINVAL;
+
+	/* Validate the whole transaction before the first irreversible write. */
+	for (i = 0; i < sequence->count; i++) {
+		unsigned int bits = sequence->commands[i].bits;
+
+		if (!bits || bits > CEDRUS_A133_ENC_PUT_BITS_MAX)
+			return -EINVAL;
+		if (bits < 32 && sequence->commands[i].value >= BIT(bits))
+			return -ERANGE;
+		bit_count += bits;
+	}
+	if (bit_count != sequence->bit_count)
+		return -EINVAL;
+
+	for (i = 0; i < sequence->count; i++) {
+		ret = cedrus_a133_h264_put_bits(base,
+						sequence->commands[i].value,
+						sequence->commands[i].bits);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 void cedrus_a133_h264_irq_arm(void __iomem *base)
