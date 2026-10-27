@@ -8,6 +8,8 @@
 #include <media/v4l2-jpeg.h>
 
 #include "cedrus_jpeg.h"
+#include "cedrus_enc_regs.h"
+#include "cedrus_jpeg_enc_hw.h"
 
 static const u8 stock_quality_95_luma_zigzag[CEDRUS_JPEG_QUANT_SIZE] = {
 	2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 2, 2, 2, 2, 2, 4,
@@ -250,6 +252,93 @@ static void cedrus_jpeg_capture_completion(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
 }
 
+static void cedrus_jpeg_a133_command_profile(struct kunit *test)
+{
+	struct cedrus_a133_jpeg_codec codec;
+	struct cedrus_jpeg_capture capture;
+	struct cedrus_jpeg_tables tables;
+	u8 *header;
+	u32 *registers;
+	void __iomem *base;
+	int ret;
+
+	header = kunit_kzalloc(test, CEDRUS_JPEG_HEADER_SIZE, GFP_KERNEL);
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, header);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	base = (void __iomem *)registers;
+
+	ret = cedrus_jpeg_prepare_tables(&tables, 95);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = cedrus_jpeg_write_header(header, CEDRUS_JPEG_HEADER_SIZE,
+				       320, 240, &tables);
+	KUNIT_ASSERT_EQ(test, ret, (int)CEDRUS_JPEG_HEADER_SIZE);
+	ret = cedrus_a133_jpeg_codec_prepare(320, 240, 95, &tables, &codec);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, codec.picture_size, 0x0028001eU);
+	KUNIT_EXPECT_EQ(test, codec.picture_control, 0xc2000200U);
+	KUNIT_EXPECT_EQ(test, codec.optimization, 0xc0000000U);
+
+	ret = cedrus_jpeg_prepare_capture(&capture, 0xfbc00000, SZ_4M, 0);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY,
+	       base + VE_ENC_AVC_STATUS);
+	ret = cedrus_a133_jpeg_start_phase(base, &codec, &capture, &tables,
+					   header, CEDRUS_JPEG_HEADER_SIZE);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PICTURE_SIZE),
+			codec.picture_size);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PICTURE_CONTROL),
+			codec.picture_control);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_QP),
+			codec.optimization);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_BITSTREAM_START),
+			capture.start);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_BITSTREAM_END),
+			capture.end);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER),
+			VE_ENC_JPEG_TRIGGER_START);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA),
+			(u32)header[CEDRUS_JPEG_HEADER_SIZE - 1]);
+
+	ret = cedrus_a133_jpeg_codec_prepare(320, 240, 94, &tables, &codec);
+	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
+	capture.prefix = CEDRUS_JPEG_HEADER_SIZE;
+	capture.offset = CEDRUS_JPEG_HEADER_SIZE * 8U;
+	ret = cedrus_a133_jpeg_start_phase(base, &codec, &capture, &tables,
+					   header, CEDRUS_JPEG_HEADER_SIZE);
+	KUNIT_EXPECT_EQ(test, ret, -EOPNOTSUPP);
+}
+
+static void cedrus_jpeg_a133_command_timeout(struct kunit *test)
+{
+	struct cedrus_a133_jpeg_codec codec;
+	struct cedrus_jpeg_capture capture;
+	struct cedrus_jpeg_tables tables;
+	u8 *header;
+	u32 *registers;
+	void __iomem *base;
+	int ret;
+
+	header = kunit_kzalloc(test, CEDRUS_JPEG_HEADER_SIZE, GFP_KERNEL);
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, header);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	base = (void __iomem *)registers;
+	ret = cedrus_jpeg_prepare_tables(&tables, 95);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = cedrus_a133_jpeg_codec_prepare(320, 240, 95, &tables, &codec);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = cedrus_jpeg_prepare_capture(&capture, 0xfbc00000, SZ_4M, 0);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = cedrus_a133_jpeg_start_phase(base, &codec, &capture, &tables,
+					   header, CEDRUS_JPEG_HEADER_SIZE);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER),
+			VE_ENC_JPEG_TRIGGER_PUT_BYTE);
+}
+
 static struct kunit_case cedrus_jpeg_test_cases[] = {
 	KUNIT_CASE(cedrus_jpeg_tables_match_stock),
 	KUNIT_CASE(cedrus_jpeg_quality_bounds),
@@ -257,6 +346,8 @@ static struct kunit_case cedrus_jpeg_test_cases[] = {
 	KUNIT_CASE(cedrus_jpeg_nv12_source_contract),
 	KUNIT_CASE(cedrus_jpeg_capture_contract),
 	KUNIT_CASE(cedrus_jpeg_capture_completion),
+	KUNIT_CASE(cedrus_jpeg_a133_command_profile),
+	KUNIT_CASE(cedrus_jpeg_a133_command_timeout),
 	{},
 };
 
