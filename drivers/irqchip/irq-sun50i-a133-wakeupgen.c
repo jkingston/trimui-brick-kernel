@@ -3,6 +3,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/bits.h>
 #include <linux/errno.h>
+#include <linux/firmware/sun50i-a133-native.h>
 #include <linux/irq.h>
 #include <linux/irqchip.h>
 #include <linux/irqchip/irq-sun50i-a133-wakeupgen.h>
@@ -15,30 +16,8 @@
 #define A133_STOCK_CLEAR_WAKE_SOURCE	0xc0000025
 #define A133_STOCK_SET_WAKE_SOURCE	0xc0000026
 
-#define A133_NATIVE_UID			0x8200ff01
-#define A133_NATIVE_VERSION		0x8200ff03
-#define A133_NATIVE_CAPABILITIES		0x82000100
-#define A133_NATIVE_SET_WAKE_SOURCE	0x82000101
-#define A133_NATIVE_CLEAR_WAKE_SOURCE	0x82000102
-
-#define A133_NATIVE_UID_WORD0		0x28c05220
-#define A133_NATIVE_UID_WORD1		0x0c5421f9
-#define A133_NATIVE_UID_WORD2		0xa0bb3083
-#define A133_NATIVE_UID_WORD3		0x72c7a28b
-#define A133_NATIVE_VERSION_MAJOR	1
-#define A133_NATIVE_CAP_WAKE_SOURCE	BIT(0)
-#define A133_NATIVE_CAP_RAW_SPI_INDEX	BIT(1)
 #define A133_NATIVE_REQUIRED_CAPS	(A133_NATIVE_CAP_WAKE_SOURCE | \
 					 A133_NATIVE_CAP_RAW_SPI_INDEX)
-
-#define A133_NATIVE_SUCCESS		0
-#define A133_NATIVE_NOT_SUPPORTED	-1
-#define A133_NATIVE_INVALID_PARAMETER	-4
-#define A133_NATIVE_NOT_READY		-5
-#define A133_NATIVE_TIMEOUT		-6
-#define A133_NATIVE_POISONED		-7
-#define A133_NATIVE_PROTOCOL_ERROR	-8
-#define A133_NATIVE_REMOTE_ERROR		-9
 
 #define A133_NR_SPIS			(1020 - 32)
 

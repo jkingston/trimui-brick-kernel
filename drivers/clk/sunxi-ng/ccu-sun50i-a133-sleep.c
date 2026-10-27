@@ -2,6 +2,7 @@
 /* A133 stock-chain CCU context. Critical clocks are checked, not retuned. */
 #include <linux/arm-smccc.h>
 #include <linux/device.h>
+#include <linux/firmware/sun50i-a133-native.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
@@ -14,6 +15,11 @@
 
 #include "ccu-sun50i-a133-sleep.h"
 
+#define A133_STOCK_MONITOR_UID		0x8000ff01
+#define A133_STOCK_UID_WORD0		0x83b53a5b
+#define A133_STOCK_UID_WORD1		0x40b9c594
+#define A133_STOCK_UID_WORD2		0xfcf29153
+#define A133_STOCK_UID_WORD3		0x48862954
 struct a133_context_reg {
 	u16 offset;
 	u32 mask, saved;
@@ -149,6 +155,8 @@ static void __iomem *bases[2];
 static bool enabled, saved;
 static int context_error;
 
+static bool a133_firmware_suspend_ready(void);
+
 int sun50i_a133_ccu_deep_ready(void)
 {
 	if (!READ_ONCE(enabled))
@@ -206,6 +214,8 @@ static int a133_context_suspend(void *unused)
 		return 0;
 	if (!enabled || context_error)
 		return context_error ?: -EOPNOTSUPP;
+	if (!a133_firmware_suspend_ready())
+		return -EIO;
 	/* Never reprogram peripheral PLL0 while the CPU is using its bypass. */
 	if (((readl(bases[0] + 0x500) >> 24) & 7) != 3)
 		return -EBUSY;
@@ -320,6 +330,33 @@ static const struct syscore_ops a133_context_ops = {
 };
 static struct syscore a133_context = { .ops = &a133_context_ops };
 
+static bool a133_firmware_suspend_ready(void)
+{
+	struct arm_smccc_res res;
+
+	arm_smccc_smc(A133_STOCK_MONITOR_UID, 0, 0, 0, 0, 0, 0, 0, &res);
+	if ((u32)res.a0 == A133_STOCK_UID_WORD0 &&
+	    (u32)res.a1 == A133_STOCK_UID_WORD1 &&
+	    (u32)res.a2 == A133_STOCK_UID_WORD2 &&
+	    (u32)res.a3 == A133_STOCK_UID_WORD3)
+		return true;
+
+	arm_smccc_smc(A133_NATIVE_UID, 0, 0, 0, 0, 0, 0, 0, &res);
+	if ((u32)res.a0 != A133_NATIVE_UID_WORD0 ||
+	    (u32)res.a1 != A133_NATIVE_UID_WORD1 ||
+	    (u32)res.a2 != A133_NATIVE_UID_WORD2 ||
+	    (u32)res.a3 != A133_NATIVE_UID_WORD3)
+		return false;
+
+	arm_smccc_smc(A133_NATIVE_VERSION, 0, 0, 0, 0, 0, 0, 0, &res);
+	if ((u32)res.a0 != A133_NATIVE_VERSION_MAJOR)
+		return false;
+
+	arm_smccc_smc(A133_NATIVE_CAPABILITIES, 0, 0, 0, 0, 0, 0, 0, &res);
+	return (s32)res.a0 == A133_NATIVE_SUCCESS &&
+	       ((u32)res.a1 & A133_NATIVE_CAP_SYSTEM_SUSPEND);
+}
+
 static void a133_context_remove(void *data)
 {
 	unsigned long bank = (unsigned long)data - 1;
@@ -333,7 +370,6 @@ static void a133_context_remove(void *data)
 
 int sun50i_a133_ccu_sleep_init(struct device *dev, void __iomem *base, bool r_ccu)
 {
-	struct arm_smccc_res res;
 	struct resource *resource;
 	int ret;
 
@@ -345,9 +381,7 @@ int sun50i_a133_ccu_sleep_init(struct device *dev, void __iomem *base, bool r_cc
 	if (!resource || resource->start != (r_ccu ? 0x07010000 : 0x03001000) ||
 	    resource_size(resource) < (r_ccu ? 0x210 : 0xc30))
 		return -EINVAL;
-	arm_smccc_smc(0x8000ff01, 0, 0, 0, 0, 0, 0, 0, &res);
-	if ((u32)res.a0 != 0x83b53a5b || (u32)res.a1 != 0x40b9c594 ||
-	    (u32)res.a2 != 0xfcf29153 || (u32)res.a3 != 0x48862954)
+	if (!a133_firmware_suspend_ready())
 		return -ENODEV;
 	if (bases[r_ccu])
 		return -EBUSY;
