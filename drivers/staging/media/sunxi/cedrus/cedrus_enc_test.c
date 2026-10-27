@@ -401,8 +401,47 @@ static void cedrus_enc_test_header_put_bits(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_put_bits(base, 0, 0),
 			-EINVAL);
-	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_put_bits(base, 0, 33),
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_put_bits(base, 0, 64),
 			-EINVAL);
+}
+
+static void cedrus_enc_test_header_exp_golomb(struct kunit *test)
+{
+	void __iomem *base;
+	u32 *registers;
+	int ret;
+
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	base = (void __iomem *)registers;
+	writel(VE_ENC_AVC_STATUS_PUT_BITS_READY,
+	       base + VE_ENC_AVC_STATUS);
+
+	ret = cedrus_a133_h264_put_ue(base, 0);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA), 1U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER), 0x00000101U);
+
+	ret = cedrus_a133_h264_put_ue(base, 65535);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA),
+			0x00010000U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER), 0x00002101U);
+
+	ret = cedrus_a133_h264_put_se(base, 1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA), 2U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER), 0x00000301U);
+
+	ret = cedrus_a133_h264_put_se(base, -1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_PUT_BITS_DATA), 3U);
+	KUNIT_EXPECT_EQ(test, readl(base + VE_ENC_AVC_TRIGGER), 0x00000301U);
+
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_put_ue(base, U32_MAX),
+			-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test, cedrus_a133_h264_put_se(base, S32_MIN),
+			-EOVERFLOW);
 }
 
 static void cedrus_enc_test_reference_rotation(struct kunit *test)
@@ -592,6 +631,7 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_dma_register_image),
 	KUNIT_CASE(cedrus_enc_test_codec_register_image),
 	KUNIT_CASE(cedrus_enc_test_header_put_bits),
+	KUNIT_CASE(cedrus_enc_test_header_exp_golomb),
 	KUNIT_CASE(cedrus_enc_test_reference_rotation),
 	KUNIT_CASE(cedrus_enc_test_standard_controls),
 	KUNIT_CASE(cedrus_enc_test_stock_headers),

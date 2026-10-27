@@ -2,8 +2,10 @@
 /* A133 H.264 encoder DMA and MMIO helpers. */
 
 #include <linux/bitfield.h>
+#include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/io.h>
+#include <linux/limits.h>
 #include <linux/overflow.h>
 
 #include "cedrus_enc_regs.h"
@@ -17,6 +19,8 @@
 #define CEDRUS_A133_ENC_MAX_DIMENSION	4096U
 #define CEDRUS_A133_ENC_MOTION_CONTROL	0x1200U
 #define CEDRUS_A133_ENC_PUT_BITS_POLLS	10000U
+#define CEDRUS_A133_ENC_PUT_BITS_MAX	\
+	FIELD_MAX(VE_ENC_AVC_TRIGGER_BIT_COUNT)
 
 int cedrus_a133_h264_codec_prepare(u32 width, u32 height, unsigned int qp,
 				   bool idr,
@@ -222,12 +226,14 @@ int cedrus_a133_h264_put_bits(void __iomem *base, u32 value,
 {
 	unsigned int polls_left;
 
-	if (!base || !count || count > 32)
+	if (!base || !count || count > CEDRUS_A133_ENC_PUT_BITS_MAX)
 		return -EINVAL;
 
 	/*
 	 * Stock PutBits waits for status bit 9 for at most 10000 reads, then
 	 * writes the payload before issuing start type 1 with a six-bit count.
+	 * Counts above 32 emit leading zeroes before the 32-bit payload; stock
+	 * uses that representation for long Exp-Golomb values.
 	 */
 	for (polls_left = CEDRUS_A133_ENC_PUT_BITS_POLLS;
 	     polls_left; polls_left--) {
@@ -245,6 +251,37 @@ int cedrus_a133_h264_put_bits(void __iomem *base, u32 value,
 	}
 
 	return -ETIMEDOUT;
+}
+
+int cedrus_a133_h264_put_ue(void __iomem *base, u32 value)
+{
+	u32 code_num;
+	unsigned int bits;
+
+	if (value == U32_MAX)
+		return -EOVERFLOW;
+
+	code_num = value + 1;
+	bits = fls(code_num);
+
+	return cedrus_a133_h264_put_bits(base, code_num, 2 * bits - 1);
+}
+
+int cedrus_a133_h264_put_se(void __iomem *base, s32 value)
+{
+	u32 code_num;
+	unsigned int bits;
+
+	if (value == S32_MIN)
+		return -EOVERFLOW;
+
+	if (value > 0)
+		code_num = (u32)value * 2;
+	else
+		code_num = (u32)-value * 2 + 1;
+	bits = fls(code_num);
+
+	return cedrus_a133_h264_put_bits(base, code_num, 2 * bits - 1);
 }
 
 void cedrus_a133_h264_irq_arm(void __iomem *base)

@@ -68,6 +68,8 @@ void cedrus_a133_h264_program_codec(void __iomem *base,
 
 int cedrus_a133_h264_put_bits(void __iomem *base, u32 value,
 			      unsigned int count);
+int cedrus_a133_h264_put_ue(void __iomem *base, u32 value);
+int cedrus_a133_h264_put_se(void __iomem *base, s32 value);
 
 void cedrus_a133_h264_irq_arm(void __iomem *base);
 u32 cedrus_a133_h264_irq_ack(void __iomem *base);
