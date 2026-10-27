@@ -48,6 +48,12 @@ static bool cedrus_enc_test_pair(u32 raw_pixelformat, u32 coded_pixelformat)
 	       coded_pixelformat == V4L2_PIX_FMT_H264;
 }
 
+static int cedrus_enc_test_prepare_pair(struct v4l2_pix_format *raw,
+					const struct v4l2_pix_format *coded)
+{
+	return 0;
+}
+
 static const struct cedrus_enc_format cedrus_enc_test_sparse_formats[] = {
 	{
 		.pixelformat = V4L2_PIX_FMT_NV12,
@@ -201,6 +207,7 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 		.ctx_cleanup = cedrus_enc_test_ctx_cleanup,
 		.s_ctrl = cedrus_enc_test_s_ctrl,
 		.supports_pair = cedrus_enc_test_pair,
+		.prepare_pair = cedrus_enc_test_prepare_pair,
 		.start_streaming = cedrus_enc_test_start,
 		.stop_streaming = cedrus_enc_test_stop,
 		.prepare_job = cedrus_enc_test_prepare,
@@ -219,6 +226,9 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 
 	ops.contract = CEDRUS_ENC_CONTRACT_REQUIRED;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), 0);
+	ops.prepare_pair = NULL;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+	ops.prepare_pair = cedrus_enc_test_prepare_pair;
 	ops.formats = cedrus_enc_test_sparse_formats;
 	ops.num_formats = ARRAY_SIZE(cedrus_enc_test_sparse_formats);
 	ops.supports_pair = cedrus_enc_test_sparse_pair;
@@ -242,6 +252,50 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 	ops.reset_complete = cedrus_enc_test_reset_complete;
 	ops.formats = NULL;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+}
+
+static void cedrus_enc_test_a133_pair_format(struct kunit *test)
+{
+	const struct cedrus_enc_backend_ops *ops =
+		&cedrus_a133_enc_backend_candidate_ops;
+	struct v4l2_pix_format coded = {
+		.width = 320,
+		.height = 240,
+		.pixelformat = V4L2_PIX_FMT_H264,
+	};
+	struct v4l2_pix_format raw = {
+		.width = 320,
+		.height = 240,
+		.pixelformat = V4L2_PIX_FMT_YUV420,
+		.bytesperline = 321,
+	};
+
+	KUNIT_ASSERT_NOT_NULL(test, ops->prepare_pair);
+	KUNIT_ASSERT_EQ(test, ops->prepare_pair(&raw, &coded), 0);
+	KUNIT_EXPECT_EQ(test, raw.bytesperline, 336U);
+	KUNIT_EXPECT_EQ(test, raw.sizeimage, 120960U);
+
+	raw.bytesperline = 4096;
+	KUNIT_ASSERT_EQ(test, ops->prepare_pair(&raw, &coded), 0);
+	KUNIT_EXPECT_EQ(test, raw.bytesperline, 336U);
+
+	raw.pixelformat = V4L2_PIX_FMT_NV12;
+	KUNIT_ASSERT_EQ(test, ops->prepare_pair(&raw, &coded), 0);
+	KUNIT_EXPECT_EQ(test, raw.bytesperline, 320U);
+	KUNIT_EXPECT_EQ(test, raw.sizeimage, 115200U);
+
+	raw.pixelformat = V4L2_PIX_FMT_YUV420;
+	raw.bytesperline = 336;
+	coded.pixelformat = V4L2_PIX_FMT_JPEG;
+	KUNIT_ASSERT_EQ(test, ops->prepare_pair(&raw, &coded), 0);
+	KUNIT_EXPECT_EQ(test, raw.bytesperline, 320U);
+	KUNIT_EXPECT_EQ(test, raw.sizeimage, 115200U);
+
+	raw.width = 640;
+	KUNIT_EXPECT_EQ(test, ops->prepare_pair(&raw, &coded), -EINVAL);
+	raw.width = 320;
+	coded.pixelformat = V4L2_PIX_FMT_MPEG2;
+	KUNIT_EXPECT_EQ(test, ops->prepare_pair(&raw, &coded), -EINVAL);
 }
 
 static void cedrus_enc_test_recovery_dispatch(struct kunit *test)
@@ -1629,7 +1683,7 @@ static void cedrus_enc_test_backend_registry(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, first_jpeg);
 	KUNIT_ASSERT_NOT_NULL(test, second_jpeg);
 	KUNIT_EXPECT_EQ(test, ops->num_formats, 4U);
-	KUNIT_EXPECT_EQ(test, ops->num_controls, 8U);
+	KUNIT_EXPECT_EQ(test, ops->num_controls, 10U);
 	KUNIT_EXPECT_EQ(test, ops->formats[2].min_sizeimage, 12U * SZ_1M);
 	KUNIT_EXPECT_EQ(test, ops->formats[3].min_sizeimage, 4U * SZ_1M);
 	KUNIT_EXPECT_EQ(test, ops->formats[3].max_sizeimage, 4U * SZ_1M);
@@ -1646,8 +1700,8 @@ static void cedrus_enc_test_backend_registry(struct kunit *test)
 						   V4L2_PIX_FMT_H264));
 	KUNIT_EXPECT_TRUE(test, ops->supports_pair(V4L2_PIX_FMT_NV12,
 						   V4L2_PIX_FMT_JPEG));
-	KUNIT_EXPECT_FALSE(test, ops->supports_pair(V4L2_PIX_FMT_YUV420,
-						    V4L2_PIX_FMT_JPEG));
+	KUNIT_EXPECT_TRUE(test, ops->supports_pair(V4L2_PIX_FMT_YUV420,
+						   V4L2_PIX_FMT_JPEG));
 	KUNIT_EXPECT_EQ(test, ops->s_ctrl(first, &ctrl), 0);
 	ctrl.val = V4L2_MPEG_VIDEO_H264_PROFILE_MAIN;
 	KUNIT_EXPECT_EQ(test, ops->s_ctrl(first, &ctrl), -EOPNOTSUPP);
@@ -1759,6 +1813,7 @@ static void cedrus_enc_test_frontend_contract(struct kunit *test)
 static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_frontend_contract),
 	KUNIT_CASE(cedrus_enc_test_backend_gate),
+	KUNIT_CASE(cedrus_enc_test_a133_pair_format),
 	KUNIT_CASE(cedrus_enc_test_recovery_dispatch),
 	KUNIT_CASE(cedrus_enc_test_planar_source),
 	KUNIT_CASE(cedrus_enc_test_nv12_source),

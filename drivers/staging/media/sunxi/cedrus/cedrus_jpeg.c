@@ -244,11 +244,14 @@ int cedrus_jpeg_prepare_source(struct cedrus_jpeg_source *source, u32 pixelforma
 	size_t chroma_size;
 	size_t required;
 
-	if (!source || pixelformat != V4L2_PIX_FMT_NV12)
+	if (!source ||
+	    (pixelformat != V4L2_PIX_FMT_NV12 &&
+	     pixelformat != V4L2_PIX_FMT_YUV420))
 		return -EINVAL;
 
 	/*
-	 * Stock proves the A133 JPEG path with NV12 at 320x240.
+	 * Stock proves the A133 JPEG path with NV12 and planar YUV420 at
+	 * 320x240. Both paths use the same tightly packed plane sizes.
 	 * Keep the initial contract on complete 16x16 MCU boundaries and tightly
 	 * packed lines. In particular, stock silently programmed a 320-pixel line
 	 * for a requested 336-pixel stride, so padded input must fail closed. The
@@ -280,6 +283,7 @@ int cedrus_jpeg_prepare_source(struct cedrus_jpeg_source *source, u32 pixelforma
 	source->chroma = address + luma_size;
 	source->luma_size = luma_size;
 	source->chroma_size = chroma_size;
+	source->pixelformat = pixelformat;
 	source->width = width;
 	source->height = height;
 	source->stride = bytesperline;

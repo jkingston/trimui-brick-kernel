@@ -6,6 +6,7 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/overflow.h>
+#include <linux/videodev2.h>
 
 #include "cedrus_enc_regs.h"
 #include "cedrus_jpeg_enc_hw.h"
@@ -39,6 +40,7 @@ int cedrus_a133_jpeg_isp_prepare(const struct cedrus_jpeg_source *source,
 				 struct cedrus_a133_jpeg_isp *isp)
 {
 	dma_addr_t input_chroma2;
+	u32 control;
 
 	if (!source || !isp || !source->width || !source->height ||
 	    source->stride != source->width)
@@ -46,6 +48,16 @@ int cedrus_a133_jpeg_isp_prepare(const struct cedrus_jpeg_source *source,
 	if (!IS_ALIGNED(source->width, 16) ||
 	    !IS_ALIGNED(source->height, 16))
 		return -EINVAL;
+	switch (source->pixelformat) {
+	case V4L2_PIX_FMT_NV12:
+		control = 0;
+		break;
+	case V4L2_PIX_FMT_YUV420:
+		control = VE_ENC_ISP_CONTROL_PLANAR;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
 	if (source->width / 8 > U16_MAX || source->height / 8 > U16_MAX ||
 	    source->stride / 16 > U16_MAX)
 		return -ERANGE;
@@ -60,7 +72,7 @@ int cedrus_a133_jpeg_isp_prepare(const struct cedrus_jpeg_source *source,
 		.input_size = source->width / 8 << 16 | source->height / 8,
 		.input_stride = source->stride / 16 << 16 |
 				 source->stride / 16,
-		.control = 0,
+		.control = control,
 		.mb_width = source->width / 16,
 		.input_size_reversed = source->height / 8 << 16 |
 				       source->width / 8,

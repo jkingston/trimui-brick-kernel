@@ -99,6 +99,7 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 	if (!ops->formats || !ops->num_formats || !ops->controls ||
 	    !ops->num_controls || !ops->bind || !ops->ctx_init ||
 	    !ops->ctx_cleanup || !ops->s_ctrl || !ops->supports_pair ||
+	    !ops->prepare_pair ||
 	    !ops->start_streaming ||
 	    !ops->stop_streaming || !ops->prepare_job || !ops->trigger ||
 	    !ops->irq_status || !ops->irq_ack || !ops->abort ||

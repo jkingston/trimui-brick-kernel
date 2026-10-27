@@ -28,6 +28,7 @@ struct cedrus_jpeg_source {
 	dma_addr_t chroma;
 	size_t luma_size;
 	size_t chroma_size;
+	u32 pixelformat;
 	u32 width;
 	u32 height;
 	u32 stride;

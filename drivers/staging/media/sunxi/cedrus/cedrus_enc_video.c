@@ -75,6 +75,7 @@ cedrus_enc_find_mate(struct cedrus_ctx *ctx, u32 pixelformat, u32 direction,
 static void cedrus_enc_prepare_format(const struct cedrus_enc_format *format,
 				      struct v4l2_pix_format *pix)
 {
+	u32 bytesperline = pix->bytesperline;
 	u32 height;
 
 	pix->pixelformat = format->pixelformat;
@@ -85,7 +86,8 @@ static void cedrus_enc_prepare_format(const struct cedrus_enc_format *format,
 				   format->max_height), format->height_align);
 
 	if (format->direction == CEDRUS_ENC_FORMAT_RAW) {
-		pix->bytesperline = ALIGN(pix->width, format->stride_align);
+		pix->bytesperline = ALIGN(max(pix->width, bytesperline),
+					  format->stride_align);
 		height = ALIGN(pix->height, format->height_align);
 		pix->sizeimage = pix->bytesperline * height * 3 / 2;
 	} else {
@@ -99,9 +101,22 @@ static void cedrus_enc_prepare_format(const struct cedrus_enc_format *format,
 	}
 }
 
+static int cedrus_enc_prepare_pair(struct cedrus_ctx *ctx,
+				   struct v4l2_pix_format *raw,
+				   const struct v4l2_pix_format *coded)
+{
+	const struct cedrus_enc_backend_ops *ops = ctx->dev->enc_ops;
+
+	if (!ops->supports_pair(raw->pixelformat, coded->pixelformat))
+		return -EINVAL;
+
+	return ops->prepare_pair(raw, coded);
+}
+
 static int cedrus_enc_try_fmt(struct cedrus_ctx *ctx,
 			      struct v4l2_format *f, u32 direction)
 {
+	struct v4l2_pix_format mate;
 	const struct cedrus_enc_format *format;
 
 	format = cedrus_enc_find_format(ctx, f->fmt.pix.pixelformat, direction);
@@ -109,7 +124,17 @@ static int cedrus_enc_try_fmt(struct cedrus_ctx *ctx,
 		return -EINVAL;
 
 	cedrus_enc_prepare_format(format, &f->fmt.pix);
-	return 0;
+	if (direction == CEDRUS_ENC_FORMAT_RAW) {
+		mate = ctx->dst_fmt;
+		mate.width = f->fmt.pix.width;
+		mate.height = f->fmt.pix.height;
+		return cedrus_enc_prepare_pair(ctx, &f->fmt.pix, &mate);
+	}
+
+	mate = ctx->src_fmt;
+	mate.width = f->fmt.pix.width;
+	mate.height = f->fmt.pix.height;
+	return cedrus_enc_prepare_pair(ctx, &mate, &f->fmt.pix);
 }
 
 static int cedrus_enc_querycap(struct file *file, void *priv,
@@ -226,8 +251,12 @@ static int cedrus_enc_s_fmt(struct file *file, void *priv,
 			return -EINVAL;
 		cedrus_enc_prepare_format(mate, &src_fmt);
 	}
+	ret = cedrus_enc_prepare_pair(ctx, &src_fmt, &dst_fmt);
+	if (ret)
+		return ret;
 	ctx->src_fmt = src_fmt;
 	ctx->dst_fmt = dst_fmt;
+	f->fmt.pix = V4L2_TYPE_IS_OUTPUT(f->type) ? src_fmt : dst_fmt;
 
 	return 0;
 }
@@ -470,6 +499,9 @@ static int cedrus_enc_open(struct file *file)
 	ctx->dst_fmt.height = ctx->src_fmt.height;
 	cedrus_enc_prepare_format(cedrus_enc_find_format(ctx, 0,
 				 CEDRUS_ENC_FORMAT_CODED), &ctx->dst_fmt);
+	ret = cedrus_enc_prepare_pair(ctx, &ctx->src_fmt, &ctx->dst_fmt);
+	if (ret)
+		goto err_m2m;
 
 	v4l2_ctrl_handler_init(&ctx->hdl, ops->num_controls);
 	for (i = 0; i < ops->num_controls; i++) {

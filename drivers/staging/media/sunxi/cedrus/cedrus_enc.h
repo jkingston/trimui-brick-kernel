@@ -101,6 +101,8 @@ struct cedrus_enc_backend_ops {
 	void (*ctx_cleanup)(struct cedrus_ctx *ctx);
 	int (*s_ctrl)(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl);
 	bool (*supports_pair)(u32 raw_pixelformat, u32 coded_pixelformat);
+	int (*prepare_pair)(struct v4l2_pix_format *raw,
+			    const struct v4l2_pix_format *coded);
 	int (*buf_prepare)(struct cedrus_ctx *ctx, struct vb2_buffer *vb);
 	int (*buf_finish)(struct cedrus_ctx *ctx, struct vb2_buffer *vb);
 	int (*start_streaming)(struct cedrus_ctx *ctx);

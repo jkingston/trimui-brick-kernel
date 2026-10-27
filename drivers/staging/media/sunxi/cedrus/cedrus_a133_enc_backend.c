@@ -332,8 +332,32 @@ cedrus_a133_enc_backend_supports_pair(u32 raw_pixelformat,
 	return ((raw_pixelformat == V4L2_PIX_FMT_NV12 ||
 		 raw_pixelformat == V4L2_PIX_FMT_YUV420) &&
 		coded_pixelformat == V4L2_PIX_FMT_H264) ||
-		(raw_pixelformat == V4L2_PIX_FMT_NV12 &&
+		((raw_pixelformat == V4L2_PIX_FMT_NV12 ||
+		  raw_pixelformat == V4L2_PIX_FMT_YUV420) &&
 		 coded_pixelformat == V4L2_PIX_FMT_JPEG);
+}
+
+static int
+cedrus_a133_enc_backend_prepare_pair(struct v4l2_pix_format *raw,
+				     const struct v4l2_pix_format *coded)
+{
+	u32 max_bytesperline;
+
+	if (!raw || !coded ||
+	    !cedrus_a133_enc_backend_supports_pair(raw->pixelformat,
+						     coded->pixelformat) ||
+	    raw->width != 320 || raw->height != 240 ||
+	    coded->width != raw->width || coded->height != raw->height)
+		return -EINVAL;
+
+	/* Stock proves a 336-pixel padded source only for planar H.264. */
+	max_bytesperline = raw->pixelformat == V4L2_PIX_FMT_YUV420 &&
+			    coded->pixelformat == V4L2_PIX_FMT_H264 ? 336 : 320;
+	raw->bytesperline = clamp(raw->bytesperline, 320U, max_bytesperline);
+	raw->bytesperline = ALIGN(raw->bytesperline, 16);
+	raw->sizeimage = raw->bytesperline * raw->height * 3 / 2;
+
+	return 0;
 }
 
 static int
@@ -1220,6 +1244,7 @@ const struct cedrus_enc_backend_ops cedrus_a133_enc_backend_candidate_ops = {
 	.ctx_cleanup = cedrus_a133_enc_backend_ctx_cleanup,
 	.s_ctrl = cedrus_a133_enc_backend_s_ctrl,
 	.supports_pair = cedrus_a133_enc_backend_supports_pair,
+	.prepare_pair = cedrus_a133_enc_backend_prepare_pair,
 	.buf_prepare = cedrus_a133_enc_backend_buf_prepare,
 	.buf_finish = cedrus_a133_enc_backend_buf_finish,
 	.start_streaming = cedrus_a133_enc_backend_start_streaming,
