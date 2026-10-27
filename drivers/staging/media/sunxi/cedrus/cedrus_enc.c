@@ -75,7 +75,12 @@ int cedrus_enc_format_validate(const struct cedrus_enc_format *format)
 		if (format->pixelformat != V4L2_PIX_FMT_H264 &&
 		    format->pixelformat != V4L2_PIX_FMT_JPEG)
 			return -EOPNOTSUPP;
-		if (format->stride_align || !format->min_sizeimage)
+		if (format->stride_align || !format->min_sizeimage ||
+		    !IS_ALIGNED(format->min_sizeimage, format->buffer_align) ||
+		    (format->max_sizeimage &&
+		     (format->max_sizeimage < format->min_sizeimage ||
+		      !IS_ALIGNED(format->max_sizeimage,
+				  format->buffer_align))))
 			return -EINVAL;
 	}
 
@@ -116,17 +121,29 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 		if (!raw || !coded)
 			return -EINVAL;
 		for (i = 0; i < ops->num_formats; i++) {
+			bool supported = false;
 			unsigned int j;
 
-			if (ops->formats[i].direction != CEDRUS_ENC_FORMAT_RAW)
-				continue;
 			for (j = 0; j < ops->num_formats; j++) {
-				if (ops->formats[j].direction != CEDRUS_ENC_FORMAT_CODED)
+				u32 raw, coded;
+
+				if (ops->formats[i].direction ==
+				    ops->formats[j].direction)
 					continue;
-				if (!ops->supports_pair(ops->formats[i].pixelformat,
-						ops->formats[j].pixelformat))
-					return -EINVAL;
+				if (ops->formats[i].direction == CEDRUS_ENC_FORMAT_RAW) {
+					raw = ops->formats[i].pixelformat;
+					coded = ops->formats[j].pixelformat;
+				} else {
+					raw = ops->formats[j].pixelformat;
+					coded = ops->formats[i].pixelformat;
+				}
+				if (ops->supports_pair(raw, coded)) {
+					supported = true;
+					break;
+				}
 			}
+			if (!supported)
+				return -EINVAL;
 		}
 		for (i = 0; i < ops->num_controls; i++)
 			if (!cedrus_enc_control_is_standard(ops->controls[i].id) ||

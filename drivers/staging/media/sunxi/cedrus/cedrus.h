@@ -117,6 +117,10 @@ struct cedrus_buffer {
 			dma_addr_t	mv_col_buf_dma;
 			ssize_t		mv_col_buf_size;
 		} h265;
+		struct {
+			size_t		payload;
+			bool			eoi_pending;
+		} jpeg_enc;
 	} codec;
 };
 

@@ -12,9 +12,12 @@
 #include "cedrus_enc.h"
 #include "cedrus_enc_regs.h"
 #include "cedrus_h264_enc.h"
-#include "cedrus_h264_enc_backend.h"
+#include "cedrus_a133_enc_backend.h"
 #include "cedrus_h264_enc_hw.h"
 #include "cedrus_h264_enc_job.h"
+#include "cedrus_hw.h"
+#include "cedrus_jpeg_enc_job.h"
+#include "cedrus_regs.h"
 
 static const struct cedrus_enc_format cedrus_enc_test_formats[] = {
 	{
@@ -43,6 +46,57 @@ static bool cedrus_enc_test_pair(u32 raw_pixelformat, u32 coded_pixelformat)
 {
 	return raw_pixelformat == V4L2_PIX_FMT_NV12 &&
 	       coded_pixelformat == V4L2_PIX_FMT_H264;
+}
+
+static const struct cedrus_enc_format cedrus_enc_test_sparse_formats[] = {
+	{
+		.pixelformat = V4L2_PIX_FMT_NV12,
+		.direction = CEDRUS_ENC_FORMAT_RAW,
+		.min_width = 16, .max_width = 4096,
+		.min_height = 16, .max_height = 4096,
+		.width_align = 16, .height_align = 16,
+		.stride_align = 16, .buffer_align = 1,
+	}, {
+		.pixelformat = V4L2_PIX_FMT_YUV420,
+		.direction = CEDRUS_ENC_FORMAT_RAW,
+		.min_width = 16, .max_width = 4096,
+		.min_height = 16, .max_height = 4096,
+		.width_align = 16, .height_align = 16,
+		.stride_align = 16, .buffer_align = 1,
+	}, {
+		.pixelformat = V4L2_PIX_FMT_H264,
+		.direction = CEDRUS_ENC_FORMAT_CODED,
+		.min_width = 16, .max_width = 4096,
+		.min_height = 16, .max_height = 4096,
+		.width_align = 16, .height_align = 16,
+		.buffer_align = 256, .min_sizeimage = 256,
+	}, {
+		.pixelformat = V4L2_PIX_FMT_JPEG,
+		.direction = CEDRUS_ENC_FORMAT_CODED,
+		.min_width = 16, .max_width = 4096,
+		.min_height = 16, .max_height = 4096,
+		.width_align = 16, .height_align = 16,
+		.buffer_align = 256, .min_sizeimage = 256,
+	},
+};
+
+static bool cedrus_enc_test_sparse_pair(u32 raw, u32 coded)
+{
+	return ((raw == V4L2_PIX_FMT_NV12 || raw == V4L2_PIX_FMT_YUV420) &&
+		coded == V4L2_PIX_FMT_H264) ||
+		(raw == V4L2_PIX_FMT_NV12 && coded == V4L2_PIX_FMT_JPEG);
+}
+
+static bool cedrus_enc_test_orphan_raw_pair(u32 raw, u32 coded)
+{
+	return raw == V4L2_PIX_FMT_NV12 &&
+	       (coded == V4L2_PIX_FMT_H264 || coded == V4L2_PIX_FMT_JPEG);
+}
+
+static bool cedrus_enc_test_orphan_coded_pair(u32 raw, u32 coded)
+{
+	return (raw == V4L2_PIX_FMT_NV12 || raw == V4L2_PIX_FMT_YUV420) &&
+	       coded == V4L2_PIX_FMT_H264;
 }
 
 static int cedrus_enc_test_s_ctrl(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl)
@@ -137,7 +191,7 @@ static int cedrus_enc_test_source(u32 pixelformat, u32 bytesperline,
 static void cedrus_enc_test_backend_gate(struct kunit *test)
 {
 	struct cedrus_enc_backend_ops ops = {
-		.contract = CEDRUS_A133_H264_ENC_CONTRACT,
+		.contract = CEDRUS_A133_ENC_CONTRACT,
 		.formats = cedrus_enc_test_formats,
 		.num_formats = ARRAY_SIZE(cedrus_enc_test_formats),
 		.controls = cedrus_enc_test_controls,
@@ -165,6 +219,17 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 
 	ops.contract = CEDRUS_ENC_CONTRACT_REQUIRED;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), 0);
+	ops.formats = cedrus_enc_test_sparse_formats;
+	ops.num_formats = ARRAY_SIZE(cedrus_enc_test_sparse_formats);
+	ops.supports_pair = cedrus_enc_test_sparse_pair;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), 0);
+	ops.supports_pair = cedrus_enc_test_orphan_raw_pair;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+	ops.supports_pair = cedrus_enc_test_orphan_coded_pair;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+	ops.formats = cedrus_enc_test_formats;
+	ops.num_formats = ARRAY_SIZE(cedrus_enc_test_formats);
+	ops.supports_pair = cedrus_enc_test_pair;
 
 	ops.ctx_init = NULL;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
@@ -1480,10 +1545,11 @@ static void cedrus_enc_test_backend_buffer_rejects_alias(struct kunit *test)
 static void cedrus_enc_test_backend_registry(struct kunit *test)
 {
 	const struct cedrus_enc_backend_ops *ops =
-		&cedrus_a133_h264_backend_candidate_ops;
+		&cedrus_a133_enc_backend_candidate_ops;
 	struct cedrus_dev *dev;
 	struct cedrus_ctx *first, *second, *blocked;
 	struct cedrus_a133_h264_backend_job *first_job, *second_job;
+	struct cedrus_a133_jpeg_job_lifecycle *first_jpeg, *second_jpeg;
 	struct v4l2_ctrl ctrl = {
 		.id = V4L2_CID_MPEG_VIDEO_H264_PROFILE,
 		.val = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH,
@@ -1507,13 +1573,19 @@ static void cedrus_enc_test_backend_registry(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, dev->enc_priv);
 	KUNIT_ASSERT_EQ(test, ops->ctx_init(first), 0);
 	KUNIT_ASSERT_EQ(test, ops->ctx_init(second), 0);
-	first_job = cedrus_a133_h264_backend_test_job(first);
-	second_job = cedrus_a133_h264_backend_test_job(second);
+	first_job = cedrus_a133_enc_backend_test_job(first);
+	second_job = cedrus_a133_enc_backend_test_job(second);
+	first_jpeg = cedrus_a133_enc_backend_test_jpeg_job(first);
+	second_jpeg = cedrus_a133_enc_backend_test_jpeg_job(second);
 	KUNIT_ASSERT_NOT_NULL(test, first_job);
 	KUNIT_ASSERT_NOT_NULL(test, second_job);
-	KUNIT_EXPECT_EQ(test, ops->num_formats, 3U);
-	KUNIT_EXPECT_EQ(test, ops->num_controls, 7U);
+	KUNIT_ASSERT_NOT_NULL(test, first_jpeg);
+	KUNIT_ASSERT_NOT_NULL(test, second_jpeg);
+	KUNIT_EXPECT_EQ(test, ops->num_formats, 4U);
+	KUNIT_EXPECT_EQ(test, ops->num_controls, 8U);
 	KUNIT_EXPECT_EQ(test, ops->formats[2].min_sizeimage, 12U * SZ_1M);
+	KUNIT_EXPECT_EQ(test, ops->formats[3].min_sizeimage, 4U * SZ_1M);
+	KUNIT_EXPECT_EQ(test, ops->formats[3].max_sizeimage, 4U * SZ_1M);
 	for (i = 0; i < ops->num_formats; i++)
 		KUNIT_EXPECT_EQ(test, cedrus_enc_format_validate(&ops->formats[i]), 0);
 	for (i = 0; i < ops->num_controls; i++) {
@@ -1523,7 +1595,11 @@ static void cedrus_enc_test_backend_registry(struct kunit *test)
 	}
 	KUNIT_EXPECT_TRUE(test, ops->supports_pair(V4L2_PIX_FMT_NV12,
 						   V4L2_PIX_FMT_H264));
-	KUNIT_EXPECT_FALSE(test, ops->supports_pair(V4L2_PIX_FMT_NV12,
+	KUNIT_EXPECT_TRUE(test, ops->supports_pair(V4L2_PIX_FMT_YUV420,
+						   V4L2_PIX_FMT_H264));
+	KUNIT_EXPECT_TRUE(test, ops->supports_pair(V4L2_PIX_FMT_NV12,
+						   V4L2_PIX_FMT_JPEG));
+	KUNIT_EXPECT_FALSE(test, ops->supports_pair(V4L2_PIX_FMT_YUV420,
 						    V4L2_PIX_FMT_JPEG));
 	KUNIT_EXPECT_EQ(test, ops->s_ctrl(first, &ctrl), 0);
 	ctrl.val = V4L2_MPEG_VIDEO_H264_PROFILE_MAIN;
@@ -1537,10 +1613,22 @@ static void cedrus_enc_test_backend_registry(struct kunit *test)
 	};
 	first_job->plan.generation = 1;
 	first_job->rotation.pending = true;
+	cedrus_a133_enc_backend_test_set_active(first, V4L2_PIX_FMT_H264);
 	KUNIT_EXPECT_EQ(test, ops->trigger(first), -EINVAL);
+	KUNIT_ASSERT_EQ(test, ops->abort(first, CEDRUS_ENC_ABORT_IRQ_ERROR), 0);
 	KUNIT_EXPECT_EQ(test, first_job->lifecycle.state,
 			CEDRUS_A133_H264_JOB_RESET_REQUIRED);
 	KUNIT_ASSERT_EQ(test, ops->reset_complete(first), 0);
+
+	second_jpeg->state = CEDRUS_A133_JPEG_JOB_PREPARED;
+	second_jpeg->active_generation = 2;
+	cedrus_a133_enc_backend_test_set_active(second, V4L2_PIX_FMT_JPEG);
+	KUNIT_EXPECT_EQ(test, ops->suspend(dev), -EBUSY);
+	KUNIT_ASSERT_EQ(test, ops->abort(second, CEDRUS_ENC_ABORT_WATCHDOG), 0);
+	KUNIT_EXPECT_EQ(test, second_jpeg->state,
+			CEDRUS_A133_JPEG_JOB_RESET_REQUIRED);
+	KUNIT_ASSERT_EQ(test, ops->reset_complete(second), 0);
+	KUNIT_EXPECT_EQ(test, second_jpeg->state, CEDRUS_A133_JPEG_JOB_IDLE);
 
 	second_job->lifecycle.state = CEDRUS_A133_H264_JOB_PREPARED;
 	second_job->lifecycle.active_generation = 1;
@@ -1552,16 +1640,41 @@ static void cedrus_enc_test_backend_registry(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ops->suspend(dev), 0);
 	KUNIT_EXPECT_EQ(test, first_job->lifecycle.state,
 			CEDRUS_A133_H264_JOB_SUSPENDED);
+	KUNIT_EXPECT_EQ(test, first_jpeg->state,
+			CEDRUS_A133_JPEG_JOB_SUSPENDED);
 	KUNIT_EXPECT_EQ(test, ops->ctx_init(blocked), -EBUSY);
 	KUNIT_EXPECT_PTR_EQ(test, blocked->enc_priv, NULL);
 	KUNIT_ASSERT_EQ(test, ops->resume(dev), 0);
 	KUNIT_EXPECT_EQ(test, first_job->lifecycle.state,
 			CEDRUS_A133_H264_JOB_IDLE);
+	KUNIT_EXPECT_EQ(test, first_jpeg->state, CEDRUS_A133_JPEG_JOB_IDLE);
 
 	ops->ctx_cleanup(second);
 	ops->ctx_cleanup(first);
 	ops->unbind(dev);
 	KUNIT_EXPECT_PTR_EQ(test, dev->enc_priv, NULL);
+}
+
+static void cedrus_enc_test_a133_engine_route(struct kunit *test)
+{
+	struct cedrus_dev *dev;
+	struct cedrus_ctx *ctx;
+	u32 *registers;
+
+	dev = kunit_kzalloc(test, sizeof(*dev), GFP_KERNEL);
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	registers = kunit_kzalloc(test, 0xc00, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, dev);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	KUNIT_ASSERT_NOT_NULL(test, registers);
+	dev->base = (void __iomem *)registers;
+	ctx->dev = dev;
+	ctx->src_fmt.width = 320;
+
+	KUNIT_ASSERT_EQ(test, cedrus_encoder_engine_enable(ctx), 0);
+	KUNIT_EXPECT_EQ(test, registers[VE_MODE / sizeof(u32)], 0x001300c7U);
+	cedrus_encoder_engine_disable(dev);
+	KUNIT_EXPECT_EQ(test, registers[VE_MODE / sizeof(u32)], 0x00130007U);
 }
 
 static void cedrus_enc_test_frontend_contract(struct kunit *test)
@@ -1586,6 +1699,9 @@ static void cedrus_enc_test_frontend_contract(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, cedrus_enc_format_validate(&format), -EINVAL);
 	format = cedrus_enc_test_formats[1];
 	format.stride_align = 16;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_format_validate(&format), -EINVAL);
+	format = cedrus_enc_test_formats[1];
+	format.max_sizeimage = format.min_sizeimage - 1;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_format_validate(&format), -EINVAL);
 }
 
@@ -1618,6 +1734,7 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_backend_job_owner),
 	KUNIT_CASE(cedrus_enc_test_backend_buffer_rejects_alias),
 	KUNIT_CASE(cedrus_enc_test_backend_registry),
+	KUNIT_CASE(cedrus_enc_test_a133_engine_route),
 	{}
 };
 

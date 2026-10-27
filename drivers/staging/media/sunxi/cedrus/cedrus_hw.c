@@ -76,6 +76,31 @@ int cedrus_engine_enable(struct cedrus_ctx *ctx)
 	return 0;
 }
 
+int cedrus_encoder_engine_enable(struct cedrus_ctx *ctx)
+{
+	u32 reg = VE_MODE_REC_WR_MODE_2MB | VE_MODE_DDR_MODE_BW_128 |
+		  VE_MODE_DISABLED | VE_MODE_ENCODER;
+
+	if (!ctx || !ctx->dev || !ctx->dev->base)
+		return -EINVAL;
+	if (ctx->src_fmt.width == 4096)
+		reg |= VE_MODE_PIC_WIDTH_IS_4096;
+	if (ctx->src_fmt.width > 2048)
+		reg |= VE_MODE_PIC_WIDTH_MORE_2048;
+
+	/* Stock enables both the ISP and shared AVC/JPEG interrupt routes. */
+	cedrus_write(ctx->dev, VE_MODE, reg);
+	return 0;
+}
+
+void cedrus_encoder_engine_disable(struct cedrus_dev *dev)
+{
+	u32 reg = cedrus_read(dev, VE_MODE);
+
+	/* Match stock's route disable while preserving the top-level mode. */
+	cedrus_write(dev, VE_MODE, reg & ~VE_MODE_ENCODER);
+}
+
 void cedrus_engine_disable(struct cedrus_dev *dev)
 {
 	cedrus_write(dev, VE_MODE, VE_MODE_DISABLED);

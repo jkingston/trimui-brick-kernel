@@ -41,6 +41,10 @@
 #define VE_MODE_REC_WR_MODE_1MB			(0x00 << 20)
 #define VE_MODE_DDR_MODE_BW_128			(0x03 << 16)
 #define VE_MODE_DDR_MODE_BW_256			(0x02 << 16)
+#define VE_MODE_ENCODER_ISP			BIT(6)
+#define VE_MODE_ENCODER_AVC			BIT(7)
+#define VE_MODE_ENCODER				(VE_MODE_ENCODER_ISP | \
+						 VE_MODE_ENCODER_AVC)
 #define VE_MODE_DISABLED			(0x07 << 0)
 #define VE_MODE_DEC_H265			(0x04 << 0)
 #define VE_MODE_DEC_H264			(0x01 << 0)

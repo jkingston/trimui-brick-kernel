@@ -40,6 +40,38 @@ cedrus_enc_find_format(struct cedrus_ctx *ctx, u32 pixelformat, u32 direction)
 	return fallback;
 }
 
+static const struct cedrus_enc_format *
+cedrus_enc_find_mate(struct cedrus_ctx *ctx, u32 pixelformat, u32 direction,
+		     u32 mate_pixelformat)
+{
+	const struct cedrus_enc_backend_ops *ops = ctx->dev->enc_ops;
+	const struct cedrus_enc_format *fallback = NULL;
+	unsigned int i;
+
+	for (i = 0; i < ops->num_formats; i++) {
+		const struct cedrus_enc_format *format = &ops->formats[i];
+		u32 raw, coded;
+
+		if (format->direction != direction)
+			continue;
+		if (direction == CEDRUS_ENC_FORMAT_RAW) {
+			raw = format->pixelformat;
+			coded = mate_pixelformat;
+		} else {
+			raw = mate_pixelformat;
+			coded = format->pixelformat;
+		}
+		if (!ops->supports_pair(raw, coded))
+			continue;
+		if (!fallback)
+			fallback = format;
+		if (format->pixelformat == pixelformat)
+			return format;
+	}
+
+	return fallback;
+}
+
 static void cedrus_enc_prepare_format(const struct cedrus_enc_format *format,
 				      struct v4l2_pix_format *pix)
 {
@@ -59,7 +91,8 @@ static void cedrus_enc_prepare_format(const struct cedrus_enc_format *format,
 	} else {
 		pix->bytesperline = 0;
 		pix->sizeimage = min_t(u32, pix->sizeimage,
-				       U32_MAX - format->buffer_align + 1);
+				       format->max_sizeimage ?:
+				       (U32_MAX - format->buffer_align + 1));
 		pix->sizeimage = ALIGN(max(pix->sizeimage,
 					   format->min_sizeimage),
 				       format->buffer_align);
@@ -147,6 +180,8 @@ static int cedrus_enc_s_fmt(struct file *file, void *priv,
 	struct cedrus_ctx *ctx = cedrus_file2ctx(file);
 	struct vb2_queue *src = v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx);
 	struct vb2_queue *dst = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
+	struct v4l2_pix_format src_fmt = ctx->src_fmt;
+	struct v4l2_pix_format dst_fmt = ctx->dst_fmt;
 	int ret;
 
 	/* Either format describes one hardware job; lock both once allocated. */
@@ -159,28 +194,40 @@ static int cedrus_enc_s_fmt(struct file *file, void *priv,
 		return ret;
 
 	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
-		ctx->src_fmt = f->fmt.pix;
-		ctx->dst_fmt.width = f->fmt.pix.width;
-		ctx->dst_fmt.height = f->fmt.pix.height;
-		ctx->dst_fmt.colorspace = f->fmt.pix.colorspace;
-		ctx->dst_fmt.xfer_func = f->fmt.pix.xfer_func;
-		ctx->dst_fmt.ycbcr_enc = f->fmt.pix.ycbcr_enc;
-		ctx->dst_fmt.quantization = f->fmt.pix.quantization;
-		cedrus_enc_prepare_format(cedrus_enc_find_format(ctx,
-			ctx->dst_fmt.pixelformat, CEDRUS_ENC_FORMAT_CODED),
-			&ctx->dst_fmt);
+		const struct cedrus_enc_format *mate;
+
+		src_fmt = f->fmt.pix;
+		dst_fmt.width = f->fmt.pix.width;
+		dst_fmt.height = f->fmt.pix.height;
+		dst_fmt.colorspace = f->fmt.pix.colorspace;
+		dst_fmt.xfer_func = f->fmt.pix.xfer_func;
+		dst_fmt.ycbcr_enc = f->fmt.pix.ycbcr_enc;
+		dst_fmt.quantization = f->fmt.pix.quantization;
+		mate = cedrus_enc_find_mate(ctx, dst_fmt.pixelformat,
+					    CEDRUS_ENC_FORMAT_CODED,
+					    src_fmt.pixelformat);
+		if (!mate)
+			return -EINVAL;
+		cedrus_enc_prepare_format(mate, &dst_fmt);
 	} else {
-		ctx->dst_fmt = f->fmt.pix;
-		ctx->src_fmt.width = f->fmt.pix.width;
-		ctx->src_fmt.height = f->fmt.pix.height;
-		ctx->src_fmt.colorspace = f->fmt.pix.colorspace;
-		ctx->src_fmt.xfer_func = f->fmt.pix.xfer_func;
-		ctx->src_fmt.ycbcr_enc = f->fmt.pix.ycbcr_enc;
-		ctx->src_fmt.quantization = f->fmt.pix.quantization;
-		cedrus_enc_prepare_format(cedrus_enc_find_format(ctx,
-			ctx->src_fmt.pixelformat, CEDRUS_ENC_FORMAT_RAW),
-			&ctx->src_fmt);
+		const struct cedrus_enc_format *mate;
+
+		dst_fmt = f->fmt.pix;
+		src_fmt.width = f->fmt.pix.width;
+		src_fmt.height = f->fmt.pix.height;
+		src_fmt.colorspace = f->fmt.pix.colorspace;
+		src_fmt.xfer_func = f->fmt.pix.xfer_func;
+		src_fmt.ycbcr_enc = f->fmt.pix.ycbcr_enc;
+		src_fmt.quantization = f->fmt.pix.quantization;
+		mate = cedrus_enc_find_mate(ctx, src_fmt.pixelformat,
+					    CEDRUS_ENC_FORMAT_RAW,
+					    dst_fmt.pixelformat);
+		if (!mate)
+			return -EINVAL;
+		cedrus_enc_prepare_format(mate, &src_fmt);
 	}
+	ctx->src_fmt = src_fmt;
+	ctx->dst_fmt = dst_fmt;
 
 	return 0;
 }
@@ -216,7 +263,23 @@ static int cedrus_enc_buf_prepare(struct vb2_buffer *vb)
 		return -EINVAL;
 	if (V4L2_TYPE_IS_CAPTURE(vb->type))
 		vb2_set_plane_payload(vb, 0, 0);
+	if (ctx->dev->enc_ops->buf_prepare)
+		return ctx->dev->enc_ops->buf_prepare(ctx, vb);
 	return 0;
+}
+
+static void cedrus_enc_buf_finish(struct vb2_buffer *vb)
+{
+	struct cedrus_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
+	int ret;
+
+	if (!ctx->dev->enc_ops->buf_finish)
+		return;
+	ret = ctx->dev->enc_ops->buf_finish(ctx, vb);
+	if (ret && vb->state == VB2_BUF_STATE_DONE) {
+		vb2_set_plane_payload(vb, 0, 0);
+		vb->state = VB2_BUF_STATE_ERROR;
+	}
 }
 
 static int cedrus_enc_buf_out_validate(struct vb2_buffer *vb)
@@ -321,6 +384,7 @@ static void cedrus_enc_stop_streaming(struct vb2_queue *vq)
 static const struct vb2_ops cedrus_enc_qops = {
 	.queue_setup = cedrus_enc_queue_setup,
 	.buf_prepare = cedrus_enc_buf_prepare,
+	.buf_finish = cedrus_enc_buf_finish,
 	.buf_queue = cedrus_enc_buf_queue,
 	.buf_out_validate = cedrus_enc_buf_out_validate,
 	.start_streaming = cedrus_enc_start_streaming,

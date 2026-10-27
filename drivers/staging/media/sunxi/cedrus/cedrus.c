@@ -826,3 +826,4 @@ MODULE_AUTHOR("Florent Revest <florent.revest@free-electrons.com>");
 MODULE_AUTHOR("Paul Kocialkowski <paul.kocialkowski@bootlin.com>");
 MODULE_AUTHOR("Maxime Ripard <maxime.ripard@bootlin.com>");
 MODULE_DESCRIPTION("Cedrus VPU driver");
+MODULE_IMPORT_NS("DMA_BUF");

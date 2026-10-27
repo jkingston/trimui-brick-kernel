@@ -18,6 +18,7 @@
 
 struct cedrus_ctx;
 struct cedrus_dev;
+struct vb2_buffer;
 
 enum cedrus_enc_contract {
 	CEDRUS_ENC_CONTRACT_ENGINE_ARBITRATION = BIT_ULL(0),
@@ -51,8 +52,8 @@ enum cedrus_enc_contract {
 	 CEDRUS_ENC_CONTRACT_QP_FIELD)
 
 /* Contract implemented by this source slice. */
-#define CEDRUS_A133_H264_ENC_CONTRACT \
-	(CEDRUS_ENC_CONTRACT_SOURCE_LAYOUT | \
+#define CEDRUS_A133_ENC_CONTRACT ( \
+	 CEDRUS_ENC_CONTRACT_SOURCE_LAYOUT | \
 	 CEDRUS_ENC_CONTRACT_BITSTREAM_WINDOW | \
 	 CEDRUS_ENC_CONTRACT_IRQ | \
 	 CEDRUS_ENC_CONTRACT_QP_FIELD)
@@ -85,6 +86,7 @@ struct cedrus_enc_format {
 	u32 stride_align;
 	u32 buffer_align;
 	u32 min_sizeimage;
+	u32 max_sizeimage;
 };
 
 struct cedrus_enc_backend_ops {
@@ -98,6 +100,8 @@ struct cedrus_enc_backend_ops {
 	void (*ctx_cleanup)(struct cedrus_ctx *ctx);
 	int (*s_ctrl)(struct cedrus_ctx *ctx, struct v4l2_ctrl *ctrl);
 	bool (*supports_pair)(u32 raw_pixelformat, u32 coded_pixelformat);
+	int (*buf_prepare)(struct cedrus_ctx *ctx, struct vb2_buffer *vb);
+	int (*buf_finish)(struct cedrus_ctx *ctx, struct vb2_buffer *vb);
 	int (*start_streaming)(struct cedrus_ctx *ctx);
 	void (*stop_streaming)(struct cedrus_ctx *ctx);
 	int (*prepare_job)(struct cedrus_ctx *ctx);

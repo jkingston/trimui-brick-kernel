@@ -17,6 +17,8 @@
 #define _CEDRUS_HW_H_
 
 int cedrus_engine_enable(struct cedrus_ctx *ctx);
+int cedrus_encoder_engine_enable(struct cedrus_ctx *ctx);
+void cedrus_encoder_engine_disable(struct cedrus_dev *dev);
 void cedrus_engine_disable(struct cedrus_dev *dev);
 
 void cedrus_dst_format_set(struct cedrus_dev *dev,
