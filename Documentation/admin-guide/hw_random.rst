@@ -36,8 +36,8 @@ data before assuming it is truly random.
 
 A driver can mark a source as having no established entropy estimate.  Its
 bytes remain available through ``/dev/hwrng`` and are mixed into the kernel
-random pool, but no entropy is credited unless an administrator explicitly
-sets a nonzero ``rng_quality`` value.
+random pool, but no entropy is credited.  The core rejects attempts to assign
+such a source a nonzero ``rng_quality`` value.
 
 The rng-tools package uses such tests in "rngd", and lets you
 run them by hand with a "rngtest" utility.

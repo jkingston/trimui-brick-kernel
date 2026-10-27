@@ -32,6 +32,8 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
+#include "core-internal.h"
+
 #define RNG_MODULE_NAME		"hw_random"
 
 #define RNG_BUFFER_SIZE		MAX(32, SMP_CACHE_BYTES)
@@ -467,7 +469,7 @@ static ssize_t rng_quality_store(struct device *dev,
 		return -ERESTARTSYS;
 
 	ret = kstrtou16(buf, 0, &quality);
-	if (ret || quality > 1024) {
+	if (ret) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -477,6 +479,9 @@ static ssize_t rng_quality_store(struct device *dev,
 		ret = -ENODEV;
 		goto out;
 	}
+	ret = hwrng_validate_quality(rng, quality);
+	if (ret)
+		goto out;
 
 	rng->quality = quality;
 	current_quality = quality; /* obsolete */
@@ -560,9 +565,9 @@ static int hwrng_fillfn(void *unused)
 
 		mutex_lock(&reading_mutex);
 		rc = rng_get_data(rng, rng_fillbuf, rng_buffer_size(), true);
-		if (current_quality != rng->quality)
+		if (!rng->no_entropy_credit && current_quality != rng->quality)
 			rng->quality = current_quality; /* obsolete */
-		quality = rng->quality;
+		quality = rng->no_entropy_credit ? 0 : rng->quality;
 		mutex_unlock(&reading_mutex);
 
 		if (rc <= 0)
