@@ -687,6 +687,7 @@ static const struct cedrus_variant sun50i_a133_cedrus_variant = {
 			  CEDRUS_CAPABILITY_VP8_DEC,
 	.mod_rate	= 432000000,
 	.requires_iommu	= true,
+	.shared_domain	= true,
 };
 
 static const struct cedrus_variant sun50i_h6_cedrus_variant = {

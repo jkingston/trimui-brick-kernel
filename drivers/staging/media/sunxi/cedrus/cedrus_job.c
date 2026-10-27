@@ -68,6 +68,7 @@ bool cedrus_job_finish_locked(struct cedrus_ctx *ctx,
 			cedrus_enc_job_finish(ctx);
 		dev->job_ctx = NULL;
 		dev->job_running = false;
+		cedrus_hw_release(dev);
 		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
 						 ctx->fh.m2m_ctx, state);
 		return true;
@@ -76,16 +77,19 @@ bool cedrus_job_finish_locked(struct cedrus_ctx *ctx,
 	return false;
 }
 
-void cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
+bool cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
 		       bool fault_owner)
 {
 	struct cedrus_dev *dev = ctx->dev;
 	unsigned long flags;
+	bool finished = false;
 
 	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
 	if (fault_owner || !cedrus_iommu_fault_pending(dev))
-		cedrus_job_finish_locked(ctx, state, fault_owner);
+		finished = cedrus_job_finish_locked(ctx, state, fault_owner);
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+
+	return finished;
 }
 
 void cedrus_job_abort(void *priv)
@@ -116,7 +120,7 @@ void cedrus_job_abort(void *priv)
 	if (ret)
 		v4l2_warn(&dev->v4l2_dev, "encoder abort returned %d; resetting VE\n",
 			  ret);
-	reset_ret = reset_control_reset(dev->rstc);
+	reset_ret = cedrus_hw_reset(dev);
 	if (!reset_ret && ctx->is_encoder) {
 		ret = cedrus_enc_reset_complete(dev->enc_ops, ctx);
 		if (ret)
@@ -144,11 +148,21 @@ void cedrus_encoder_device_run(struct cedrus_ctx *ctx)
 	if (dev->requires_iommu)
 		mutex_lock(&dev->iommu_fault_mutex);
 
+	ret = cedrus_hw_acquire(dev);
+	if (ret) {
+		if (dev->requires_iommu)
+			mutex_unlock(&dev->iommu_fault_mutex);
+		cedrus_job_finish(ctx, VB2_BUF_STATE_ERROR, true);
+		return;
+	}
+
 	if (!cedrus_job_begin(ctx)) {
 		if (dev->requires_iommu)
 			mutex_unlock(&dev->iommu_fault_mutex);
 		if (atomic_read(&dev->iommu_fault_state) == CEDRUS_IOMMU_FAULT_DEAD)
 			cedrus_job_finish(ctx, VB2_BUF_STATE_ERROR, true);
+		else if (!cedrus_iommu_fault_pending(dev))
+			cedrus_hw_release(dev);
 		return;
 	}
 
@@ -171,7 +185,7 @@ void cedrus_encoder_device_run(struct cedrus_ctx *ctx)
 				v4l2_warn(&dev->v4l2_dev,
 					  "encoder trigger abort returned %d\n",
 					  abort_ret);
-			reset_ret = reset_control_reset(dev->rstc);
+			reset_ret = cedrus_hw_reset(dev);
 			if (reset_ret && dev->requires_iommu)
 				panic("%s: VE trigger reset failed (%d); DMA buffers remain owned",
 				      dev_name(dev->dev), reset_ret);

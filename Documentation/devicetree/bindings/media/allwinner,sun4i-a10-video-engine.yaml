@@ -47,6 +47,10 @@ properties:
   resets:
     maxItems: 1
 
+  allwinner,video-engine-domain:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Shared clock and reset domain on A133
+
   allwinner,sram:
     $ref: /schemas/types.yaml#/definitions/phandle-array
     minItems: 1
@@ -80,9 +84,6 @@ required:
   - compatible
   - reg
   - interrupts
-  - clocks
-  - clock-names
-  - resets
   - allwinner,sram
 
 allOf:
@@ -92,15 +93,23 @@ allOf:
           const: allwinner,sun50i-a133-video-engine
     then:
       properties:
+        clocks: false
+        clock-names: false
+        resets: false
         allwinner,sram:
           minItems: 2
           maxItems: 2
       required:
         - iommus
+        - allwinner,video-engine-domain
     else:
       properties:
         allwinner,sram:
           maxItems: 1
+      required:
+        - clocks
+        - clock-names
+        - resets
 
 additionalProperties: false
 

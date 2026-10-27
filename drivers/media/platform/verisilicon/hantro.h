@@ -68,6 +68,8 @@ struct hantro_irq {
  * @codec_ops:			Codec ops.
  * @init:			Initialize hardware, optional.
  * @runtime_resume:		reenable hardware after power gating, optional.
+ * @job_acquire:		acquire variant-shared resources for one job, optional.
+ * @job_release:		release resources acquired for one job, optional.
  * @irqs:			array of irq names and interrupt handlers
  * @num_irqs:			number of irqs in the array
  * @clk_names:			array of clock names
@@ -93,6 +95,8 @@ struct hantro_variant {
 	const struct hantro_codec_ops *codec_ops;
 	int (*init)(struct hantro_dev *vpu);
 	int (*runtime_resume)(struct hantro_dev *vpu);
+	int (*job_acquire)(struct hantro_dev *vpu);
+	void (*job_release)(struct hantro_dev *vpu);
 	const struct hantro_irq *irqs;
 	int num_irqs;
 	const char * const *clk_names;
@@ -208,6 +212,7 @@ struct hantro_dev {
 	void __iomem *enc_base;
 	void __iomem *dec_base;
 	void __iomem *ctrl_base;
+	void *variant_priv;
 
 	struct mutex vpu_mutex;	/* video_device lock */
 	spinlock_t irqlock;

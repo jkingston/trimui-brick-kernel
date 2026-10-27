@@ -35,6 +35,10 @@ properties:
   resets:
     maxItems: 1
 
+  allwinner,video-engine-domain:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Shared clock and reset domain on A133
+
   iommus:
     maxItems: 1
 
@@ -42,9 +46,6 @@ required:
   - compatible
   - reg
   - interrupts
-  - clocks
-  - clock-names
-  - resets
 
 allOf:
   - if:
@@ -53,17 +54,12 @@ allOf:
           const: allwinner,sun50i-a133-vpu-g2
     then:
       properties:
-        clocks:
-          items:
-            - description: Bus Clock
-            - description: Module Clock
-            - description: Memory Bus Clock
-        clock-names:
-          items:
-            - const: bus
-            - const: mod
-            - const: ram
+        clocks: false
+        clock-names: false
+        resets: false
         iommus: false
+      required:
+        - allwinner,video-engine-domain
     else:
       properties:
         clocks:
@@ -76,6 +72,9 @@ allOf:
             - const: mod
       required:
         - iommus
+        - clocks
+        - clock-names
+        - resets
 
 additionalProperties: false
 

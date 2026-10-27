@@ -19,3 +19,11 @@ config SUNXI_SRAM
 	  Say y here to enable the SRAM controller support. This
 	  device is responsible on mapping the SRAM in the sunXi SoCs
 	  whether to the CPU/DMA, or to the devices.
+
+config SUN50I_A133_VE_DOMAIN
+	bool
+	default ARCH_SUNXI
+	depends on RESET_CONTROLLER
+	help
+	  Own the clock and reset domain shared by the Cedrus and Hantro G2
+	  video decoders on the Allwinner A133.

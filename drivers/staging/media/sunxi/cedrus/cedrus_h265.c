@@ -298,7 +298,7 @@ static int cedrus_h265_skip_header(struct cedrus_dev *dev, unsigned int offset)
 		return 0;
 reset:
 	/* Software bitstream access may already own the submitted DMA buffer. */
-	reset_ret = reset_control_reset(dev->rstc);
+	reset_ret = cedrus_hw_reset(dev);
 	if (reset_ret)
 		panic("%s: VE reset failed (%d); DMA buffers remain owned",
 		      dev_name(dev->dev), reset_ret);

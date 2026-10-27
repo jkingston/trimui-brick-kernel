@@ -25,6 +25,7 @@
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/soc/sunxi/sunxi_sram.h>
+#include <linux/sun50i-a133-ve-domain.h>
 #include <linux/sun50i-a133-iommu.h>
 
 #include <media/videobuf2-core.h>
@@ -167,6 +168,44 @@ bool cedrus_iommu_fault_pending(struct cedrus_dev *dev)
 		sun50i_a133_iommu_fault_pending(dev->dev);
 }
 
+int cedrus_hw_acquire(struct cedrus_dev *dev)
+{
+	int ret;
+
+	if (!dev->ve_domain)
+		return 0;
+
+	ret = sun50i_a133_ve_domain_acquire(dev->ve_domain, dev->dev);
+	if (!ret)
+		atomic_set(&dev->ve_domain_owned, 1);
+
+	return ret;
+}
+
+void cedrus_hw_release(struct cedrus_dev *dev)
+{
+	if (!dev->ve_domain || atomic_cmpxchg(&dev->ve_domain_owned, 1, 0) != 1)
+		return;
+
+	sun50i_a133_ve_domain_release(dev->ve_domain, dev->dev);
+}
+
+int cedrus_hw_reset(struct cedrus_dev *dev)
+{
+	if (dev->ve_domain)
+		return sun50i_a133_ve_domain_reset(dev->ve_domain, dev->dev);
+
+	return reset_control_reset(dev->rstc);
+}
+
+int cedrus_hw_assert_reset(struct cedrus_dev *dev)
+{
+	if (dev->ve_domain)
+		return sun50i_a133_ve_domain_assert(dev->ve_domain, dev->dev);
+
+	return reset_control_assert(dev->rstc);
+}
+
 static irqreturn_t cedrus_irq(int irq, void *data)
 {
 	struct cedrus_dev *dev = data;
@@ -280,7 +319,7 @@ void cedrus_watchdog(struct work_struct *work)
 			v4l2_warn(&dev->v4l2_dev,
 				  "encoder timeout abort returned %d\n", ret);
 	}
-	ret = reset_control_reset(dev->rstc);
+	ret = cedrus_hw_reset(dev);
 	if (ret && dev->requires_iommu)
 		panic("%s: VE reset failed (%d); DMA buffers remain owned",
 		      dev_name(dev->dev), ret);
@@ -321,7 +360,7 @@ void cedrus_encoder_error(struct work_struct *work)
 	if (ret)
 		v4l2_warn(&dev->v4l2_dev,
 			  "encoder error abort returned %d\n", ret);
-	ret = reset_control_reset(dev->rstc);
+	ret = cedrus_hw_reset(dev);
 	if (ret && dev->requires_iommu)
 		panic("%s: VE reset failed (%d); DMA buffers remain owned",
 		      dev_name(dev->dev), ret);
@@ -395,7 +434,19 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 				  backend_ret);
 	}
 
-	ret = reset_control_reset(dev->rstc);
+	if (dev->ve_domain && !atomic_read(&dev->ve_domain_owned)) {
+		ret = cedrus_hw_acquire(dev);
+		if (ret) {
+			v4l2_err(&dev->v4l2_dev,
+				 "VE domain acquisition failed after IOMMU fault: %d\n",
+				 ret);
+			atomic_set(&dev->iommu_fault_state,
+				   CEDRUS_IOMMU_FAULT_DEAD);
+			goto complete;
+		}
+	}
+
+	ret = cedrus_hw_reset(dev);
 	if (ret) {
 		v4l2_err(&dev->v4l2_dev,
 			 "VE reset failed after IOMMU fault: %d\n", ret);
@@ -426,8 +477,11 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 
 	if (recovered)
 		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
-	if (finish_ctx)
-		cedrus_job_finish(finish_ctx, VB2_BUF_STATE_ERROR, true);
+
+complete:
+	if (!finish_ctx ||
+	    !cedrus_job_finish(finish_ctx, VB2_BUF_STATE_ERROR, true))
+		cedrus_hw_release(dev);
 	if (recovered)
 		enable_irq(dev->irq);
 	mutex_unlock(&dev->iommu_fault_mutex);
@@ -454,7 +508,13 @@ static int cedrus_iommu_fault_retire_asserted(struct cedrus_dev *dev)
 	/* A failed reset pulse or invalidation leaves the provider master held.
 	 * Suspend and unbind get one final containment attempt with VE reset held.
 	 */
-	ret = reset_control_assert(dev->rstc);
+	if (dev->ve_domain && !atomic_read(&dev->ve_domain_owned)) {
+		ret = cedrus_hw_acquire(dev);
+		if (ret)
+			return ret;
+	}
+
+	ret = cedrus_hw_assert_reset(dev);
 	if (ret)
 		return ret;
 	ret = sun50i_a133_iommu_fault_complete(dev->dev);
@@ -492,6 +552,9 @@ int cedrus_hw_suspend(struct device *device)
 {
 	struct cedrus_dev *dev = dev_get_drvdata(device);
 
+	if (dev->ve_domain)
+		return 0;
+
 	clk_disable_unprepare(dev->ram_clk);
 	clk_disable_unprepare(dev->mod_clk);
 	clk_disable_unprepare(dev->ahb_clk);
@@ -506,7 +569,10 @@ int cedrus_hw_resume(struct device *device)
 	struct cedrus_dev *dev = dev_get_drvdata(device);
 	int ret;
 
-	ret = reset_control_reset(dev->rstc);
+	if (dev->ve_domain)
+		return 0;
+
+	ret = cedrus_hw_reset(dev);
 	if (ret) {
 		dev_err(dev->dev, "Failed to apply reset\n");
 
@@ -558,6 +624,7 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 
 	dev->capabilities = variant->capabilities;
 	dev->requires_iommu = variant->requires_iommu;
+	atomic_set(&dev->ve_domain_owned, 0);
 #if IS_ENABLED(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE)
 	if (variant->enc_ops) {
 		ret = cedrus_enc_backend_validate(variant->enc_ops);
@@ -605,6 +672,15 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 		goto err_mem;
 	}
 
+	if (variant->shared_domain) {
+		dev->ve_domain = devm_sun50i_a133_ve_domain_get(dev->dev);
+		if (IS_ERR(dev->ve_domain)) {
+			ret = PTR_ERR(dev->ve_domain);
+			goto err_sram;
+		}
+		goto map_registers;
+	}
+
 	dev->ahb_clk = devm_clk_get(dev->dev, "ahb");
 	if (IS_ERR(dev->ahb_clk)) {
 		dev_err(dev->dev, "Failed to get AHB clock\n");
@@ -637,6 +713,7 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 		goto err_sram;
 	}
 
+map_registers:
 	dev->base = devm_platform_ioremap_resource(dev->pdev, 0);
 	if (IS_ERR(dev->base)) {
 		dev_err(dev->dev, "Failed to map registers\n");
@@ -645,11 +722,13 @@ int cedrus_hw_probe(struct cedrus_dev *dev)
 		goto err_sram;
 	}
 
-	ret = clk_set_rate(dev->mod_clk, variant->mod_rate);
-	if (ret) {
-		dev_err(dev->dev, "Failed to set clock rate\n");
+	if (!variant->shared_domain) {
+		ret = clk_set_rate(dev->mod_clk, variant->mod_rate);
+		if (ret) {
+			dev_err(dev->dev, "Failed to set clock rate\n");
 
-		goto err_sram;
+			goto err_sram;
+		}
 	}
 
 	pm_runtime_enable(dev->dev);
@@ -676,6 +755,7 @@ void cedrus_hw_remove(struct cedrus_dev *dev)
 	pm_runtime_disable(dev->dev);
 	if (!pm_runtime_status_suspended(dev->dev))
 		cedrus_hw_suspend(dev->dev);
+	cedrus_hw_release(dev);
 
 	sunxi_sram_release(dev->dev);
 

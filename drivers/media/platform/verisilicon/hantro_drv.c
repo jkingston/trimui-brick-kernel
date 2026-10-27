@@ -90,9 +90,10 @@ static void hantro_job_finish(struct hantro_dev *vpu,
 			      struct hantro_ctx *ctx,
 			      enum vb2_buffer_state result)
 {
-	pm_runtime_put_autosuspend(vpu->dev);
-
 	clk_bulk_disable(vpu->variant->num_clocks, vpu->clocks);
+	if (vpu->variant->job_release)
+		vpu->variant->job_release(vpu);
+	pm_runtime_put_autosuspend(vpu->dev);
 
 	hantro_job_finish_no_pm(vpu, ctx, result);
 }
@@ -180,17 +181,32 @@ static void device_run(void *priv)
 	if (ret < 0)
 		goto err_cancel_job;
 
+	if (ctx->dev->variant->job_acquire) {
+		ret = ctx->dev->variant->job_acquire(ctx->dev);
+		if (ret)
+			goto err_pm;
+	}
+
 	ret = clk_bulk_enable(ctx->dev->variant->num_clocks, ctx->dev->clocks);
 	if (ret)
-		goto err_cancel_job;
+		goto err_release;
 
 	v4l2_m2m_buf_copy_metadata(src, dst);
 
-	if (ctx->codec_ops->run(ctx))
-		goto err_cancel_job;
+	if (ctx->codec_ops->run(ctx)) {
+		cancel_delayed_work_sync(&ctx->dev->watchdog_work);
+		goto err_clocks;
+	}
 
 	return;
 
+err_clocks:
+	clk_bulk_disable(ctx->dev->variant->num_clocks, ctx->dev->clocks);
+err_release:
+	if (ctx->dev->variant->job_release)
+		ctx->dev->variant->job_release(ctx->dev);
+err_pm:
+	pm_runtime_put_autosuspend(ctx->dev->dev);
 err_cancel_job:
 	hantro_job_finish_no_pm(ctx->dev, ctx, VB2_BUF_STATE_ERROR);
 }
@@ -1112,10 +1128,13 @@ static int hantro_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&vpu->watchdog_work, hantro_watchdog);
 
-	vpu->clocks = devm_kcalloc(&pdev->dev, vpu->variant->num_clocks,
-				   sizeof(*vpu->clocks), GFP_KERNEL);
-	if (!vpu->clocks)
-		return -ENOMEM;
+	if (vpu->variant->num_clocks) {
+		vpu->clocks = devm_kcalloc(&pdev->dev,
+					   vpu->variant->num_clocks,
+					   sizeof(*vpu->clocks), GFP_KERNEL);
+		if (!vpu->clocks)
+			return -ENOMEM;
+	}
 
 	if (vpu->variant->num_clocks > 1) {
 		for (i = 0; i < vpu->variant->num_clocks; i++)
@@ -1125,7 +1144,7 @@ static int hantro_probe(struct platform_device *pdev)
 					vpu->clocks);
 		if (ret)
 			return ret;
-	} else {
+	} else if (vpu->variant->num_clocks == 1) {
 		/*
 		 * If the driver has a single clk, chances are there will be no
 		 * actual name in the DT bindings.
@@ -1287,6 +1306,7 @@ static void hantro_remove(struct platform_device *pdev)
 
 	v4l2_info(&vpu->v4l2_dev, "Removing %s\n", pdev->name);
 
+	v4l2_m2m_suspend(vpu->m2m_dev);
 	media_device_unregister(&vpu->mdev);
 	hantro_remove_dec_func(vpu);
 	hantro_remove_enc_func(vpu);
@@ -1311,9 +1331,37 @@ static int hantro_runtime_resume(struct device *dev)
 }
 #endif
 
+#ifdef CONFIG_PM_SLEEP
+static int hantro_suspend(struct device *dev)
+{
+	struct hantro_dev *vpu = dev_get_drvdata(dev);
+	int ret;
+
+	v4l2_m2m_suspend(vpu->m2m_dev);
+	ret = pm_runtime_force_suspend(dev);
+	if (ret)
+		v4l2_m2m_resume(vpu->m2m_dev);
+
+	return ret;
+}
+
+static int hantro_resume(struct device *dev)
+{
+	struct hantro_dev *vpu = dev_get_drvdata(dev);
+	int ret;
+
+	ret = pm_runtime_force_resume(dev);
+	if (ret)
+		return ret;
+
+	v4l2_m2m_resume(vpu->m2m_dev);
+
+	return 0;
+}
+#endif
+
 static const struct dev_pm_ops hantro_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(hantro_suspend, hantro_resume)
 	SET_RUNTIME_PM_OPS(NULL, hantro_runtime_resume, NULL)
 };
 

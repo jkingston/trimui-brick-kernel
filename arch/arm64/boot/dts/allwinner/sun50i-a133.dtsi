@@ -10,6 +10,13 @@
 		allwinner,pipelines = <&mixer0>;
 		status = "disabled";
 	};
+
+	ve_domain: video-engine-domain {
+		compatible = "allwinner,sun50i-a133-video-engine-domain";
+		clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>, <&ccu CLK_MBUS_VE>;
+		clock-names = "ahb", "mod", "ram";
+		resets = <&ccu RST_BUS_VE>;
+	};
 };
 
 &{/soc} {
@@ -31,9 +38,7 @@
 		compatible = "allwinner,sun50i-a133-video-engine";
 		reg = <0x01c0e000 0x1000>;
 		interrupts = <GIC_SPI 94 IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>, <&ccu CLK_MBUS_VE>;
-		clock-names = "ahb", "mod", "ram";
-		resets = <&ccu RST_BUS_VE>;
+		allwinner,video-engine-domain = <&ve_domain>;
 		allwinner,sram = <&multimedia_sram 1>, <&ve_sram 1>;
 		iommus = <&iommu 2>;
 		status = "disabled";
@@ -43,9 +48,7 @@
 		compatible = "allwinner,sun50i-a133-vpu-g2";
 		reg = <0x01c00000 0x1000>;
 		interrupts = <GIC_SPI 90 IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>, <&ccu CLK_MBUS_VE>;
-		clock-names = "bus", "mod", "ram";
-		resets = <&ccu RST_BUS_VE>;
+		allwinner,video-engine-domain = <&ve_domain>;
 		status = "disabled";
 	};
 

@@ -12,7 +12,7 @@ void cedrus_job_mark_running(struct cedrus_ctx *ctx);
 /* Caller holds iommu_completion_lock after resolving IOMMU-fault ownership. */
 bool cedrus_job_finish_locked(struct cedrus_ctx *ctx,
 			      enum vb2_buffer_state state, bool fault_owner);
-void cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
+bool cedrus_job_finish(struct cedrus_ctx *ctx, enum vb2_buffer_state state,
 		       bool fault_owner);
 void cedrus_job_abort(void *priv);
 void cedrus_encoder_device_run(struct cedrus_ctx *ctx);

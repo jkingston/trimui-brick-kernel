@@ -194,8 +194,11 @@ struct cedrus_variant {
 	unsigned int	capabilities;
 	unsigned int	mod_rate;
 	bool		requires_iommu;
+	bool		shared_domain;
 	const struct cedrus_enc_backend_ops *enc_ops;
 };
+
+struct sun50i_a133_ve_domain;
 
 struct cedrus_dev {
 	struct v4l2_device	v4l2_dev;
@@ -224,6 +227,8 @@ struct cedrus_dev {
 	struct clk		*ram_clk;
 
 	struct reset_control	*rstc;
+	struct sun50i_a133_ve_domain *ve_domain;
+	atomic_t		ve_domain_owned;
 
 	unsigned int		capabilities;
 	bool		requires_iommu;

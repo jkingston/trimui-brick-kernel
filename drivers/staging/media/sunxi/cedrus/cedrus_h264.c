@@ -562,7 +562,7 @@ static int cedrus_h264_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 		int reset_ret;
 
 		/* Header parsing may already have started bitstream DMA. */
-		reset_ret = reset_control_reset(dev->rstc);
+		reset_ret = cedrus_hw_reset(dev);
 		if (reset_ret)
 			panic("%s: VE reset failed (%d); DMA buffers remain owned",
 			      dev_name(dev->dev), reset_ret);

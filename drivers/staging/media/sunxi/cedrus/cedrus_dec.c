@@ -39,6 +39,14 @@ void cedrus_device_run(void *priv)
 	if (dev->requires_iommu)
 		mutex_lock(&dev->iommu_fault_mutex);
 
+	error = cedrus_hw_acquire(dev);
+	if (error) {
+		if (dev->requires_iommu)
+			mutex_unlock(&dev->iommu_fault_mutex);
+		cedrus_job_finish(ctx, VB2_BUF_STATE_ERROR, true);
+		return;
+	}
+
 	if (unlikely(!cedrus_job_begin(ctx))) {
 		if (dev->requires_iommu)
 			mutex_unlock(&dev->iommu_fault_mutex);
@@ -48,6 +56,8 @@ void cedrus_device_run(void *priv)
 		if (atomic_read(&dev->iommu_fault_state) ==
 		    CEDRUS_IOMMU_FAULT_DEAD)
 			cedrus_job_finish(ctx, VB2_BUF_STATE_ERROR, true);
+		else if (!cedrus_iommu_fault_pending(dev))
+			cedrus_hw_release(dev);
 		return;
 	}
 

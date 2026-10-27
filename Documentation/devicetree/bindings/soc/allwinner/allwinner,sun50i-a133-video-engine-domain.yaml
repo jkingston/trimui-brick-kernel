@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/allwinner/allwinner,sun50i-a133-video-engine-domain.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Allwinner A133 shared video-engine domain
+
+maintainers:
+  - Chen-Yu Tsai <wens@csie.org>
+  - Jernej Skrabec <jernej.skrabec@gmail.com>
+
+description:
+  The A133 Cedrus and Hantro G2 decoder blocks share one module clock, bus
+  clock, memory-bus clock and reset line. This domain serializes ownership so
+  recovery of one decoder cannot reset an active peer.
+
+properties:
+  compatible:
+    const: allwinner,sun50i-a133-video-engine-domain
+
+  clocks:
+    items:
+      - description: Bus clock
+      - description: Module clock
+      - description: Memory-bus clock
+
+  clock-names:
+    items:
+      - const: ahb
+      - const: mod
+      - const: ram
+
+  resets:
+    maxItems: 1
+
+required:
+  - compatible
+  - clocks
+  - clock-names
+  - resets
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/sun50i-a100-ccu.h>
+    #include <dt-bindings/reset/sun50i-a100-ccu.h>
+
+    video-engine-domain {
+        compatible = "allwinner,sun50i-a133-video-engine-domain";
+        clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>, <&ccu CLK_MBUS_VE>;
+        clock-names = "ahb", "mod", "ram";
+        resets = <&ccu RST_BUS_VE>;
+    };
+...
