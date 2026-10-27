@@ -220,7 +220,7 @@ void cedrus_a133_h264_program_codec(void __iomem *base,
 int cedrus_a133_h264_put_bits(void __iomem *base, u32 value,
 			      unsigned int count)
 {
-	unsigned int poll;
+	unsigned int polls_left;
 
 	if (!base || !count || count > 32)
 		return -EINVAL;
@@ -229,9 +229,13 @@ int cedrus_a133_h264_put_bits(void __iomem *base, u32 value,
 	 * Stock PutBits waits for status bit 9 for at most 10000 reads, then
 	 * writes the payload before issuing start type 1 with a six-bit count.
 	 */
-	for (poll = 0; poll < CEDRUS_A133_ENC_PUT_BITS_POLLS; poll++) {
+	for (polls_left = CEDRUS_A133_ENC_PUT_BITS_POLLS;
+	     polls_left; polls_left--) {
 		if (readl(base + VE_ENC_AVC_STATUS) &
 		    VE_ENC_AVC_STATUS_PUT_BITS_READY) {
+			/* Stock treats readiness on the final read as timeout. */
+			if (polls_left == 1)
+				break;
 			writel(value, base + VE_ENC_AVC_PUT_BITS_DATA);
 			writel(VE_ENC_AVC_TRIGGER_PUT_BITS |
 			       FIELD_PREP(VE_ENC_AVC_TRIGGER_BIT_COUNT, count),
