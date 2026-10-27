@@ -92,7 +92,8 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 	    !ops->start_streaming ||
 	    !ops->stop_streaming || !ops->prepare_job || !ops->trigger ||
 	    !ops->irq_status || !ops->irq_ack || !ops->abort ||
-	    !ops->iommu_fault || !ops->suspend || !ops->resume)
+	    !ops->reset_complete || !ops->suspend || !ops->resume ||
+	    !ops->unbind)
 		return -EINVAL;
 
 	{
@@ -129,6 +130,33 @@ int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops)
 	}
 
 	return 0;
+}
+
+int cedrus_enc_abort(const struct cedrus_enc_backend_ops *ops,
+		     struct cedrus_ctx *ctx,
+		     enum cedrus_enc_abort_reason reason)
+{
+	if (!ops || !ops->abort || !ctx ||
+	    (unsigned int)reason > CEDRUS_ENC_ABORT_IOMMU_FAULT)
+		return -EINVAL;
+
+	return ops->abort(ctx, reason);
+}
+
+int cedrus_enc_reset_complete(const struct cedrus_enc_backend_ops *ops,
+			      struct cedrus_ctx *ctx)
+{
+	if (!ops || !ops->reset_complete || !ctx)
+		return -EINVAL;
+
+	return ops->reset_complete(ctx);
+}
+
+void cedrus_enc_unbind(const struct cedrus_enc_backend_ops *ops,
+		       struct cedrus_dev *dev)
+{
+	if (ops && ops->unbind && dev)
+		ops->unbind(dev);
 }
 
 int cedrus_a133_h264_enc_source_prepare(u32 pixelformat, u32 width,

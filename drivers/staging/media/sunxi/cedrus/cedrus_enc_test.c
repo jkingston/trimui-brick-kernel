@@ -71,13 +71,21 @@ static enum cedrus_enc_irq_status cedrus_enc_test_status(struct cedrus_ctx *ctx)
 	return CEDRUS_ENC_IRQ_NONE;
 }
 
-static int cedrus_enc_test_abort(struct cedrus_ctx *ctx)
+static enum cedrus_enc_abort_reason cedrus_enc_test_abort_reason;
+static unsigned int cedrus_enc_test_reset_count;
+static unsigned int cedrus_enc_test_unbind_count;
+
+static int cedrus_enc_test_abort(struct cedrus_ctx *ctx,
+				 enum cedrus_enc_abort_reason reason)
 {
+	cedrus_enc_test_abort_reason = reason;
 	return 0;
 }
 
-static void cedrus_enc_test_fault(struct cedrus_ctx *ctx)
+static int cedrus_enc_test_reset_complete(struct cedrus_ctx *ctx)
 {
+	cedrus_enc_test_reset_count++;
+	return 0;
 }
 
 static int cedrus_enc_test_suspend(struct cedrus_dev *dev)
@@ -88,6 +96,11 @@ static int cedrus_enc_test_suspend(struct cedrus_dev *dev)
 static int cedrus_enc_test_resume(struct cedrus_dev *dev)
 {
 	return 0;
+}
+
+static void cedrus_enc_test_unbind(struct cedrus_dev *dev)
+{
+	cedrus_enc_test_unbind_count++;
 }
 
 static int cedrus_enc_test_source(u32 pixelformat, u32 bytesperline,
@@ -114,9 +127,10 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 		.irq_status = cedrus_enc_test_status,
 		.irq_ack = cedrus_enc_test_stop,
 		.abort = cedrus_enc_test_abort,
-		.iommu_fault = cedrus_enc_test_fault,
+		.reset_complete = cedrus_enc_test_reset_complete,
 		.suspend = cedrus_enc_test_suspend,
 		.resume = cedrus_enc_test_resume,
+		.unbind = cedrus_enc_test_unbind,
 	};
 
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(NULL), -EINVAL);
@@ -128,8 +142,43 @@ static void cedrus_enc_test_backend_gate(struct kunit *test)
 	ops.abort = NULL;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
 	ops.abort = cedrus_enc_test_abort;
+	ops.reset_complete = NULL;
+	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+	ops.reset_complete = cedrus_enc_test_reset_complete;
 	ops.formats = NULL;
 	KUNIT_EXPECT_EQ(test, cedrus_enc_backend_validate(&ops), -EINVAL);
+}
+
+static void cedrus_enc_test_recovery_dispatch(struct kunit *test)
+{
+	const struct cedrus_enc_backend_ops ops = {
+		.abort = cedrus_enc_test_abort,
+		.reset_complete = cedrus_enc_test_reset_complete,
+		.unbind = cedrus_enc_test_unbind,
+	};
+	u8 ctx_cookie, dev_cookie;
+	struct cedrus_ctx *ctx = (struct cedrus_ctx *)&ctx_cookie;
+	struct cedrus_dev *dev = (struct cedrus_dev *)&dev_cookie;
+	unsigned int reason;
+	int ret;
+
+	cedrus_enc_test_reset_count = 0;
+	cedrus_enc_test_unbind_count = 0;
+
+	for (reason = CEDRUS_ENC_ABORT_STREAMOFF;
+	     reason <= CEDRUS_ENC_ABORT_IOMMU_FAULT; reason++) {
+		ret = cedrus_enc_abort(&ops, ctx, reason);
+		KUNIT_ASSERT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, cedrus_enc_test_abort_reason, reason);
+	}
+	KUNIT_EXPECT_EQ(test,
+			cedrus_enc_abort(&ops, ctx,
+					 CEDRUS_ENC_ABORT_IOMMU_FAULT + 1),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, cedrus_enc_reset_complete(&ops, ctx), 0);
+	KUNIT_EXPECT_EQ(test, cedrus_enc_test_reset_count, 1U);
+	cedrus_enc_unbind(&ops, dev);
+	KUNIT_EXPECT_EQ(test, cedrus_enc_test_unbind_count, 1U);
 }
 
 static void cedrus_enc_test_planar_source(struct kunit *test)
@@ -1262,6 +1311,7 @@ static void cedrus_enc_test_frontend_contract(struct kunit *test)
 static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_frontend_contract),
 	KUNIT_CASE(cedrus_enc_test_backend_gate),
+	KUNIT_CASE(cedrus_enc_test_recovery_dispatch),
 	KUNIT_CASE(cedrus_enc_test_planar_source),
 	KUNIT_CASE(cedrus_enc_test_nv12_source),
 	KUNIT_CASE(cedrus_enc_test_source_rejects_unproven_encoding),

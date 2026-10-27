@@ -63,6 +63,13 @@ enum cedrus_enc_irq_status {
 	CEDRUS_ENC_IRQ_OK,
 };
 
+enum cedrus_enc_abort_reason {
+	CEDRUS_ENC_ABORT_STREAMOFF,
+	CEDRUS_ENC_ABORT_WATCHDOG,
+	CEDRUS_ENC_ABORT_IRQ_ERROR,
+	CEDRUS_ENC_ABORT_IOMMU_FAULT,
+};
+
 #define CEDRUS_ENC_FORMAT_RAW		BIT(0)
 #define CEDRUS_ENC_FORMAT_CODED	BIT(1)
 
@@ -94,11 +101,21 @@ struct cedrus_enc_backend_ops {
 	void (*trigger)(struct cedrus_ctx *ctx);
 	enum cedrus_enc_irq_status (*irq_status)(struct cedrus_ctx *ctx);
 	void (*irq_ack)(struct cedrus_ctx *ctx);
-	int (*abort)(struct cedrus_ctx *ctx);
-	void (*iommu_fault)(struct cedrus_ctx *ctx);
+	int (*abort)(struct cedrus_ctx *ctx,
+		     enum cedrus_enc_abort_reason reason);
+	int (*reset_complete)(struct cedrus_ctx *ctx);
 	int (*suspend)(struct cedrus_dev *dev);
 	int (*resume)(struct cedrus_dev *dev);
+	void (*unbind)(struct cedrus_dev *dev);
 };
+
+/*
+ * irq_status consumes terminal metadata before returning ERROR or OK.  abort
+ * must be idempotent if terminal handling has already retired the active
+ * generation.  reset_complete is called only after the VE reset pulse
+ * succeeds.  unbind runs after jobs and recovery work are drained and must
+ * tolerate a partially initialized backend.
+ */
 
 /* Values to program into the A133 input preprocessor for one raw frame. */
 struct cedrus_a133_enc_source {
@@ -147,6 +164,14 @@ struct cedrus_a133_h264_enc_frame_slot {
 int cedrus_enc_backend_validate(const struct cedrus_enc_backend_ops *ops);
 int cedrus_enc_format_validate(const struct cedrus_enc_format *format);
 bool cedrus_enc_control_is_standard(u32 id);
+
+int cedrus_enc_abort(const struct cedrus_enc_backend_ops *ops,
+		     struct cedrus_ctx *ctx,
+		     enum cedrus_enc_abort_reason reason);
+int cedrus_enc_reset_complete(const struct cedrus_enc_backend_ops *ops,
+			      struct cedrus_ctx *ctx);
+void cedrus_enc_unbind(const struct cedrus_enc_backend_ops *ops,
+		       struct cedrus_dev *dev);
 
 int cedrus_a133_h264_enc_source_prepare(u32 pixelformat, u32 width,
 					u32 height, u32 bytesperline,

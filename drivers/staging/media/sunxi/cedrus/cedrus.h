@@ -234,6 +234,7 @@ struct cedrus_dev {
 	bool			job_running;
 
 	struct delayed_work	watchdog_work;
+	struct work_struct	encoder_error_work;
 	struct work_struct	iommu_fault_work;
 };
 

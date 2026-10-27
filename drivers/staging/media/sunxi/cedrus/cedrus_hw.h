@@ -34,5 +34,6 @@ int cedrus_iommu_fault_flush(struct cedrus_dev *dev);
 bool cedrus_iommu_fault_pending(struct cedrus_dev *dev);
 
 void cedrus_watchdog(struct work_struct *work);
+void cedrus_encoder_error(struct work_struct *work);
 
 #endif

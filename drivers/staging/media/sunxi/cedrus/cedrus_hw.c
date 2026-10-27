@@ -191,6 +191,10 @@ static irqreturn_t cedrus_irq(int irq, void *data)
 
 	if (ctx->is_encoder) {
 		dev->enc_ops->irq_ack(ctx);
+		if (status == CEDRUS_IRQ_ERROR) {
+			schedule_work(&dev->encoder_error_work);
+			return IRQ_HANDLED;
+		}
 	} else {
 		ctx->current_codec->irq_disable(ctx);
 		ctx->current_codec->irq_clear(ctx);
@@ -212,24 +216,81 @@ void cedrus_watchdog(struct work_struct *work)
 
 	dev = container_of(to_delayed_work(work),
 			   struct cedrus_dev, watchdog_work);
+	mutex_lock(&dev->iommu_fault_mutex);
 	if (unlikely(cedrus_iommu_fault_pending(dev)))
-		return;
+		goto out;
 
 	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
 	ctx = dev->job_ctx;
 	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
 	if (!ctx)
-		return;
+		goto out;
 
 	v4l2_err(&dev->v4l2_dev, "frame processing timed out!\n");
-	if (ctx->is_encoder)
-		dev->enc_ops->abort(ctx);
+	if (ctx->is_encoder) {
+		ret = cedrus_enc_abort(dev->enc_ops, ctx,
+				       CEDRUS_ENC_ABORT_WATCHDOG);
+		if (ret)
+			v4l2_warn(&dev->v4l2_dev,
+				  "encoder timeout abort returned %d\n", ret);
+	}
 	ret = reset_control_reset(dev->rstc);
 	if (ret && dev->requires_iommu)
 		panic("%s: VE reset failed (%d); DMA buffers remain owned",
 		      dev_name(dev->dev), ret);
+	if (!ret && ctx->is_encoder) {
+		ret = cedrus_enc_reset_complete(dev->enc_ops, ctx);
+		if (ret)
+			v4l2_warn(&dev->v4l2_dev,
+				  "encoder reset completion returned %d\n", ret);
+	}
 
 	cedrus_job_finish(ctx, VB2_BUF_STATE_ERROR, false);
+out:
+	mutex_unlock(&dev->iommu_fault_mutex);
+}
+
+void cedrus_encoder_error(struct work_struct *work)
+{
+	struct cedrus_dev *dev = container_of(work, struct cedrus_dev,
+					      encoder_error_work);
+	struct cedrus_ctx *ctx;
+	unsigned long flags;
+	int ret;
+
+	mutex_lock(&dev->iommu_fault_mutex);
+	if (unlikely(cedrus_iommu_fault_pending(dev)))
+		goto out;
+
+	disable_irq(dev->irq);
+	if (unlikely(cedrus_iommu_fault_pending(dev)))
+		goto enable;
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	ctx = dev->job_ctx;
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+	if (!ctx || !ctx->is_encoder)
+		goto enable;
+
+	ret = cedrus_enc_abort(dev->enc_ops, ctx, CEDRUS_ENC_ABORT_IRQ_ERROR);
+	if (ret)
+		v4l2_warn(&dev->v4l2_dev,
+			  "encoder error abort returned %d\n", ret);
+	ret = reset_control_reset(dev->rstc);
+	if (ret && dev->requires_iommu)
+		panic("%s: VE reset failed (%d); DMA buffers remain owned",
+		      dev_name(dev->dev), ret);
+	if (!ret) {
+		ret = cedrus_enc_reset_complete(dev->enc_ops, ctx);
+		if (ret)
+			v4l2_warn(&dev->v4l2_dev,
+				  "encoder reset completion returned %d\n", ret);
+	}
+	cedrus_job_finish(ctx, VB2_BUF_STATE_ERROR, false);
+
+enable:
+	enable_irq(dev->irq);
+out:
+	mutex_unlock(&dev->iommu_fault_mutex);
 }
 
 static void cedrus_iommu_fault(struct device *device,
@@ -263,17 +324,33 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 {
 	struct cedrus_dev *dev = container_of(work, struct cedrus_dev,
 					      iommu_fault_work);
-	struct cedrus_ctx *ctx;
+	struct cedrus_ctx *ctx, *finish_ctx;
 	unsigned long flags;
+	int backend_ret = 0;
 	bool recovered = false;
 	int ret;
 
 	/* The provider already holds the VE IOMMU master in reset. Synchronize
 	 * both completion paths, then stop the engine before releasing it.
 	 */
+	cancel_work_sync(&dev->encoder_error_work);
+	cancel_delayed_work_sync(&dev->watchdog_work);
 	mutex_lock(&dev->iommu_fault_mutex);
 	disable_irq(dev->irq);
-	cancel_delayed_work_sync(&dev->watchdog_work);
+
+	/* Snapshot software ownership before resetting the faulting DMA master. */
+	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
+	ctx = dev->job_ctx;
+	finish_ctx = ctx ?: v4l2_m2m_get_curr_priv(dev->m2m_dev);
+	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
+	if (ctx && ctx->is_encoder) {
+		backend_ret = cedrus_enc_abort(dev->enc_ops, ctx,
+					       CEDRUS_ENC_ABORT_IOMMU_FAULT);
+		if (backend_ret)
+			v4l2_warn(&dev->v4l2_dev,
+				  "encoder IOMMU abort returned %d\n",
+				  backend_ret);
+	}
 
 	ret = reset_control_reset(dev->rstc);
 	if (ret) {
@@ -281,34 +358,33 @@ static void cedrus_iommu_fault_work(struct work_struct *work)
 			 "VE reset failed after IOMMU fault: %d\n", ret);
 		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_FAULT_DEAD);
 	} else {
+		if (ctx && ctx->is_encoder) {
+			ret = cedrus_enc_reset_complete(dev->enc_ops, ctx);
+			if (ret) {
+				v4l2_err(&dev->v4l2_dev,
+					 "encoder reset completion failed: %d\n",
+					 ret);
+				backend_ret = ret;
+			}
+		}
 		ret = sun50i_a133_iommu_fault_complete(dev->dev);
 		if (ret) {
 			v4l2_err(&dev->v4l2_dev,
 				 "IOMMU fault retirement failed: %d\n", ret);
 			atomic_set(&dev->iommu_fault_state,
 				   CEDRUS_IOMMU_FAULT_DEAD);
-		} else {
+		} else if (!backend_ret) {
 			recovered = true;
+		} else {
+			atomic_set(&dev->iommu_fault_state,
+				   CEDRUS_IOMMU_FAULT_DEAD);
 		}
 	}
 
-	/* Snapshot the job which overlapped FAULT_PENDING before reopening either
-	 * IRQ delivery or admission. This also covers a fault that arrived while
-	 * the VE was idle and raced a queued device_run().
-	 */
-	spin_lock_irqsave(&dev->iommu_completion_lock, flags);
-	ctx = dev->job_ctx ?: v4l2_m2m_get_curr_priv(dev->m2m_dev);
-	spin_unlock_irqrestore(&dev->iommu_completion_lock, flags);
-
-	/* Serialize with process-context setup/error completion as well as the VE
-	 * IRQ and watchdog. Compare before dereferencing the captured context.
-	 */
-	if (ctx && ctx->is_encoder)
-		dev->enc_ops->iommu_fault(ctx);
 	if (recovered)
 		atomic_set(&dev->iommu_fault_state, CEDRUS_IOMMU_READY);
-	if (ctx)
-		cedrus_job_finish(ctx, VB2_BUF_STATE_ERROR, true);
+	if (finish_ctx)
+		cedrus_job_finish(finish_ctx, VB2_BUF_STATE_ERROR, true);
 	if (recovered)
 		enable_irq(dev->irq);
 	mutex_unlock(&dev->iommu_fault_mutex);

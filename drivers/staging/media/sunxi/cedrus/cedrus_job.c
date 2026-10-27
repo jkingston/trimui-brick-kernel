@@ -85,16 +85,18 @@ void cedrus_job_abort(void *priv)
 	int ret = 0;
 
 	/* STREAMOFF waits for job_finish(), so cancellation must be synchronous. */
+	cancel_work_sync(&dev->encoder_error_work);
+	cancel_delayed_work_sync(&dev->watchdog_work);
 	mutex_lock(&dev->iommu_fault_mutex);
 	disable_irq(dev->irq);
-	cancel_delayed_work_sync(&dev->watchdog_work);
 
 	active = cedrus_job_active(ctx);
 	if (!active)
 		goto out;
 
 	if (ctx->is_encoder) {
-		ret = dev->enc_ops->abort(ctx);
+		ret = cedrus_enc_abort(dev->enc_ops, ctx,
+				       CEDRUS_ENC_ABORT_STREAMOFF);
 	} else {
 		ctx->current_codec->irq_disable(ctx);
 		ctx->current_codec->irq_clear(ctx);
@@ -103,6 +105,12 @@ void cedrus_job_abort(void *priv)
 		v4l2_warn(&dev->v4l2_dev, "encoder abort returned %d; resetting VE\n",
 			  ret);
 	reset_ret = reset_control_reset(dev->rstc);
+	if (!reset_ret && ctx->is_encoder) {
+		ret = cedrus_enc_reset_complete(dev->enc_ops, ctx);
+		if (ret)
+			v4l2_warn(&dev->v4l2_dev,
+				  "encoder reset completion returned %d\n", ret);
+	}
 
 	if (reset_ret && dev->requires_iommu)
 		panic("%s: VE abort reset failed (%d); DMA buffers remain owned",

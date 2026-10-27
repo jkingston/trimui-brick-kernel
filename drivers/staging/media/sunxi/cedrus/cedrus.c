@@ -482,6 +482,7 @@ static int cedrus_probe(struct platform_device *pdev)
 	mutex_init(&dev->dev_mutex);
 
 	INIT_DELAYED_WORK(&dev->watchdog_work, cedrus_watchdog);
+	INIT_WORK(&dev->encoder_error_work, cedrus_encoder_error);
 
 	ret = v4l2_device_register(&pdev->dev, &dev->v4l2_dev);
 	if (ret) {
@@ -558,6 +559,7 @@ err_video:
 err_media:
 	media_device_cleanup(&dev->mdev);
 	cedrus_iommu_fault_exit(dev);
+	cedrus_enc_unbind(dev->enc_ops, dev);
 err_m2m:
 	v4l2_m2m_release(dev->m2m_dev);
 err_v4l2:
@@ -574,6 +576,7 @@ static void cedrus_remove(struct platform_device *pdev)
 
 	v4l2_m2m_suspend(dev->m2m_dev);
 	cancel_delayed_work_sync(&dev->watchdog_work);
+	cancel_work_sync(&dev->encoder_error_work);
 	cedrus_enc_video_unregister(dev);
 	if (media_devnode_is_registered(dev->mdev.devnode)) {
 		media_device_unregister(&dev->mdev);
@@ -582,6 +585,7 @@ static void cedrus_remove(struct platform_device *pdev)
 	}
 
 	cedrus_iommu_fault_exit(dev);
+	cedrus_enc_unbind(dev->enc_ops, dev);
 	v4l2_m2m_release(dev->m2m_dev);
 	video_unregister_device(&dev->vfd);
 	v4l2_device_unregister(&dev->v4l2_dev);
