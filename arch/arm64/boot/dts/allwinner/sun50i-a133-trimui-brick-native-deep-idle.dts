@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+#include "sun50i-a133-trimui-brick-native-deep.dts"
+#include "sun50i-a133-stock-psci-idle.dtsi"
+
+/ {
+	model = "TrimUI Brick (native deep and CPU idle qualification)";
+
+	chosen {
+		trimui,cpu-idle-qualification;
+	};
+};
