@@ -15,6 +15,7 @@
 
 #define AXP2202_STATUS		0x00
 #define AXP2202_CHARGE_STATUS	0x01
+#define AXP2202_COMM_FAULT	0x08
 #define AXP2202_CLOCK_ENABLE	0x0b
 #define AXP2202_MODULE_EN	0x19
 #define AXP2202_IRQ_ENABLE	0x40
@@ -29,6 +30,9 @@
 #define AXP2202_GAUGE_SOC		0xa4
 #define AXP2202_VBAT_H		0xc4
 #define AXP2202_VBAT_L		0xc5
+#define AXP2202_ADC_DATA_SEL	0xcd
+#define AXP2202_ADC_DATA_H	0xce
+#define AXP2202_ADC_DATA_L	0xcf
 
 static bool brick_readable(struct device *dev, unsigned int reg)
 {
@@ -44,6 +48,7 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 	case 0x62: /* Constant charge current */
 	case AXP2202_STATUS:
 	case AXP2202_CHARGE_STATUS:
+	case AXP2202_COMM_FAULT:
 	case AXP2202_MODULE_EN:
 	case 0x90:
 	case 0x95:
@@ -57,6 +62,9 @@ static bool brick_readable(struct device *dev, unsigned int reg)
 	case AXP2202_GAUGE_SOC:
 	case AXP2202_VBAT_H:
 	case AXP2202_VBAT_L:
+	case AXP2202_ADC_DATA_SEL:
+	case AXP2202_ADC_DATA_H:
+	case AXP2202_ADC_DATA_L:
 		return true;
 	default:
 		return false;
@@ -67,6 +75,7 @@ static bool brick_writeable(struct device *dev, unsigned int reg)
 {
 	return reg == AXP2202_SOFT_PWROFF ||
 	       reg == AXP2202_CLOCK_ENABLE ||
+	       reg == AXP2202_ADC_DATA_SEL ||
 	       reg == 0x17 || reg == 0x62 || reg == 0x13 || reg == AXP2202_MODULE_EN ||
 	       reg == AXP2202_LDO_EN1 ||
 	       (reg >= AXP2202_IRQ_ENABLE && reg < AXP2202_IRQ_ENABLE + 5) ||
@@ -76,7 +85,7 @@ static bool brick_writeable(struct device *dev, unsigned int reg)
 static const struct regmap_config brick_regmap = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = AXP2202_VBAT_L,
+	.max_register = AXP2202_ADC_DATA_L,
 	.readable_reg = brick_readable,
 	.writeable_reg = brick_writeable,
 	.cache_type = REGCACHE_NONE,

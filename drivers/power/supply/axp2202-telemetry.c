@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Battery telemetry and board-bounded charger current policy. */
+#include <linux/delay.h>
 #include <linux/devm-helpers.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+
+#include "axp2202-telemetry.h"
 
 #define AXP2202_CLOCK_ENABLE	0x0b
 #define AXP2202_INPUT_CURRENT	0x17
@@ -31,6 +35,7 @@
 struct axp2202_charger {
 	struct regmap *map;
 	struct mutex lock;
+	u32 temperature_table[AXP2202_TEMP_POINTS];
 	bool suspended;
 	bool manual_current;
 	int manual_current_ua;
@@ -38,10 +43,15 @@ struct axp2202_charger {
 
 #define AXP2202_STATUS		0x00
 #define AXP2202_CHARGE_STATUS	0x01
+#define AXP2202_COMM_FAULT	0x08
 #define AXP2202_MODULE_EN	0x19
 #define AXP2202_GAUGE_CONFIG	0xa2
 #define AXP2202_GAUGE_SOC		0xa4
 #define AXP2202_VBAT		0xc4
+#define AXP2202_ADC_DATA_SEL	0xcd
+#define AXP2202_ADC_DATA		0xce
+#define AXP2202_TEMP_TABLE_PROPERTY \
+	"x-powers,battery-temperature-thresholds-millivolt"
 
 static int axp2202_get_current(struct regmap *map, unsigned int reg,
 			       int *current_ua)
@@ -248,6 +258,46 @@ static int axp2202_battery_status(struct regmap *map, int *status)
 	return 0;
 }
 
+static int axp2202_temperature(struct axp2202_charger *charger,
+			       int *temperature)
+{
+	const u32 *table = charger->temperature_table;
+	u8 data[2];
+	int millivolts, ret;
+
+	ret = regmap_update_bits(charger->map, AXP2202_ADC_DATA_SEL,
+				 GENMASK(1, 0), 0);
+	if (ret)
+		return ret;
+
+	/* The shipped driver gives the ADC selector one millisecond to settle. */
+	usleep_range(1000, 1500);
+	ret = regmap_bulk_read(charger->map, AXP2202_ADC_DATA,
+			       data, sizeof(data));
+	if (ret)
+		return ret;
+
+	millivolts = axp2202_adc_raw(data[0], data[1]) * 500 / 1000;
+	*temperature = axp2202_temperature_from_mv(table, millivolts);
+	return 0;
+}
+
+static int axp2202_health(struct regmap *map, int *health)
+{
+	unsigned int fault, status;
+	int ret;
+
+	ret = regmap_read(map, AXP2202_STATUS, &status);
+	if (ret)
+		return ret;
+	ret = regmap_read(map, AXP2202_COMM_FAULT, &fault);
+	if (ret)
+		return ret;
+
+	*health = axp2202_health_from_registers(status, fault);
+	return 0;
+}
+
 static int axp2202_battery_read(struct power_supply *psy,
 			       enum power_supply_property property,
 			       union power_supply_propval *val)
@@ -258,6 +308,16 @@ static int axp2202_battery_read(struct power_supply *psy,
 	int voltage, ret;
 
 	switch (property) {
+	case POWER_SUPPLY_PROP_PRESENT:
+		ret = regmap_read(map, AXP2202_STATUS, &value);
+		if (ret)
+			return ret;
+		val->intval = !!(value & BIT(3));
+		return 0;
+	case POWER_SUPPLY_PROP_HEALTH:
+		return axp2202_health(map, &val->intval);
+	case POWER_SUPPLY_PROP_TEMP:
+		return axp2202_temperature(charger, &val->intval);
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		return axp2202_get_current(map, AXP2202_CHARGE_CURRENT, &val->intval);
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
@@ -342,6 +402,9 @@ static int axp2202_usb_get(struct power_supply *psy,
 }
 
 static const enum power_supply_property battery_properties[] = {
+	POWER_SUPPLY_PROP_PRESENT,
+	POWER_SUPPLY_PROP_HEALTH,
+	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
 	POWER_SUPPLY_PROP_STATUS,
@@ -388,6 +451,8 @@ struct axp2202_monitor {
 	struct delayed_work work;
 	struct axp2202_sample status;
 	struct axp2202_sample capacity;
+	struct axp2202_sample present;
+	struct axp2202_sample health;
 	struct axp2202_sample online;
 };
 
@@ -419,7 +484,14 @@ static void axp2202_poll(struct work_struct *work)
 	battery_changed = axp2202_sample_changed(monitor->battery,
 						 POWER_SUPPLY_PROP_STATUS, &monitor->status);
 	battery_changed |= axp2202_sample_changed(monitor->battery,
-						  POWER_SUPPLY_PROP_CAPACITY, &monitor->capacity);
+						  POWER_SUPPLY_PROP_CAPACITY,
+						  &monitor->capacity);
+	battery_changed |= axp2202_sample_changed(monitor->battery,
+						  POWER_SUPPLY_PROP_PRESENT,
+						  &monitor->present);
+	battery_changed |= axp2202_sample_changed(monitor->battery,
+						  POWER_SUPPLY_PROP_HEALTH,
+						  &monitor->health);
 	usb_changed = axp2202_sample_changed(monitor->usb,
 					     POWER_SUPPLY_PROP_ONLINE, &monitor->online);
 	if (battery_changed || usb_changed)
@@ -472,7 +544,7 @@ static int axp2202_telemetry_probe(struct platform_device *pdev)
 	struct regmap *map = dev_get_regmap(pdev->dev.parent, NULL);
 	struct axp2202_charger *charger;
 	struct axp2202_monitor *monitor;
-	int ret;
+	int count, ret;
 
 	if (!map)
 		return -ENODEV;
@@ -481,6 +553,26 @@ static int axp2202_telemetry_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	charger->map = map;
 	mutex_init(&charger->lock);
+	count = device_property_count_u32(pdev->dev.parent,
+					  AXP2202_TEMP_TABLE_PROPERTY);
+	if (count < 0)
+		return dev_err_probe(&pdev->dev, count,
+				     "Failed to count battery temperature table\n");
+	if (count != AXP2202_TEMP_POINTS)
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "Battery temperature table has %d entries\n",
+				     count);
+	ret = device_property_read_u32_array(pdev->dev.parent,
+					     AXP2202_TEMP_TABLE_PROPERTY,
+					     charger->temperature_table,
+					     AXP2202_TEMP_POINTS);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Failed to read battery temperature table\n");
+	if (!axp2202_temperature_table_valid(charger->temperature_table,
+					     AXP2202_TEMP_POINTS))
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "Invalid battery temperature table\n");
 	/* Set runtime policy before publishing either writable power supply. */
 	ret = axp2202_write_current(charger, AXP2202_CHARGE_CURRENT,
 				    BRICK_CHARGE_RUNTIME_UA / AXP2202_CHARGE_STEP_UA);

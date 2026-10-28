@@ -136,3 +136,4 @@ obj-$(CONFIG_FUEL_GAUGE_MM8013)	+= mm8013.o
 obj-$(CONFIG_MACSMC_POWER)	+= macsmc-power.o
 obj-$(CONFIG_CHARGER_MAX77759)	+= max77759_charger.o
 obj-$(CONFIG_BATTERY_AXP2202_TELEMETRY) += axp2202-telemetry.o
+obj-$(CONFIG_AXP2202_TELEMETRY_KUNIT_TEST) += axp2202-telemetry-test.o
