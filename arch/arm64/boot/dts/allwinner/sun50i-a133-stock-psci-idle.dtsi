@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
- * This profile requires the vendor PSCI CPU_SUSPEND implementation in the
- * retained monitor/SCP firmware.  It is not compatible with TF-A's native
- * sun50i-a133 power-management backend, which does not implement CPU_SUSPEND.
+ * This profile requires an A133 PSCI implementation of the exact stock CPU
+ * and cluster powerdown states. Keep it out of the ordinary product DT until
+ * the matching firmware path has been qualified on the device.
  */
 
 / {
