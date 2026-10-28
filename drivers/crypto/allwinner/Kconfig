@@ -129,7 +129,8 @@ config CRYPTO_DEV_SUN50I_A133_CE
 	  concurrent flows and isolated DMA buffers. Larger requests and
 	  streaming hash updates use a software fallback.
 	  Failed reset containment retains DMA resources until cold power-off.
-	  System suspend is not supported while this driver is bound.
+	  System suspend drains queued work and rebuilds the engine state on
+	  resume. Failed quiescence or restoration prevents further requests.
 
 	  The module is called sun50i-a133-ce.
 

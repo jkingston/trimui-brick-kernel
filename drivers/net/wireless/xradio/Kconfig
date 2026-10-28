@@ -15,8 +15,10 @@ config XRADIO
 	  xr829/boot_xr829.bin, xr829/fw_xr829.bin and xr829/sdd_xr829.bin
 	  in the firmware search path.
 
-	  System suspend, AP mode, WPA3 and background scanning are not
-	  supported. HT20 is experimental and requires the allow_ht option.
+	  System suspend disconnects and powers down the radio, then reloads
+	  firmware on resume. Retained association or wake, AP mode, WPA3 and
+	  background scanning are not supported. HT20 is experimental and
+	  requires the allow_ht option.
 
 	  To build a module, choose M. The module is called xradio_wlan.
 
