@@ -13,9 +13,11 @@
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/initrd.h>
+#include <linux/io.h>
 #include <linux/console.h>
 #include <linux/cache.h>
 #include <linux/screen_info.h>
+#include <linux/sizes.h>
 #include <linux/init.h>
 #include <linux/kexec.h>
 #include <linux/root_dev.h>
@@ -60,6 +62,19 @@ static struct resource *standard_resources;
 
 phys_addr_t __fdt_pointer __initdata;
 u64 mmu_enabled_at_boot __initdata;
+
+#if IS_ENABLED(CONFIG_ARCH_SUNXI)
+static void __init trimui_brick_boot_checkpoint(u32 value)
+{
+	void __iomem *rtc = early_ioremap(0x07000000, SZ_4K);
+
+	if (!rtc)
+		return;
+	writel(value, rtc + 0x118);
+	readl(rtc + 0x118);
+	early_iounmap(rtc, SZ_4K);
+}
+#endif
 
 /*
  * Standard memory resources
@@ -288,6 +303,9 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	early_fixmap_init();
 	early_ioremap_init();
+#if IS_ENABLED(CONFIG_ARCH_SUNXI)
+	trimui_brick_boot_checkpoint(0xb0c60002);
+#endif
 
 	setup_machine_fdt(__fdt_pointer);
 
