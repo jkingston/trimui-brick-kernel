@@ -1042,7 +1042,7 @@ static void sun4i_codec_shutdown(struct snd_pcm_substream *substream,
 /* Keep the requested stereo gains separate from the stream's mute state. */
 static int a133_codec_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
 {
-	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(dai->component);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(dai->component->card);
 	int ret;
 
 	if (direction != SNDRV_PCM_STREAM_PLAYBACK)
@@ -2669,7 +2669,7 @@ static int a133_dac_dsp_init(struct snd_soc_component *c)
 /* Low initial digital level; userspace deliberately raises volume for test. */
 static int a133_component_probe(struct snd_soc_component *c)
 {
-	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(c);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(c->card);
 	static const struct { unsigned int reg, mask, value; } init[] = {
 		/* Match DAPM's initial off state, including inherited analog state. */
 		/* Leave capture and both microphone paths off until DAPM/trigger. */
@@ -2728,7 +2728,7 @@ static int a133_dac_volume_get(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
-	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(c);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(c->card);
 
 	mutex_lock(&scodec->a133_volume_lock);
 	ucontrol->value.integer.value[0] = scodec->a133_dac_volume >> 8;
@@ -2741,7 +2741,7 @@ static int a133_dac_volume_put(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
-	struct sun4i_codec *scodec = snd_soc_component_get_drvdata(c);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(c->card);
 	long left = ucontrol->value.integer.value[0];
 	long right = ucontrol->value.integer.value[1];
 	unsigned int volume;
