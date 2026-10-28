@@ -420,6 +420,9 @@
 		interrupt-parent = <&r_intc>;
 		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
 		reg = <0x34>;
+		x-powers,battery-temperature-thresholds-millivolt =
+			<4591 2781 2190 1738 1390 1118 906 606
+			 415 290 244 206 175 150 110 83>;
 
 		regulators {
 			aldo3: aldo3 {
