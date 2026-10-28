@@ -37,6 +37,18 @@ properties:
     maxItems: 1
   reg:
     maxItems: 1
+  x-powers,battery-temperature-thresholds-millivolt:
+    description: |
+      TS-pin voltages for the board battery thermistor, ordered from cold to
+      hot. The 16 entries correspond to -25, -15, -10, -5, 0, 5, 10, 20, 30,
+      40, 45, 50, 55, 60, 70 and 80 degrees Celsius respectively. Values must
+      be strictly decreasing.
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 16
+    maxItems: 16
+    items:
+      minimum: 1
+      maximum: 8191
   regulators:
     type: object
     additionalProperties: false
@@ -102,6 +114,7 @@ required:
   - compatible
   - reg
   - interrupts
+  - x-powers,battery-temperature-thresholds-millivolt
   - regulators
 
 additionalProperties: false
