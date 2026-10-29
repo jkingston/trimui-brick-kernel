@@ -84,15 +84,6 @@
 	 */
 SYM_CODE_START(primary_entry)
 	bl	record_mmu_state
-	/* Retained RTC GP6: the Brick reached the first kernel instruction. */
-	cbnz	x19, 0f
-	movz	x9, #0x0118
-	movk	x9, #0x0700, lsl #16
-	movz	w10, #0x0001
-	movk	w10, #0xb0c6, lsl #16
-	str	w10, [x9]
-	dsb	sy
-0:
 	bl	preserve_boot_args
 
 	adrp	x1, early_init_stack

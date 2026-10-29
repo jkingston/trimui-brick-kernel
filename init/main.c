@@ -25,8 +25,6 @@
 #include <linux/ctype.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
-#include <linux/io.h>
-#include <linux/sizes.h>
 #include <linux/init.h>
 #include <linux/initrd.h>
 #include <linux/memblock.h>
@@ -1553,19 +1551,6 @@ void __weak free_initmem(void)
 	free_initmem_default(POISON_FREE_INITMEM);
 }
 
-#if IS_ENABLED(CONFIG_ARCH_SUNXI)
-static void trimui_brick_boot_checkpoint(u32 value)
-{
-	void __iomem *rtc = ioremap(0x07000000, SZ_4K);
-
-	if (!rtc)
-		return;
-	writel(value, rtc + 0x118);
-	readl(rtc + 0x118);
-	iounmap(rtc);
-}
-#endif
-
 static int __ref kernel_init(void *unused)
 {
 	int ret;
@@ -1580,9 +1565,6 @@ static int __ref kernel_init(void *unused)
 	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
-#if IS_ENABLED(CONFIG_ARCH_SUNXI)
-	trimui_brick_boot_checkpoint(0xb0c60003);
-#endif
 
 	system_state = SYSTEM_FREEING_INITMEM;
 	kprobe_free_init_mem();
