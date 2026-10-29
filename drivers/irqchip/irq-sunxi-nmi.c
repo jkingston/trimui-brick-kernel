@@ -146,6 +146,14 @@ static int sunxi_sc_nmi_set_type(struct irq_data *data, unsigned int flow_type)
 	return IRQ_SET_MASK_OK;
 }
 
+static int sunxi_sc_nmi_set_wake(struct irq_data *data, unsigned int on)
+{
+	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(data);
+	unsigned int parent_irq = (uintptr_t)gc->private;
+
+	return irq_set_irq_wake(parent_irq, on);
+}
+
 static int __init sunxi_sc_nmi_irq_init(struct device_node *node,
 					const struct sunxi_sc_nmi_data *data)
 {
@@ -188,9 +196,9 @@ static int __init sunxi_sc_nmi_irq_init(struct device_node *node,
 	gc->chip_types[0].chip.irq_unmask	= irq_gc_mask_set_bit;
 	gc->chip_types[0].chip.irq_eoi		= irq_gc_ack_set_bit;
 	gc->chip_types[0].chip.irq_set_type	= sunxi_sc_nmi_set_type;
+	gc->chip_types[0].chip.irq_set_wake	= sunxi_sc_nmi_set_wake;
 	gc->chip_types[0].chip.flags		= IRQCHIP_EOI_THREADED |
-						  IRQCHIP_EOI_IF_HANDLED |
-						  IRQCHIP_SKIP_SET_WAKE;
+						  IRQCHIP_EOI_IF_HANDLED;
 	gc->chip_types[0].regs.ack		= data->reg_offs.pend;
 	gc->chip_types[0].regs.mask		= data->reg_offs.enable;
 	gc->chip_types[0].regs.type		= data->reg_offs.ctrl;
@@ -200,10 +208,12 @@ static int __init sunxi_sc_nmi_irq_init(struct device_node *node,
 	gc->chip_types[1].chip.irq_mask		= irq_gc_mask_clr_bit;
 	gc->chip_types[1].chip.irq_unmask	= irq_gc_mask_set_bit;
 	gc->chip_types[1].chip.irq_set_type	= sunxi_sc_nmi_set_type;
+	gc->chip_types[1].chip.irq_set_wake	= sunxi_sc_nmi_set_wake;
 	gc->chip_types[1].regs.ack		= data->reg_offs.pend;
 	gc->chip_types[1].regs.mask		= data->reg_offs.enable;
 	gc->chip_types[1].regs.type		= data->reg_offs.ctrl;
 	gc->chip_types[1].handler		= handle_edge_irq;
+	gc->private = (void *)(uintptr_t)irq;
 
 	/* Disable any active interrupts */
 	sunxi_sc_nmi_write(gc, data->reg_offs.enable, data->enable_val);

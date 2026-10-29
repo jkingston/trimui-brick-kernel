@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/input.h>
 #include <linux/interrupt.h>
-#include <linux/irqchip/irq-sun50i-a133-wakeupgen.h>
 #include <linux/mfd/trimui-brick-pmic.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -85,7 +84,6 @@ static int axp2202_key_probe(struct platform_device *pdev)
 
 static int axp2202_key_prepare(struct device *dev)
 {
-	struct axp2202_key *key = dev_get_drvdata(dev);
 	int ret;
 
 	if (pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
@@ -96,9 +94,6 @@ static int axp2202_key_prepare(struct device *dev)
 	ret = sun50i_a133_ccu_deep_ready();
 	if (ret)
 		return ret;
-	if (!sun50i_a133_wakeupgen_irq_ready(key->parent_irq))
-		return -EOPNOTSUPP;
-
 	return 0;
 }
 
