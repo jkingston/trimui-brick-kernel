@@ -143,8 +143,6 @@
 	fn-switch {
 		compatible = "gpio-keys";
 		label = "TrimUI Brick Fn";
-		pinctrl-names = "default";
-		pinctrl-0 = <&fn_switch_pin>;
 
 		button-fn {
 			label = "Fn";
@@ -769,14 +767,6 @@
 		clock-names = "bus";
 		resets = <&r_ccu RST_R_AHB_BUS_RTC>;
 		reset-names = "bus";
-	};
-};
-
-&pio {
-	fn_switch_pin: fn-switch-pin {
-		pins = "PH19";
-		function = "gpio_in";
-		bias-disable;
 	};
 };
 
