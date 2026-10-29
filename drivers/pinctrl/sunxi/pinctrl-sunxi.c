@@ -906,12 +906,11 @@ static int sunxi_pinctrl_set_io_bias_cfg(struct sunxi_pinctrl *pctl,
 		return 0;
 
 	uV = regulator_get_voltage(supply);
+	/* Dummy regulators report no selectable voltage as 0 or -EINVAL. */
+	if (uV == 0 || uV == -EINVAL)
+		return 0;
 	if (uV < 0)
 		return uV;
-
-	/* Might be dummy regulator with no voltage set */
-	if (uV == 0)
-		return 0;
 
 	pin -= pctl->desc->pin_base;
 	bank = pin / PINS_PER_BANK;
