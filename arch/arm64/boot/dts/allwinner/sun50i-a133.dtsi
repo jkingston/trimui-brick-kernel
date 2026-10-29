@@ -238,6 +238,10 @@
 	compatible = "allwinner,sun50i-a133-emmc";
 };
 
+&{/soc/watchdog@30090a0} {
+	compatible = "allwinner,sun50i-a133-wdt";
+};
+
 /* Both SRAM selectors are required by VE; leave unclaimed until integration. */
 &sram_c {
 	multimedia_sram: sram-section@0 {
