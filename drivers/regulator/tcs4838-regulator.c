@@ -192,20 +192,10 @@ static const struct of_device_id tcs4838_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, tcs4838_of_match);
 
-static int tcs4838_suspend_prepare(struct device *dev)
-{
-	return -EOPNOTSUPP;
-}
-
-static const struct dev_pm_ops tcs4838_pm_ops = {
-	.prepare = tcs4838_suspend_prepare,
-};
-
 static struct i2c_driver tcs4838_driver = {
 	.driver = {
 		.name = "tcs4838-regulator",
 		.of_match_table = tcs4838_of_match,
-		.pm = &tcs4838_pm_ops,
 	},
 	.probe = tcs4838_probe,
 };
