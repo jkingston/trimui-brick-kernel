@@ -338,7 +338,7 @@ static int sunxi_mmc_reset_host(struct sunxi_mmc_host *host)
 	unsigned long expire = jiffies + msecs_to_jiffies(250);
 	u32 rval;
 
-	if (!host->module_clk_enabled)
+	if (host->cfg->a133_emmc && !host->module_clk_enabled)
 		return -EIO;
 
 	mmc_writel(host, REG_GCTRL, SDXC_HARDWARE_RESET);
@@ -609,7 +609,8 @@ static irqreturn_t sunxi_mmc_irq(int irq, void *dev_id)
 	bool sdio_int = false;
 	irqreturn_t ret = IRQ_HANDLED;
 
-	if (!READ_ONCE(host->module_clk_enabled))
+	if (host->cfg->a133_emmc &&
+	    !READ_ONCE(host->module_clk_enabled))
 		return IRQ_NONE;
 
 	spin_lock(&host->lock);
@@ -1104,9 +1105,11 @@ static void sunxi_mmc_set_clk(struct sunxi_mmc_host *host, struct mmc_ios *ios)
 {
 	u32 rval;
 
-	host->ferror = sunxi_mmc_module_enable(host);
-	if (host->ferror)
-		return;
+	if (host->cfg->a133_emmc) {
+		host->ferror = sunxi_mmc_module_enable(host);
+		if (host->ferror)
+			return;
+	}
 
 	/* set ddr mode */
 	rval = mmc_readl(host, REG_GCTRL);
@@ -1171,6 +1174,14 @@ static void sunxi_mmc_card_power(struct sunxi_mmc_host *host,
 static void sunxi_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct sunxi_mmc_host *host = mmc_priv(mmc);
+
+	/* Keep the proven SD/SDIO lifecycle independent of A133 eMMC. */
+	if (!host->cfg->a133_emmc) {
+		sunxi_mmc_card_power(host, ios);
+		sunxi_mmc_set_bus_width(host, ios->bus_width);
+		sunxi_mmc_set_clk(host, ios);
+		return;
+	}
 
 	if (ios->power_mode == MMC_POWER_OFF) {
 		sunxi_mmc_card_power(host, ios);
@@ -1237,7 +1248,7 @@ static void sunxi_mmc_hw_reset(struct mmc_host *mmc)
 {
 	struct sunxi_mmc_host *host = mmc_priv(mmc);
 
-	if (!host->module_clk_enabled) {
+	if (host->cfg->a133_emmc && !host->module_clk_enabled) {
 		host->ferror = -EIO;
 		return;
 	}
@@ -1259,7 +1270,8 @@ static void sunxi_mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	int ret;
 
 	/* Check for set_ios errors (should never happen) */
-	if (host->ferror || !host->module_clk_enabled) {
+	if (host->ferror ||
+	    (host->cfg->a133_emmc && !host->module_clk_enabled)) {
 		mrq->cmd->error = host->ferror ?: -EIO;
 		mmc_request_done(mmc, mrq);
 		return;
@@ -1347,7 +1359,7 @@ static int sunxi_mmc_card_busy(struct mmc_host *mmc)
 {
 	struct sunxi_mmc_host *host = mmc_priv(mmc);
 
-	if (!host->module_clk_enabled)
+	if (host->cfg->a133_emmc && !host->module_clk_enabled)
 		return 1;
 
 	return !!(mmc_readl(host, REG_STAS) & SDXC_CARD_DATA_BUSY);
@@ -1752,21 +1764,31 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 	if (ret)
 		goto error_free_dma;
 
-	ret = pm_runtime_set_active(&pdev->dev);
-	if (ret)
-		goto error_free_dma;
-	/* Hold the controller active through host registration and its unwind. */
-	pm_runtime_get_noresume(&pdev->dev);
+	if (host->cfg->a133_emmc) {
+		ret = pm_runtime_set_active(&pdev->dev);
+		if (ret)
+			goto error_free_dma;
+		/* Hold A133 eMMC active through host registration and unwind. */
+		pm_runtime_get_noresume(&pdev->dev);
+	} else {
+		/* Preserve the device-qualified SD/SDIO registration sequence. */
+		pm_runtime_set_active(&pdev->dev);
+	}
 	pm_runtime_set_autosuspend_delay(&pdev->dev, 50);
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
 	ret = mmc_add_host(mmc);
-	if (ret)
-		goto error_disable_pm;
+	if (ret) {
+		if (host->cfg->a133_emmc)
+			goto error_disable_pm;
+		goto error_free_dma;
+	}
 
-	pm_runtime_mark_last_busy(&pdev->dev);
-	pm_runtime_put_autosuspend(&pdev->dev);
+	if (host->cfg->a133_emmc) {
+		pm_runtime_mark_last_busy(&pdev->dev);
+		pm_runtime_put_autosuspend(&pdev->dev);
+	}
 
 	dev_info(&pdev->dev, "initialized, max. request size: %u KB%s\n",
 		 mmc->max_req_size >> 10,
@@ -1820,13 +1842,15 @@ static int sunxi_mmc_runtime_resume(struct device *dev)
 		return ret;
 
 	ret = sunxi_mmc_init_host(host);
-	if (ret)
+	if (ret && host->cfg->a133_emmc)
 		goto error_disable;
 	sunxi_mmc_set_bus_width(host, mmc->ios.bus_width);
 	sunxi_mmc_set_clk(host, &mmc->ios);
-	ret = host->ferror;
-	if (ret)
-		goto error_disable;
+	if (host->cfg->a133_emmc) {
+		ret = host->ferror;
+		if (ret)
+			goto error_disable;
+	}
 	enable_irq(host->irq);
 	host->brick_deep_suspended = false;
 
