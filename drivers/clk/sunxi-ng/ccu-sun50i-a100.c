@@ -3,6 +3,7 @@
  * Copyright (c) 2020 Yangtao Li <frank@allwinnertech.com>
  */
 
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -1183,6 +1184,34 @@ static struct clk_ops a133_pll_ops;
 static struct clk_init_data a133_pll_init;
 static struct clk_init_data a133_cpux_init;
 
+static void sun50i_a133_msgbox_clk_disable(void *data)
+{
+	clk_disable_unprepare(data);
+}
+
+static int sun50i_a133_msgbox_clk_enable(struct device *dev)
+{
+	struct clk *clk;
+	int ret;
+
+	/*
+	 * The stock suspend firmware owns the hardware mailbox after boot. Keep
+	 * its bus clock running so PSCI calls can still reach the SCP after
+	 * clk_disable_unused().
+	 */
+	clk = devm_clk_hw_get_clk(dev, &bus_msgbox_clk.common.hw,
+				  "secure-msgbox");
+	if (IS_ERR(clk))
+		return PTR_ERR(clk);
+
+	ret = clk_prepare_enable(clk);
+	if (ret)
+		return ret;
+
+	return devm_add_action_or_reset(dev, sun50i_a133_msgbox_clk_disable,
+					clk);
+}
+
 static int sun50i_a100_ccu_probe(struct platform_device *pdev)
 {
 	void __iomem *reg;
@@ -1268,6 +1297,13 @@ static int sun50i_a100_ccu_probe(struct platform_device *pdev)
 		return ret;
 
 	if (of_device_is_compatible(pdev->dev.of_node, "allwinner,sun50i-a133-ccu")) {
+		if (of_property_read_bool(pdev->dev.of_node,
+					  "allwinner,stock-suspend")) {
+			ret = sun50i_a133_msgbox_clk_enable(&pdev->dev);
+			if (ret)
+				return ret;
+		}
+
 		ret = sun50i_a133_ccu_sleep_init(&pdev->dev, reg, false);
 		if (ret)
 			return ret;
