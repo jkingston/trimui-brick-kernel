@@ -48,6 +48,7 @@ struct sunxi_wdt_reg {
 	u8 wdt_timeout_shift;
 	u8 wdt_reset_mask;
 	u8 wdt_reset_val;
+	u8 restart_priority;
 	u32 wdt_key_val;
 };
 
@@ -294,6 +295,18 @@ static const struct sunxi_wdt_reg sun20i_wdt_reg = {
 	.wdt_key_val = 0x16aa0000,
 };
 
+static const struct sunxi_wdt_reg sun50i_a133_wdt_reg = {
+	.wdt_ctrl = 0x10,
+	.wdt_cfg = 0x14,
+	.wdt_mode = 0x18,
+	.wdt_timeout_shift = 4,
+	.wdt_reset_mask = 0x03,
+	.wdt_reset_val = 0x01,
+	/* Stock restarts through this watchdog; outrank PSCI (priority 129). */
+	.restart_priority = 192,
+	.wdt_key_val = 0x16aa0000,
+};
+
 static const struct sunxi_wdt_reg sun55i_wdt_reg = {
 	.wdt_ctrl = 0x0c,
 	.wdt_cfg = 0x10,
@@ -308,6 +321,7 @@ static const struct of_device_id sunxi_wdt_dt_ids[] = {
 	{ .compatible = "allwinner,sun4i-a10-wdt", .data = &sun4i_wdt_reg },
 	{ .compatible = "allwinner,sun6i-a31-wdt", .data = &sun6i_wdt_reg },
 	{ .compatible = "allwinner,sun20i-d1-wdt", .data = &sun20i_wdt_reg },
+	{ .compatible = "allwinner,sun50i-a133-wdt", .data = &sun50i_a133_wdt_reg },
 	{ .compatible = "allwinner,sun55i-a523-wdt", .data = &sun55i_wdt_reg },
 	{ /* sentinel */ }
 };
@@ -341,7 +355,8 @@ static int sunxi_wdt_probe(struct platform_device *pdev)
 
 	watchdog_init_timeout(&sunxi_wdt->wdt_dev, timeout, dev);
 	watchdog_set_nowayout(&sunxi_wdt->wdt_dev, nowayout);
-	watchdog_set_restart_priority(&sunxi_wdt->wdt_dev, 128);
+	watchdog_set_restart_priority(&sunxi_wdt->wdt_dev,
+				      sunxi_wdt->wdt_regs->restart_priority ?: 128);
 	watchdog_stop_ping_on_suspend(&sunxi_wdt->wdt_dev);
 
 	watchdog_set_drvdata(&sunxi_wdt->wdt_dev, sunxi_wdt);
