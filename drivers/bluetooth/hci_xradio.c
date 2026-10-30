@@ -413,30 +413,39 @@ static int xr_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
 	u8 params[9] = { 0x02, 0x00, 0x06 };
 	u8 reply[7];
 	struct sk_buff *skb;
+	const char *stage = "write";
 	int err;
 
 	memcpy(params + 3, bdaddr->b, sizeof(bdaddr->b));
 	skb = __hci_cmd_sync(hdev, 0xfc0a, sizeof(params), params,
 			     HCI_INIT_TIMEOUT);
-	if (IS_ERR(skb))
-		return PTR_ERR(skb);
+	if (IS_ERR(skb)) {
+		err = PTR_ERR(skb);
+		goto failed;
+	}
 	err = skb->len == 1 && !skb->data[0] ? 0 : -EPROTO;
 	kfree_skb(skb);
 	if (err)
-		return err;
+		goto failed;
 
+	stage = "reset";
 	skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, HCI_INIT_TIMEOUT);
-	if (IS_ERR(skb))
-		return PTR_ERR(skb);
+	if (IS_ERR(skb)) {
+		err = PTR_ERR(skb);
+		goto failed;
+	}
 	err = skb->len == 1 && !skb->data[0] ? 0 : -EPROTO;
 	kfree_skb(skb);
 	if (err)
-		return err;
+		goto failed;
 
+	stage = "readback";
 	skb = __hci_cmd_sync(hdev, HCI_OP_READ_BD_ADDR, 0, NULL,
 			     HCI_INIT_TIMEOUT);
-	if (IS_ERR(skb))
-		return PTR_ERR(skb);
+	if (IS_ERR(skb)) {
+		err = PTR_ERR(skb);
+		goto failed;
+	}
 	if (skb->len != sizeof(reply) || skb->data[0]) {
 		err = -EPROTO;
 	} else {
@@ -445,6 +454,14 @@ static int xr_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
 			-EADDRNOTAVAIL : 0;
 	}
 	kfree_skb(skb);
+	if (err)
+		goto failed;
+
+	bt_dev_info(hdev, "public address programmed and verified");
+	return 0;
+
+failed:
+	bt_dev_err(hdev, "public address %s failed: %d", stage, err);
 	return err;
 }
 
@@ -462,6 +479,11 @@ static int xr_setup(struct hci_uart *hu)
 	hdev->shutdown = xr_shutdown;
 	hdev->wakeup = xr_wakeup;
 	hci_set_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
+	/* Stock replaces the firmware-supplied address before exposing the
+	 * controller. Keep Linux's native unconfigured state until userspace
+	 * supplies the Brick's persistent public address through management.
+	 */
+	hci_set_quirk(hdev, HCI_QUIRK_INVALID_BDADDR);
 	err = request_firmware(&fw, XR_FW, &hu->serdev->dev);
 	if (err)
 		return err;
