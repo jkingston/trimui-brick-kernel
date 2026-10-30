@@ -104,6 +104,7 @@ struct sun4i_usb_phy_cfg {
 	u32 phy0_ctl_clear;
 	u32 phy0_ctl_init_clear;
 	bool needs_phy1_clock;
+	bool needs_resume_reinit;
 	u8 phyctl_offset;
 	bool dedicated_clocks;
 	bool phy0_dual_route;
@@ -301,6 +302,50 @@ static void sun4i_usb_phy1_clock_disable(struct sun4i_usb_phy_data *data)
 
 static void sun4i_usb_phy0_reroute(struct sun4i_usb_phy_data *data, int id_det);
 
+static void sun4i_usb_phy0_restore_registers(struct phy *_phy, bool report)
+{
+	struct sun4i_usb_phy *phy = phy_get_drvdata(_phy);
+	struct sun4i_usb_phy_data *data = to_sun4i_usb_phy_data(phy);
+	u32 val;
+
+	if (data->cfg->siddq_in_base) {
+		val = readl(data->base + data->cfg->phyctl_offset);
+		val &= ~data->cfg->phy0_ctl_init_clear;
+		val |= PHY_CTL_VBUSVLDEXT;
+		val &= ~PHY_CTL_SIDDQ;
+		writel(val, data->base + data->cfg->phyctl_offset);
+	}
+
+	/* Restore the pullups and fixed peripheral cable state lost in deep sleep. */
+	sun4i_usb_phy0_update_iscr(_phy, 0,
+				   ISCR_DPDM_PULLUP_EN | ISCR_ID_PULLUP_EN);
+
+	if (data->cfg->phy0_ctl_clear) {
+		sun4i_usb_phy0_set_id_detect(_phy,
+			data->dr_mode != USB_DR_MODE_HOST);
+		sun4i_usb_phy0_set_vbus_detect(_phy, 1);
+		sun4i_usb_phy0_reroute(data,
+			data->dr_mode != USB_DR_MODE_HOST);
+		val = readl(data->base + data->cfg->phyctl_offset);
+		writel(val & ~data->cfg->phy0_ctl_clear,
+		       data->base + data->cfg->phyctl_offset);
+		if (report)
+			dev_info(&_phy->dev, "stock PHY0 control: %#x -> %#x\n",
+				 val,
+				 readl(data->base + data->cfg->phyctl_offset));
+	}
+
+	if (data->cfg->needs_phy1_clock) {
+		void __iomem *phy1_ctl = data->phys[1].pmu + REG_HCI_PHY_CTL;
+
+		val = readl(phy1_ctl);
+		writel(val & ~data->cfg->hci_phy_ctl_clear, phy1_ctl);
+		if (report)
+			dev_info(&_phy->dev, "stock PHY1 control: %#x -> %#x\n",
+				 val, readl(phy1_ctl));
+	}
+}
+
 static int sun4i_usb_phy_init(struct phy *_phy)
 {
 	struct sun4i_usb_phy *phy = phy_get_drvdata(_phy);
@@ -400,15 +445,7 @@ clocks_ready:
 		writel(val, phy->pmu + REG_HCI_PHY_CTL);
 	}
 
-	if (data->cfg->siddq_in_base) {
-		if (phy->index == 0) {
-			val = readl(data->base + data->cfg->phyctl_offset);
-			val &= ~data->cfg->phy0_ctl_init_clear;
-			val |= PHY_CTL_VBUSVLDEXT;
-			val &= ~PHY_CTL_SIDDQ;
-			writel(val, data->base + data->cfg->phyctl_offset);
-		}
-	} else {
+	if (!data->cfg->siddq_in_base) {
 		/* Enable USB 45 Ohm resistor calibration */
 		if (phy->index == 0)
 			sun4i_usb_phy_write(phy, PHY_RES45_CAL_EN, 0x01, 1);
@@ -426,36 +463,7 @@ clocks_ready:
 
 	if (phy->index == 0) {
 		data->phy0_init = true;
-
-		/* Enable pull-ups */
-		sun4i_usb_phy0_update_iscr(_phy, 0, ISCR_DPDM_PULLUP_EN);
-		sun4i_usb_phy0_update_iscr(_phy, 0, ISCR_ID_PULLUP_EN);
-
-		/* Board diagnostic quirk, recovered from the stock USB init. */
-		if (data->cfg->phy0_ctl_clear) {
-			/* Match stock ordering before clearing the control bit. */
-			sun4i_usb_phy0_set_id_detect(_phy,
-				data->dr_mode != USB_DR_MODE_HOST);
-			sun4i_usb_phy0_set_vbus_detect(_phy, 1);
-			sun4i_usb_phy0_reroute(data,
-				data->dr_mode != USB_DR_MODE_HOST);
-			val = readl(data->base + data->cfg->phyctl_offset);
-			writel(val & ~data->cfg->phy0_ctl_clear,
-			       data->base + data->cfg->phyctl_offset);
-			dev_info(&_phy->dev, "stock PHY0 control: %#x -> %#x\n",
-				 val, readl(data->base + data->cfg->phyctl_offset));
-		}
-		if (data->cfg->needs_phy1_clock) {
-			void __iomem *phy1_ctl = data->phys[1].pmu + REG_HCI_PHY_CTL;
-
-			/* Stock device_enable/resume clears PHY1 SIDDQ after
-			 * PHY0 setup. Clocks alone leave this analog block off.
-			 */
-			val = readl(phy1_ctl);
-			writel(val & ~data->cfg->hci_phy_ctl_clear, phy1_ctl);
-			dev_info(&_phy->dev, "stock PHY1 control: %#x -> %#x\n",
-				 val, readl(phy1_ctl));
-		}
+		sun4i_usb_phy0_restore_registers(_phy, true);
 
 		/* Force ISCR and cable state updates */
 		data->id_det = -1;
@@ -1258,6 +1266,7 @@ static const struct sun4i_usb_phy_cfg trimui_brick_cfg = {
 	.phy0_ctl_clear = BIT(1),
 	.phy0_ctl_init_clear = BIT(7), /* Stock open_usb_clock operation. */
 	.needs_phy1_clock = true,
+	.needs_resume_reinit = true,
 };
 
 static const struct sun4i_usb_phy_cfg sun50i_a64_cfg = {
@@ -1309,6 +1318,26 @@ static const struct of_device_id sun4i_usb_phy_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, sun4i_usb_phy_of_match);
 
+static int sun4i_usb_phy_resume(struct device *dev)
+{
+	struct sun4i_usb_phy_data *data = dev_get_drvdata(dev);
+	struct phy *phy0;
+
+	if (!data->cfg->needs_resume_reinit || !data->phy0_init)
+		return 0;
+
+	phy0 = data->phys[0].phy;
+	mutex_lock(&phy0->mutex);
+	sun4i_usb_phy0_restore_registers(phy0, false);
+	mutex_unlock(&phy0->mutex);
+
+	return 0;
+}
+
+static const struct dev_pm_ops sun4i_usb_phy_pm_ops = {
+	.resume = sun4i_usb_phy_resume,
+};
+
 static struct platform_driver sun4i_usb_phy_driver = {
 	.probe = sun4i_usb_phy_probe,
 	.remove = sun4i_usb_phy_remove,
@@ -1316,6 +1345,7 @@ static struct platform_driver sun4i_usb_phy_driver = {
 	.driver = {
 		.of_match_table= sun4i_usb_phy_of_match,
 		.name = "sun4i-usb-phy",
+		.pm = &sun4i_usb_phy_pm_ops,
 	}
 };
 module_platform_driver(sun4i_usb_phy_driver);

@@ -897,12 +897,36 @@ static const struct of_device_id sunxi_musb_match[] = {
 };
 MODULE_DEVICE_TABLE(of, sunxi_musb_match);
 
+static int sunxi_musb_resume(struct device *dev)
+{
+	struct sunxi_glue *glue = dev_get_drvdata(dev);
+	u8 power;
+
+	if (!glue->vend0_value || !glue->musb)
+		return 0;
+
+	/* Deep sleep loses the A133 peripheral setup. Leave the pullup clear
+	 * until the child MUSB resume restores its saved POWER register.
+	 */
+	power = readb(glue->musb->mregs + SUNXI_MUSB_POWER);
+	writeb(power & ~MUSB_POWER_SOFTCONN,
+	       glue->musb->mregs + SUNXI_MUSB_POWER);
+	writeb(glue->vend0_value, glue->musb->mregs + SUNXI_MUSB_VEND0);
+
+	return 0;
+}
+
+static const struct dev_pm_ops sunxi_musb_pm_ops = {
+	.resume = sunxi_musb_resume,
+};
+
 static struct platform_driver sunxi_musb_driver = {
 	.probe = sunxi_musb_probe,
 	.remove = sunxi_musb_remove,
 	.driver = {
 		.name = "musb-sunxi",
 		.of_match_table = sunxi_musb_match,
+		.pm = &sunxi_musb_pm_ops,
 	},
 };
 module_platform_driver(sunxi_musb_driver);
