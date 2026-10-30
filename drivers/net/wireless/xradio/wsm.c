@@ -611,9 +611,8 @@ int wsm_cmd_send(struct xradio_common *hw_priv,
 	size_t buf_len = buf->data - buf->begin;
 	int ret;
 
-	/* CHANGE_MAC addresses only the sole station interface. */
-	if (cmd == 6 && buf_len >= 8 && xrw_get16(buf->begin+4) == 0x1046 &&
-	    if_id != 0) {
+	/* Station address and beacon timing address the sole station interface. */
+	if (!xrs_command_interface_allowed(cmd, buf->begin, buf_len, if_id)) {
 		wsm_buf_reset(buf); return -EOPNOTSUPP;
 	}
 

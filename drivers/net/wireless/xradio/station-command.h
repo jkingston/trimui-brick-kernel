@@ -10,6 +10,18 @@ static inline int xrs_command_copy_current(unsigned long long current,
 {
  return current==copied;
 }
+static inline int xrs_beacon_wakeup_valid(const u8 *data,size_t length)
+{
+ return length==4 && data[0] && !data[1] && !xrw_get16(data+2);
+}
+static inline int xrs_command_interface_allowed(u16 cmd,const u8 *data,
+                                                size_t size,int if_id)
+{
+ u16 mib;
+ if(cmd!=6 || size<8)return 1;
+ mib=xrw_get16(data+4);
+ return (mib!=0x1046 && mib!=0x1007) || if_id==0;
+}
 /* Exact WSM lengths include4-byte header; MIB lengths include its4-byte prefix.
  * Scan's deeper semantic validation remains in wsm_scan(). No key/AP commands.
  */
@@ -38,6 +50,7 @@ static inline int xrs_command_allowed(u16 cmd,const u8 *data,size_t size,int sta
  case 0x1016:return length==24; /* six-entry retry policy */
  case 0x1021:return length==4; /* HT protection */
  case 0x1010:return length==12; /* XR829 association mode, explicit padding */
+ case 0x1007:return xrs_beacon_wakeup_valid(data+8,length);
  case 0x1005:return length==8; /* beacon filter enable+count */
  case 0x0006: /* output power, 0.1dBm */
  case 0x0003: /* slot time, microseconds */
