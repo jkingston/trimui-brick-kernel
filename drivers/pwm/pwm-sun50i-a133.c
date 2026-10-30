@@ -365,8 +365,14 @@ out:
 }
 static const struct dev_pm_ops brick_pm_ops = {
 	.prepare = brick_pm_prepare,
-	.suspend = brick_pm_suspend,
-	.resume = brick_pm_resume,
+	/*
+	 * The DRM master restores the panel from its normal resume callback,
+	 * before the pwm-backlight device itself resumes.  Restore this supplier
+	 * in the early phase so panel enable can safely apply the backlight PWM.
+	 * Suspend late, after the linked backlight consumer has switched it off.
+	 */
+	.suspend_late = brick_pm_suspend,
+	.resume_early = brick_pm_resume,
 };
 static struct platform_driver brick_driver = {
 	.probe = brick_probe,
