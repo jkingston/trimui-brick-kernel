@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
  * This profile requires an A133 PSCI implementation of the exact stock CPU
- * and cluster powerdown states. Keep it out of the ordinary product DT until
- * the matching firmware path has been qualified on the device.
+ * and cluster powerdown states. The native implementation has been qualified
+ * with both local CPU idle and SCP-backed system suspend on the Brick.
  */
 
 / {
