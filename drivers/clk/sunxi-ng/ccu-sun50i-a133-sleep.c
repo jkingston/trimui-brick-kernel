@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* A133 stock-chain CCU context. Critical clocks are checked, not retuned. */
+/* A133 stock-chain CCU context. */
 #include <linux/arm-smccc.h>
 #include <linux/device.h>
 #include <linux/firmware/sun50i-a133-native.h>
@@ -24,26 +24,36 @@ struct a133_context_reg {
 	u16 offset;
 	u32 mask, saved;
 };
-/* Stock excludes CPU/COM. DDR/MBUS recovery is deliberately not attempted
- * from running DRAM; a changed critical tuple prevents device admission.
+
+/*
+ * The stock SCP restores these fields before returning to the application
+ * CPUs.  A changed tuple means that Linux cannot safely continue.
+ * Stock excludes COM PLL because its powered-down rail may reconstruct a
+ * different, currently unused tuple; consumers program it when enabled.
  */
-static struct a133_context_reg main_critical[] = {
+static struct a133_context_reg main_retained[] = {
 	{ 0x000, 0xafffff03 },
-	{ 0x010, 0xafffff03 },
-	{ 0x060, 0xafffff03 },
-	{ 0x110, 0xffffffff }, /* DDR SDM pattern */
-	{ 0x160, 0xffffffff }, /* COM SDM pattern */
 	{ 0x500, 0x07000303 },
-	{ 0x540, 0xc3000007 },
 	{ 0x800, 0x03000003 },
 	{ 0x80c, 0x00010001 },
 };
+
+/*
+ * The stock SCP reconstructs MBUS in stages and intentionally leaves its
+ * reset bit clear.  Restore the complete pre-suspend MBUS tuple only after
+ * the retained DDR/peripheral PLLs have been verified and locked.
+ */
+static struct a133_context_reg main_handoff[] = {
+	{ 0x540, 0xc3000007 },
+};
+
 static struct a133_context_reg r_critical[] = {
 	{ 0x000, 0x0300031f },
 	{ 0x00c, 0x00000003 },
 	{ 0x010, 0x0300031f },
 	{ 0x20c, 0x00010001 },
 };
+
 /* Writable fields from the A133 registered peripheral descriptors. Alias
  * fields share one snapshot; unrelated bits and status are never replayed.
  */
@@ -132,6 +142,7 @@ static struct a133_context_reg main_periph[] = {
 	{ 0xbf0, 0x8100030f },
 	{ 0xa9c, 0x00010001 },
 };
+
 static struct a133_context_reg r_periph[] = {
 	{ 0x13c, 0x00010001 },
 	{ 0x130, 0x83000000 },
@@ -150,6 +161,7 @@ static struct a133_context_reg pll_regs[] = {
 	{ 0x068, 0xa900ff03 }, { 0x058, 0xa900ff03 },
 	{ 0x078, 0xa93fff03 },
 };
+
 static u32 patterns[ARRAY_SIZE(pll_regs)];
 static void __iomem *bases[2];
 static bool enabled, saved;
@@ -173,12 +185,15 @@ static void save_regs(void __iomem *base, struct a133_context_reg *regs, size_t 
 		regs[i].saved = readl(base + regs[i].offset) & regs[i].mask;
 }
 
-static int check_regs(void __iomem *base, struct a133_context_reg *regs, size_t n)
+static int check_regs(void __iomem *base, struct a133_context_reg *regs,
+		      size_t n)
 {
 	size_t i;
 
 	for (i = 0; i < n; i++) {
-		u32 value = readl(base + regs[i].offset) & regs[i].mask;
+		u32 value;
+
+		value = readl(base + regs[i].offset) & regs[i].mask;
 
 		if (value != regs[i].saved) {
 			pr_err("A133 %s CCU retention %#x: expected %#x, got %#x\n",
@@ -190,7 +205,8 @@ static int check_regs(void __iomem *base, struct a133_context_reg *regs, size_t 
 	return 0;
 }
 
-static int restore_regs(void __iomem *base, struct a133_context_reg *regs, size_t n)
+static int restore_regs(void __iomem *base, struct a133_context_reg *regs,
+			size_t n)
 {
 	size_t i;
 	u32 value;
@@ -200,7 +216,7 @@ static int restore_regs(void __iomem *base, struct a133_context_reg *regs, size_
 		if ((value & regs[i].mask) == regs[i].saved)
 			continue;
 		writel((value & ~regs[i].mask) | regs[i].saved, base + regs[i].offset);
-		if (check_regs(base, &regs[i], 1))
+		if ((readl(base + regs[i].offset) & regs[i].mask) != regs[i].saved)
 			return -EIO;
 	}
 	return 0;
@@ -219,7 +235,8 @@ static int a133_context_suspend(void *unused)
 	/* Never reprogram peripheral PLL0 while the CPU is using its bypass. */
 	if (((readl(bases[0] + 0x500) >> 24) & 7) != 3)
 		return -EBUSY;
-	save_regs(bases[0], main_critical, ARRAY_SIZE(main_critical));
+	save_regs(bases[0], main_retained, ARRAY_SIZE(main_retained));
+	save_regs(bases[0], main_handoff, ARRAY_SIZE(main_handoff));
 	save_regs(bases[1], r_critical, ARRAY_SIZE(r_critical));
 	save_regs(bases[0], pll_regs, ARRAY_SIZE(pll_regs));
 	for (i = 0; i < ARRAY_SIZE(pll_regs); i++)
@@ -232,7 +249,7 @@ static int a133_context_suspend(void *unused)
 
 static int a133_critical_ready(void)
 {
-	static const u16 critical_plls[] = { 0x000, 0x010, 0x060 };
+	static const u16 critical_plls[] = { 0x000, 0x010 };
 	size_t i;
 	u32 value;
 	int ret;
@@ -278,16 +295,22 @@ static void a133_context_resume(void *unused)
 	if (!saved)
 		return;
 	saved = false;
-	ret = check_regs(bases[0], main_critical, ARRAY_SIZE(main_critical));
+	ret = check_regs(bases[0], main_retained, ARRAY_SIZE(main_retained));
 	if (!ret)
 		ret = check_regs(bases[1], r_critical, ARRAY_SIZE(r_critical));
 	if (ret)
 		goto failed;
+	/*
+	 * The SCP has already resumed DRAM through this live PLL.  Replaying the
+	 * stock 4.9 cache here can stall the CPU/DRAM path, so accept the locked
+	 * SCP result instead of retuning active memory.
+	 */
 	ret = a133_critical_ready();
 	if (ret)
 		goto failed;
 	for (i = 0; i < ARRAY_SIZE(pll_regs); i++) {
-		if (readl(bases[0] + pll_regs[i].offset + 0x100) != patterns[i])
+		value = readl(bases[0] + pll_regs[i].offset + 0x100);
+		if (value != patterns[i])
 			writel(patterns[i], bases[0] + pll_regs[i].offset + 0x100);
 		if (readl(bases[0] + pll_regs[i].offset + 0x100) != patterns[i]) {
 			pr_err("A133 PLL pattern restore failed at %#x\n",
@@ -307,6 +330,9 @@ static void a133_context_resume(void *unused)
 			goto failed;
 		}
 	}
+	ret = restore_regs(bases[0], main_handoff, ARRAY_SIZE(main_handoff));
+	if (ret)
+		goto failed;
 	ret = restore_regs(bases[0], main_periph, ARRAY_SIZE(main_periph));
 	if (!ret)
 		ret = restore_regs(bases[1], r_periph, ARRAY_SIZE(r_periph));
@@ -328,6 +354,7 @@ static const struct syscore_ops a133_context_ops = {
 	.suspend = a133_context_suspend,
 	.resume = a133_context_resume,
 };
+
 static struct syscore a133_context = { .ops = &a133_context_ops };
 
 static bool a133_firmware_suspend_ready(void)

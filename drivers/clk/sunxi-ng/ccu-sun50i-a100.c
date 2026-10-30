@@ -69,6 +69,7 @@ static struct ccu_nkmp pll_ddr0_clk = {
 		.hw.init	= CLK_HW_INIT("pll-ddr0", "dcxo24M",
 					      &ccu_nkmp_ops,
 					      CLK_SET_RATE_UNGATE |
+					      CLK_GET_RATE_NOCACHE |
 					      CLK_IS_CRITICAL),
 	},
 };
