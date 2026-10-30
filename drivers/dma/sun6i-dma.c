@@ -10,6 +10,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/firmware/sun50i-a133-native.h>
 #include <linux/suspend.h>
 #include <linux/sun50i-a133-ccu-sleep.h>
 #include <linux/delay.h>
@@ -1690,9 +1691,32 @@ static int sun6i_dma_pm_suspend_noirq(struct device *dev)
 	return 0;
 }
 
-static int sun6i_dma_pm_secure_init(void)
+static bool sun6i_dma_pm_native_firmware(void)
 {
 	struct arm_smccc_res res;
+
+	arm_smccc_smc(A133_NATIVE_UID, 0, 0, 0, 0, 0, 0, 0, &res);
+	return (u32)res.a0 == A133_NATIVE_UID_WORD0 &&
+	       (u32)res.a1 == A133_NATIVE_UID_WORD1 &&
+	       (u32)res.a2 == A133_NATIVE_UID_WORD2 &&
+	       (u32)res.a3 == A133_NATIVE_UID_WORD3;
+}
+
+static int sun6i_dma_pm_secure_init(struct sun6i_dma_dev *sdev)
+{
+	struct arm_smccc_res res;
+	u32 value;
+
+	/* Reset clears the DMA security policy after native TF-A has returned.
+	 * Native firmware leaves this register accessible to non-secure Linux,
+	 * so replay stock's 0xff policy after reset deassertion.  Stock firmware
+	 * requires its private secure-register service for the same operation.
+	 */
+	if (sun6i_dma_pm_native_firmware()) {
+		writel(0xff, sdev->base + SUNXI_H3_SECURE_REG);
+		value = readl(sdev->base + SUNXI_H3_SECURE_REG);
+		return value == 0xff ? 0 : -EIO;
+	}
 
 	/* Exact stock monitor: x1=physical address, w2=value; the write call
 	 * has no status result. Its secure-read service supplies the readback.
@@ -1705,6 +1729,7 @@ static int sun6i_dma_pm_secure_init(void)
 static int sun6i_dma_pm_resume_noirq(struct device *dev)
 {
 	struct sun6i_dma_dev *sdev = dev_get_drvdata(dev);
+	const char *step = "CCU readiness";
 	int ret, err;
 
 	if (!sdev->pm_clock_off)
@@ -1712,26 +1737,32 @@ static int sun6i_dma_pm_resume_noirq(struct device *dev)
 	ret = sun50i_a133_ccu_deep_ready();
 	if (ret)
 		goto fault;
+	step = "AHB clock enable";
 	ret = clk_prepare_enable(sdev->clk);
 	if (ret)
 		goto fault;
 	sdev->pm_clock_off = false;
+	step = "reset deassertion";
 	ret = reset_control_status(sdev->rstc);
 	if (ret) {
 		ret = ret < 0 ? ret : -EIO;
 		goto fault;
 	}
 	if (!__clk_is_enabled(sdev->clk) || !__clk_is_enabled(sdev->clk_mbus)) {
+		step = "clock state";
 		ret = -EIO;
 		goto fault;
 	}
-	ret = sun6i_dma_pm_secure_init();
+	step = "security policy";
+	ret = sun6i_dma_pm_secure_init(sdev);
 	if (ret)
 		goto fault;
+	step = "channel context";
 	ret = sun6i_dma_pm_snapshot(sdev, true);
 	if (ret)
 		goto fault;
 	if (readl(sdev->base + DMA_IRQ_STAT(0)) != sdev->sleep_irq_status) {
+		step = "IRQ status";
 		ret = -EIO;
 		goto fault;
 	}
@@ -1742,6 +1773,7 @@ static int sun6i_dma_pm_resume_noirq(struct device *dev)
 	sdev->cfg->clock_autogate_enable(sdev);
 	if (readl(sdev->base + DMA_IRQ_EN(0)) != sdev->sleep_irq_en ||
 	    !(readl(sdev->base + SUNXI_H3_DMA_GATE) & SUNXI_H3_DMA_GATE_ENABLE)) {
+		step = "IRQ/autogate restore";
 		ret = -EIO;
 		goto fault;
 	}
@@ -1760,7 +1792,8 @@ fault:
 		      ret, err);
 	sdev->pm_reset = true;
 	WRITE_ONCE(sdev->pm_fault, true);
-	dev_err(dev, "DMA context restore failed: %d, reset isolation: %d\n", ret, err);
+	dev_err(dev, "DMA context restore failed at %s: %d, reset isolation: %d\n",
+		step, ret, err);
 	return ret;
 }
 
