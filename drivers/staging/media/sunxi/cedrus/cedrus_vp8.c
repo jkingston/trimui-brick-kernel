@@ -658,9 +658,16 @@ static int cedrus_vp8_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 	struct vb2_buffer *src_buf = &run->src->vb2_buf;
 	struct cedrus_dev *dev = ctx->dev;
 	dma_addr_t luma_addr, chroma_addr;
+	size_t bytes;
 	dma_addr_t src_buf_addr;
 	int header_size;
 	u32 reg;
+
+	header_size = V4L2_VP8_FRAME_IS_KEY_FRAME(slice) ? 10 : 3;
+	bytes = vb2_get_plane_payload(src_buf, 0);
+	if (bytes > U32_MAX / 8 || header_size > bytes ||
+	    slice->first_part_size > bytes - header_size)
+		return -EINVAL;
 
 	cedrus_engine_enable(ctx);
 
@@ -671,12 +678,10 @@ static int cedrus_vp8_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 	reg = slice->first_part_size * 8;
 	cedrus_write(dev, VE_VP8_FIRST_DATA_PART_LEN, reg);
 
-	header_size = V4L2_VP8_FRAME_IS_KEY_FRAME(slice) ? 10 : 3;
-
 	reg = slice->first_part_size + header_size;
 	cedrus_write(dev, VE_VP8_PART_SIZE_OFFSET, reg);
 
-	reg = vb2_plane_size(src_buf, 0) * 8;
+	reg = bytes * 8;
 	cedrus_write(dev, VE_H264_VLD_LEN, reg);
 
 	/*
@@ -691,7 +696,7 @@ static int cedrus_vp8_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
 
 	src_buf_addr = vb2_dma_contig_plane_dma_addr(src_buf, 0);
 	cedrus_write(dev, VE_H264_VLD_END,
-		     src_buf_addr + vb2_get_plane_payload(src_buf, 0));
+		     src_buf_addr + bytes);
 	cedrus_write(dev, VE_H264_VLD_ADDR,
 		     VE_H264_VLD_ADDR_VAL(src_buf_addr) |
 		     VE_H264_VLD_ADDR_FIRST | VE_H264_VLD_ADDR_VALID |
