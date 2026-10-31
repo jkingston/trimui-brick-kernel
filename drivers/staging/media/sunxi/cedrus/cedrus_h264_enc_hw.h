@@ -8,8 +8,8 @@
 #include <linux/types.h>
 
 #include "cedrus_enc.h"
+#include "cedrus_h264_enc.h"
 
-struct cedrus_h264_enc_params;
 
 /* Packed words established for the stock fixed-QP High/CABAC path. */
 struct cedrus_a133_h264_enc_codec {
@@ -54,6 +54,7 @@ struct cedrus_a133_h264_vlc_sequence {
 		commands[CEDRUS_A133_H264_VLC_MAX_COMMANDS];
 	u16 count;
 	u16 bit_count;
+	struct cedrus_h264_enc_prefix_map prefixes;
 };
 
 struct cedrus_a133_h264_slice_header {

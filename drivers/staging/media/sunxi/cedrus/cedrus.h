@@ -28,6 +28,8 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
+#include "cedrus_h264_enc.h"
+
 #define CEDRUS_NAME			"cedrus"
 
 #define CEDRUS_CAPABILITY_UNTILED	BIT(0)
@@ -121,6 +123,10 @@ struct cedrus_buffer {
 			size_t		payload;
 			bool			eoi_pending;
 		} jpeg_enc;
+		struct {
+			struct cedrus_h264_enc_prefix_map prefixes;
+			bool			repair_pending;
+		} h264_enc;
 	} codec;
 };
 

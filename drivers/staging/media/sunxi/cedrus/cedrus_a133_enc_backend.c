@@ -17,6 +17,7 @@
 #include "cedrus.h"
 #include "cedrus_enc_regs.h"
 #include "cedrus_a133_enc_backend.h"
+#include "cedrus_h264_enc.h"
 #include "cedrus_hw.h"
 #include "cedrus_jpeg_enc_job.h"
 
@@ -385,6 +386,10 @@ cedrus_a133_enc_backend_buf_prepare(struct cedrus_ctx *ctx,
 		return 0;
 
 	buffer = vb2_to_cedrus_buffer(vb);
+	if (ctx->dst_fmt.pixelformat == V4L2_PIX_FMT_H264) {
+		buffer->codec.h264_enc = (typeof(buffer->codec.h264_enc)) {};
+		return vb2_plane_vaddr(vb, 0) ? 0 : -EFAULT;
+	}
 	buffer->codec.jpeg_enc = (typeof(buffer->codec.jpeg_enc)) {};
 	if (ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_JPEG)
 		return 0;
@@ -408,6 +413,37 @@ cedrus_a133_enc_backend_buf_finish(struct cedrus_ctx *ctx,
 	if (!ctx || !vb || !V4L2_TYPE_IS_CAPTURE(vb->type))
 		return 0;
 	buffer = vb2_to_cedrus_buffer(vb);
+	if (ctx->dst_fmt.pixelformat == V4L2_PIX_FMT_H264 &&
+	    buffer->codec.h264_enc.repair_pending) {
+		struct cedrus_h264_enc_prefix_map prefixes =
+			buffer->codec.h264_enc.prefixes;
+
+		buffer->codec.h264_enc = (typeof(buffer->codec.h264_enc)) {};
+		if (vb->state != VB2_BUF_STATE_DONE)
+			return 0;
+		dbuf = NULL;
+		if (vb->memory == VB2_MEMORY_DMABUF) {
+			dbuf = vb->planes[0].dbuf;
+			if (!dbuf)
+				return -EFAULT;
+			ret = dma_buf_begin_cpu_access(dbuf, DMA_BIDIRECTIONAL);
+			if (ret)
+				return ret;
+			cpu_access = true;
+		}
+		vaddr = vb2_plane_vaddr(vb, 0);
+		if (!vaddr) {
+			ret = -EFAULT;
+		} else {
+			payload = vb2_get_plane_payload(vb, 0);
+			ret = cedrus_h264_enc_repair_start_codes(vaddr, payload, &prefixes);
+		}
+		if (cpu_access)
+			end_ret = dma_buf_end_cpu_access(dbuf, DMA_BIDIRECTIONAL);
+		if (!ret)
+			ret = end_ret;
+		return ret;
+	}
 	if (!buffer->codec.jpeg_enc.eoi_pending)
 		return 0;
 
@@ -652,12 +688,17 @@ cedrus_a133_enc_backend_irq_status_h264(struct cedrus_ctx *ctx)
 	backend_ctx->terminal_pixelformat = V4L2_PIX_FMT_H264;
 	backend_ctx->terminal_error = ret && ret != -EAGAIN;
 	if (!ret) {
+		struct cedrus_buffer *buffer = vb2_to_cedrus_buffer(&dst->vb2_buf);
+
 		if (backend_ctx->job.completion.keyframe &&
 		    backend_ctx->active_force_keyframe_request)
 			backend_ctx->force_keyframe_completed =
 				backend_ctx->active_force_keyframe_request;
 		vb2_set_plane_payload(&dst->vb2_buf, 0,
 				      backend_ctx->job.completion.payload);
+		buffer->codec.h264_enc.prefixes =
+			backend_ctx->job.plan.output_prefixes;
+		buffer->codec.h264_enc.repair_pending = true;
 		dst->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
 				V4L2_BUF_FLAG_BFRAME);
 		dst->flags |= backend_ctx->job.completion.keyframe ?

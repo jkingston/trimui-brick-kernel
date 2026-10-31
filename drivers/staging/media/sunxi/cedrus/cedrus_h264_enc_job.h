@@ -66,6 +66,7 @@ struct cedrus_a133_h264_job_plan {
 	struct cedrus_a133_h264_enc_codec codec;
 	struct cedrus_a133_h264_vlc_sequence parameter_sets;
 	struct cedrus_a133_h264_vlc_sequence slice_header;
+	struct cedrus_h264_enc_prefix_map output_prefixes;
 	u64 generation;
 	bool emit_parameter_sets;
 };

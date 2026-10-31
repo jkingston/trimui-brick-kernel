@@ -394,9 +394,23 @@ static void cedrus_a133_h264_vlc_se(struct cedrus_a133_h264_vlc_builder *builder
 static void cedrus_a133_h264_vlc_nal_start(struct cedrus_a133_h264_vlc_builder *builder,
 					   u8 header)
 {
+	struct cedrus_h264_enc_prefix_map *prefixes =
+		&builder->sequence->prefixes;
 	static const u8 start[] = { 0, 0, 0, 1 };
 	unsigned int i;
 
+	if (builder->error)
+		return;
+	if (!IS_ALIGNED(builder->sequence->bit_count, 8) ||
+	    prefixes->count == CEDRUS_H264_ENC_MAX_PREFIXES) {
+		builder->error = -EOVERFLOW;
+		return;
+	}
+	prefixes->entries[prefixes->count++] =
+		(struct cedrus_h264_enc_prefix) {
+			.byte_offset = builder->sequence->bit_count / 8,
+			.nal_header = header,
+		};
 	for (i = 0; i < ARRAY_SIZE(start); i++)
 		cedrus_a133_h264_vlc_bits(builder, start[i], 8);
 	cedrus_a133_h264_vlc_bits(builder, header, 8);

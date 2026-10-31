@@ -1067,6 +1067,45 @@ static void cedrus_enc_test_stock_headers(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
 }
 
+static void cedrus_enc_test_hardware_start_code_repair(struct kunit *test)
+{
+	static const u8 hardware[] = {
+		0, 0, 3, 0, 1, 0x67, 0x64, 0, 0x33,
+		0, 0, 3, 0, 1, 0x68, 0xee,
+		0, 0, 3, 0, 1, 0x65, 0x88,
+		0, 0, 3, 0, 2, 0x12,
+	};
+	static const u8 expected[] = {
+		0, 0, 0, 0, 1, 0x67, 0x64, 0, 0x33,
+		0, 0, 0, 0, 1, 0x68, 0xee,
+		0, 0, 0, 0, 1, 0x65, 0x88,
+		0, 0, 3, 0, 2, 0x12,
+	};
+	struct cedrus_h264_enc_prefix_map prefixes = {
+		.entries = {
+			{ .byte_offset = 0, .nal_header = 0x67 },
+			{ .byte_offset = 9, .nal_header = 0x68 },
+			{ .byte_offset = 16, .nal_header = 0x65 },
+		},
+		.count = 3,
+	};
+	u8 data[sizeof(hardware)];
+	int ret;
+
+	memcpy(data, hardware, sizeof(data));
+	ret = cedrus_h264_enc_repair_start_codes(data, sizeof(data), &prefixes);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_MEMEQ(test, data, expected, sizeof(expected));
+	ret = cedrus_h264_enc_repair_start_codes(data, sizeof(data), &prefixes);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+
+	memcpy(data, hardware, sizeof(data));
+	prefixes.entries[2].nal_header = 0x41;
+	ret = cedrus_h264_enc_repair_start_codes(data, sizeof(data), &prefixes);
+	KUNIT_EXPECT_EQ(test, ret, -EBADMSG);
+	KUNIT_EXPECT_MEMEQ(test, data, hardware, sizeof(hardware));
+}
+
 static void cedrus_enc_test_job_plan(struct kunit *test)
 {
 	struct cedrus_h264_enc_params params = {
@@ -1116,6 +1155,13 @@ static void cedrus_enc_test_job_plan(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, plan.emit_parameter_sets);
 	KUNIT_EXPECT_EQ(test, plan.parameter_sets.bit_count, (u16)176);
 	KUNIT_EXPECT_EQ(test, plan.slice_header.bit_count, (u16)78);
+	KUNIT_ASSERT_EQ(test, plan.output_prefixes.count, (u8)3);
+	KUNIT_EXPECT_EQ(test, plan.output_prefixes.entries[0].byte_offset,
+			(u16)0);
+	KUNIT_EXPECT_EQ(test, plan.output_prefixes.entries[1].byte_offset,
+			(u16)15);
+	KUNIT_EXPECT_EQ(test, plan.output_prefixes.entries[2].byte_offset,
+			(u16)22);
 	KUNIT_EXPECT_EQ(test, plan.dma.source.luma, (dma_addr_t)0x20000000);
 	KUNIT_EXPECT_EQ(test, plan.dma.source.chroma,
 			(dma_addr_t)0x20012c00);
@@ -1162,6 +1208,9 @@ static void cedrus_enc_test_job_plan(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, plan.emit_parameter_sets);
 	KUNIT_EXPECT_EQ(test, plan.parameter_sets.count, (u16)0);
 	KUNIT_EXPECT_EQ(test, plan.slice_header.bit_count, (u16)79);
+	KUNIT_ASSERT_EQ(test, plan.output_prefixes.count, (u8)1);
+	KUNIT_EXPECT_EQ(test, plan.output_prefixes.entries[0].byte_offset,
+			(u16)0);
 	KUNIT_EXPECT_EQ(test, plan.codec.picture_control, 0x00000510U);
 	KUNIT_EXPECT_EQ(test, plan.dma.reference.luma, 0x00220000U);
 	KUNIT_EXPECT_EQ(test, plan.dma.reconstruction.luma, 0x00220200U);
@@ -1835,6 +1884,7 @@ static struct kunit_case cedrus_enc_test_cases[] = {
 	KUNIT_CASE(cedrus_enc_test_idr_policy),
 	KUNIT_CASE(cedrus_enc_test_standard_controls),
 	KUNIT_CASE(cedrus_enc_test_stock_headers),
+	KUNIT_CASE(cedrus_enc_test_hardware_start_code_repair),
 	KUNIT_CASE(cedrus_enc_test_job_plan),
 	KUNIT_CASE(cedrus_enc_test_job_plan_fail_closed),
 	KUNIT_CASE(cedrus_enc_test_job_completion),

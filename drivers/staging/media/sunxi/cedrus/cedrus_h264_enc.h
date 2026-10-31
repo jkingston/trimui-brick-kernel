@@ -26,11 +26,26 @@ struct cedrus_h264_enc_params {
 	u32 gop_size;
 };
 
+#define CEDRUS_H264_ENC_MAX_PREFIXES 3
+
+struct cedrus_h264_enc_prefix {
+	u16 byte_offset;
+	u8 nal_header;
+};
+
+struct cedrus_h264_enc_prefix_map {
+	struct cedrus_h264_enc_prefix entries[CEDRUS_H264_ENC_MAX_PREFIXES];
+	u8 count;
+};
+
 int cedrus_h264_enc_controls_prepare(const struct cedrus_h264_enc_controls *controls,
 				     struct cedrus_h264_enc_params *params);
 
 int cedrus_h264_enc_headers(const struct cedrus_h264_enc_params *params,
 			    u32 width, u32 height, u8 *dst, size_t capacity,
 			    size_t *bytes_used);
+
+int cedrus_h264_enc_repair_start_codes(u8 *data, size_t bytes,
+				       const struct cedrus_h264_enc_prefix_map *prefixes);
 
 #endif /* _CEDRUS_H264_ENC_H_ */

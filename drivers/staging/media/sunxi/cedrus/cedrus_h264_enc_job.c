@@ -102,6 +102,35 @@ cedrus_a133_h264_dma_ranges_validate(const struct cedrus_a133_h264_job_buffers *
 	return 0;
 }
 
+static int
+cedrus_a133_h264_output_prefixes_append(struct cedrus_h264_enc_prefix_map *output,
+					const struct cedrus_a133_h264_vlc_sequence *sequence,
+					u16 base)
+{
+	unsigned int i;
+
+	if (!sequence->prefixes.count)
+		return -EINVAL;
+	for (i = 0; i < sequence->prefixes.count; i++) {
+		const struct cedrus_h264_enc_prefix *input =
+			&sequence->prefixes.entries[i];
+		u32 offset = (u32)base + input->byte_offset + i;
+
+		if (output->count == CEDRUS_H264_ENC_MAX_PREFIXES ||
+		    offset > U16_MAX ||
+		    (output->count && offset <=
+		     output->entries[output->count - 1].byte_offset))
+			return -EOVERFLOW;
+		output->entries[output->count++] =
+			(struct cedrus_h264_enc_prefix) {
+				.byte_offset = offset,
+				.nal_header = input->nal_header,
+			};
+	}
+
+	return 0;
+}
+
 int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_job_lifecycle *lifecycle,
 				      struct cedrus_a133_h264_enc_rotation *rotation,
 				      const struct cedrus_h264_enc_params *params,
@@ -199,6 +228,18 @@ int cedrus_a133_h264_job_plan_prepare(struct cedrus_a133_h264_job_lifecycle *lif
 	}
 	ret = cedrus_a133_h264_slice_header_prepare(params, &request->slice,
 						    &next.slice_header);
+	if (ret)
+		return ret;
+	if (next.emit_parameter_sets) {
+		ret = cedrus_a133_h264_output_prefixes_append(&next.output_prefixes,
+							      &next.parameter_sets, 0);
+		if (ret)
+			return ret;
+	}
+	ret = cedrus_a133_h264_output_prefixes_append(&next.output_prefixes,
+						      &next.slice_header,
+						      next.emit_parameter_sets ?
+						      next.parameter_sets.bit_count / 8 : 0);
 	if (ret)
 		return ret;
 

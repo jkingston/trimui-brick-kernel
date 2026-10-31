@@ -22,6 +22,50 @@
 #define CEDRUS_H264_MAX_DIMENSION	4096
 #define CEDRUS_H264_LEVEL_5_1_MAX_MBS	36864
 
+int cedrus_h264_enc_repair_start_codes(u8 *data, size_t bytes,
+				       const struct cedrus_h264_enc_prefix_map *prefixes)
+{
+	bool repair[CEDRUS_H264_ENC_MAX_PREFIXES] = {};
+	unsigned int i;
+
+	if (!data || !prefixes || !prefixes->count ||
+	    prefixes->count > CEDRUS_H264_ENC_MAX_PREFIXES)
+		return -EINVAL;
+
+	/* Validate every generated boundary before changing the capture buffer. */
+	for (i = 0; i < prefixes->count; i++) {
+		const struct cedrus_h264_enc_prefix *prefix = &prefixes->entries[i];
+		size_t offset = prefix->byte_offset;
+
+		if ((i && offset <= prefixes->entries[i - 1].byte_offset) ||
+		    offset > bytes || bytes - offset < 5)
+			return -EINVAL;
+		if (data[offset] || data[offset + 1])
+			return -EBADMSG;
+		if (!data[offset + 2] && data[offset + 3] == 1 &&
+		    data[offset + 4] == prefix->nal_header)
+			continue;
+		if (bytes - offset < 6)
+			return -EBADMSG;
+		if (!data[offset + 2] && !data[offset + 3] &&
+		    data[offset + 4] == 1 &&
+		    data[offset + 5] == prefix->nal_header)
+			continue;
+		if (data[offset + 2] != 3 || data[offset + 3] ||
+		    data[offset + 4] != 1 ||
+		    data[offset + 5] != prefix->nal_header)
+			return -EBADMSG;
+		repair[i] = true;
+	}
+
+	/* 00 00 00 00 01 is a valid length-preserving Annex-B prefix. */
+	for (i = 0; i < prefixes->count; i++)
+		if (repair[i])
+			data[prefixes->entries[i].byte_offset + 2] = 0;
+
+	return 0;
+}
+
 struct cedrus_h264_bit_writer {
 	u8 data[CEDRUS_H264_MAX_RBSP_SIZE];
 	size_t bitpos;
