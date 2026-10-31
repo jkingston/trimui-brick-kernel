@@ -4,19 +4,17 @@
 $id: http://devicetree.org/schemas/media/allwinner,sun50i-h6-vpu-g2.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Hantro G2 VPU codec implemented on Allwinner SoCs
+title: Hantro G2 VPU codec implemented on Allwinner H6 SoC
 
 maintainers:
   - Jernej Skrabec <jernej.skrabec@gmail.com>
 
 description:
-  Hantro G2 video decode accelerator present on Allwinner H6 and A133 SoCs.
+  Hantro G2 video decode accelerator present on Allwinner H6 SoC.
 
 properties:
   compatible:
-    enum:
-      - allwinner,sun50i-a133-vpu-g2
-      - allwinner,sun50i-h6-vpu-g2
+    const: allwinner,sun50i-h6-vpu-g2
 
   reg:
     maxItems: 1
@@ -25,19 +23,17 @@ properties:
     maxItems: 1
 
   clocks:
-    minItems: 2
-    maxItems: 3
+    items:
+      - description: Bus Clock
+      - description: Module Clock
 
   clock-names:
-    minItems: 2
-    maxItems: 3
+    items:
+      - const: bus
+      - const: mod
 
   resets:
     maxItems: 1
-
-  allwinner,video-engine-domain:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description: Shared clock and reset domain on A133
 
   iommus:
     maxItems: 1
@@ -46,35 +42,10 @@ required:
   - compatible
   - reg
   - interrupts
-
-allOf:
-  - if:
-      properties:
-        compatible:
-          const: allwinner,sun50i-a133-vpu-g2
-    then:
-      properties:
-        clocks: false
-        clock-names: false
-        resets: false
-        iommus: false
-      required:
-        - allwinner,video-engine-domain
-    else:
-      properties:
-        clocks:
-          items:
-            - description: Bus Clock
-            - description: Module Clock
-        clock-names:
-          items:
-            - const: bus
-            - const: mod
-      required:
-        - iommus
-        - clocks
-        - clock-names
-        - resets
+  - clocks
+  - clock-names
+  - resets
+  - iommus
 
 additionalProperties: false
 
