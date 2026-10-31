@@ -56,6 +56,6 @@ config VIDEO_SUNXI_CEDRUS_KUNIT_TEST
 	default KUNIT_ALL_TESTS
 	help
 	  Run tests for software-only Cedrus codec helpers. These tests do not
-	  access video-engine hardware. The suite verifies JPEG quantization
-	  table generation, the A133 hardware table representation, and the
-	  baseline JPEG header emitted for the encoder.
+	  access video-engine hardware. The suites verify H.265 entry-point
+	  validation, JPEG quantization table generation, the A133 hardware table
+	  representation, and the baseline JPEG header emitted for the encoder.

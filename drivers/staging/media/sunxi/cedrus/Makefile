@@ -11,4 +11,5 @@ sunxi-cedrus-$(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE) += cedrus_enc.o \
 		 cedrus_jpeg_enc_hw.o cedrus_jpeg_enc_job.o
 sunxi-cedrus-$(CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE_KUNIT_TEST) += \
 		 cedrus_enc_test.o
-sunxi-cedrus-$(CONFIG_VIDEO_SUNXI_CEDRUS_KUNIT_TEST) += cedrus_jpeg_test.o
+sunxi-cedrus-$(CONFIG_VIDEO_SUNXI_CEDRUS_KUNIT_TEST) += cedrus_jpeg_test.o \
+		 cedrus_h265_test.o

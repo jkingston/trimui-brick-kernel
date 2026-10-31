@@ -15,6 +15,7 @@
 #include <media/videobuf2-dma-contig.h>
 
 #include "cedrus.h"
+#include "cedrus_h265.h"
 #include "cedrus_hw.h"
 #include "cedrus_regs.h"
 
@@ -515,7 +516,8 @@ static int cedrus_h265_validate_slice(struct cedrus_run *run, size_t bytes)
 		return -EOPNOTSUPP;
 	if (bytes > GENMASK(29, 0) / 8 || slice->data_byte_offset > bytes)
 		return -EINVAL;
-	if (count != run->h265.entry_points_count)
+	if (!cedrus_h265_entry_points_match(count,
+					    run->h265.entry_points_count))
 		return -ERANGE;
 	if (count > CEDRUS_H265_ENTRY_POINTS_BUF_SIZE /
 	    ((pps->flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED) ? 4 : 16))

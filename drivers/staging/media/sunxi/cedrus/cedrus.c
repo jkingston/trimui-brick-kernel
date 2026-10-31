@@ -97,6 +97,10 @@ static const struct v4l2_ctrl_ops cedrus_ctrl_ops = {
 	.try_ctrl = cedrus_try_ctrl,
 };
 
+static const struct v4l2_ctrl_hevc_sps cedrus_hevc_sps_default = {
+	.chroma_format_idc = 1,
+};
+
 static const struct cedrus_control cedrus_controls[] = {
 	{
 		.cfg = {
@@ -191,6 +195,7 @@ static const struct cedrus_control cedrus_controls[] = {
 		.cfg = {
 			.id	= V4L2_CID_STATELESS_HEVC_SPS,
 			.ops	= &cedrus_ctrl_ops,
+			.p_def.p_const = &cedrus_hevc_sps_default,
 		},
 		.capabilities	= CEDRUS_CAPABILITY_H265_DEC,
 	},
