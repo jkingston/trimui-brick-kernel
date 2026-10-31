@@ -11,7 +11,6 @@
  */
 
 #include <linux/dma-buf.h>
-#include <linux/dma-resv.h>
 #include <linux/module.h>
 #include <linux/refcount.h>
 #include <linux/scatterlist.h>
@@ -39,9 +38,6 @@ struct vb2_dc_buf {
 	struct vb2_vmarea_handler	handler;
 	refcount_t			refcount;
 	struct sg_table			*sgt_base;
-	/* Every dma-buf export of this allocation shares one fence domain. */
-	struct dma_resv			resv;
-	bool				resv_initialized;
 
 	/* DMABUF related */
 	struct dma_buf_attachment	*db_attach;
@@ -188,7 +184,6 @@ static void vb2_dc_put(void *buf_priv)
 		dma_free_attrs(buf->dev, buf->size, buf->cookie,
 			       buf->dma_addr, buf->attrs);
 	}
-	dma_resv_fini(&buf->resv);
 	put_device(buf->dev);
 	kfree(buf);
 }
@@ -253,8 +248,6 @@ static void *vb2_dc_alloc(struct vb2_buffer *vb,
 	buf->non_coherent_mem = vb->vb2_queue->non_coherent_mem;
 
 	buf->size = size;
-	dma_resv_init(&buf->resv);
-	buf->resv_initialized = true;
 	/* Prevent the device from being released while the buffer is used */
 	buf->dev = get_device(dev);
 
@@ -266,7 +259,6 @@ static void *vb2_dc_alloc(struct vb2_buffer *vb,
 	if (ret) {
 		dev_err(dev, "dma alloc of size %lu failed\n", size);
 		put_device(buf->dev);
-		dma_resv_fini(&buf->resv);
 		kfree(buf);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -516,8 +508,6 @@ static struct dma_buf *vb2_dc_get_dmabuf(struct vb2_buffer *vb,
 	exp_info.size = buf->size;
 	exp_info.flags = flags;
 	exp_info.priv = buf;
-	/* Preserve synchronization across repeated exports of this allocation. */
-	exp_info.resv = &buf->resv;
 
 	if (!buf->sgt_base)
 		buf->sgt_base = vb2_dc_get_base_sgt(buf);
@@ -833,35 +823,6 @@ const struct vb2_mem_ops vb2_dma_contig_memops = {
 	.num_users	= vb2_dc_num_users,
 };
 EXPORT_SYMBOL_GPL(vb2_dma_contig_memops);
-
-/**
- * vb2_dma_contig_plane_resv() - return a plane's reservation object
- * @vb: videobuf2 buffer
- * @plane_no: plane number in @vb
- *
- * Imported planes use their dma-buf reservation. Native MMAP planes use the
- * persistent reservation shared by all dma-buf exports of their allocation.
- *
- * Return: The reservation object, or %NULL for an unsupported plane.
- */
-struct dma_resv *
-vb2_dma_contig_plane_resv(struct vb2_buffer *vb, unsigned int plane_no)
-{
-	struct vb2_plane *plane;
-	struct vb2_dc_buf *buf;
-
-	if (plane_no >= vb->num_planes)
-		return NULL;
-	plane = &vb->planes[plane_no];
-	if (plane->dbuf)
-		return plane->dbuf->resv;
-	buf = plane->mem_priv;
-	if (!buf || !buf->resv_initialized)
-		return NULL;
-
-	return &buf->resv;
-}
-EXPORT_SYMBOL_GPL(vb2_dma_contig_plane_resv);
 
 /**
  * vb2_dma_contig_set_max_seg_size() - configure DMA max segment size

@@ -116,13 +116,6 @@ struct rotate_ctx {
 	u32 hflip;
 	u32 vflip;
 	u32 rotate;
-	bool stopping;
-};
-
-struct g2d_dma_job {
-	struct dma_fence *fence;
-	struct dma_fence **dependencies;
-	unsigned int num_dependencies;
 };
 
 struct rotate_dev {
@@ -137,49 +130,19 @@ struct rotate_dev {
 	void __iomem		*base;
 	void __iomem		*top;
 	bool a133;
-	bool ready;
 	bool removing;
 	bool resume_failed;
-	bool quiescing;
-	bool mixer_job;
-	bool compose_active;
-	struct g2d_comp *compose;
 	struct kref ref;
 	int irq;
 	struct clk *mbus_clk;
 	struct completion complete;
 	struct work_struct work;
 	struct rotate_ctx *job;
-	u64 fence_context;
-	atomic64_t fence_seqno;
 
 	struct clk		*bus_clk;
 	struct clk		*mod_clk;
 
 	struct reset_control	*rstc;
 };
-
-struct rotate_format;
-
-void rotate_calc_addr_pitch(dma_addr_t buffer, u32 bytesperline, u32 height,
-			    const struct rotate_format *fmt, dma_addr_t *addr, u32 *pitch);
-
-void sun50i_g2d_mixer(struct rotate_ctx *ctx, dma_addr_t src, dma_addr_t dst);
-
-void rotate_a133_put(void *data);
-void rotate_a133_begin(struct rotate_dev *dev, bool mixer);
-enum vb2_buffer_state rotate_a133_wait(struct rotate_dev *dev);
-int sun50i_g2d_comp_register(struct rotate_dev *dev);
-void sun50i_g2d_comp_unregister(struct rotate_dev *dev);
-void sun50i_g2d_comp_pause(struct rotate_dev *dev, bool pause);
-
-int sun50i_g2d_dma_prepare(struct rotate_dev *dev,
-			   struct g2d_dma_job *job,
-			   struct vb2_buffer **buffers,
-			   unsigned int num_buffers,
-			   unsigned int write_index);
-int sun50i_g2d_dma_wait(struct g2d_dma_job *job,
-			bool (*cancelled)(void *data), void *data);
-void sun50i_g2d_dma_finish(struct g2d_dma_job *job, int error);
 
 #endif
