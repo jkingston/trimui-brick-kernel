@@ -91,8 +91,6 @@ static void hantro_job_finish(struct hantro_dev *vpu,
 			      enum vb2_buffer_state result)
 {
 	clk_bulk_disable(vpu->variant->num_clocks, vpu->clocks);
-	if (vpu->variant->job_release)
-		vpu->variant->job_release(vpu);
 	pm_runtime_put_autosuspend(vpu->dev);
 
 	hantro_job_finish_no_pm(vpu, ctx, result);
@@ -181,15 +179,9 @@ static void device_run(void *priv)
 	if (ret < 0)
 		goto err_cancel_job;
 
-	if (ctx->dev->variant->job_acquire) {
-		ret = ctx->dev->variant->job_acquire(ctx->dev);
-		if (ret)
-			goto err_pm;
-	}
-
 	ret = clk_bulk_enable(ctx->dev->variant->num_clocks, ctx->dev->clocks);
 	if (ret)
-		goto err_release;
+		goto err_pm;
 
 	v4l2_m2m_buf_copy_metadata(src, dst);
 
@@ -202,9 +194,6 @@ static void device_run(void *priv)
 
 err_clocks:
 	clk_bulk_disable(ctx->dev->variant->num_clocks, ctx->dev->clocks);
-err_release:
-	if (ctx->dev->variant->job_release)
-		ctx->dev->variant->job_release(ctx->dev);
 err_pm:
 	pm_runtime_put_autosuspend(ctx->dev->dev);
 err_cancel_job:
@@ -749,7 +738,6 @@ static const struct of_device_id of_hantro_match[] = {
 	{ .compatible = "microchip,sama5d4-vdec", .data = &sama5d4_vdec_variant, },
 #endif
 #ifdef CONFIG_VIDEO_HANTRO_SUNXI
-	{ .compatible = "allwinner,sun50i-a133-vpu-g2", .data = &sunxi_a133_vpu_variant, },
 	{ .compatible = "allwinner,sun50i-h6-vpu-g2", .data = &sunxi_vpu_variant, },
 #endif
 #ifdef CONFIG_VIDEO_HANTRO_STM32MP25
@@ -1128,13 +1116,10 @@ static int hantro_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&vpu->watchdog_work, hantro_watchdog);
 
-	if (vpu->variant->num_clocks) {
-		vpu->clocks = devm_kcalloc(&pdev->dev,
-					   vpu->variant->num_clocks,
-					   sizeof(*vpu->clocks), GFP_KERNEL);
-		if (!vpu->clocks)
-			return -ENOMEM;
-	}
+	vpu->clocks = devm_kcalloc(&pdev->dev, vpu->variant->num_clocks,
+				   sizeof(*vpu->clocks), GFP_KERNEL);
+	if (!vpu->clocks)
+		return -ENOMEM;
 
 	if (vpu->variant->num_clocks > 1) {
 		for (i = 0; i < vpu->variant->num_clocks; i++)
@@ -1144,7 +1129,7 @@ static int hantro_probe(struct platform_device *pdev)
 					vpu->clocks);
 		if (ret)
 			return ret;
-	} else if (vpu->variant->num_clocks == 1) {
+	} else {
 		/*
 		 * If the driver has a single clk, chances are there will be no
 		 * actual name in the DT bindings.

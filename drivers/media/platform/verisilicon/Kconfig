@@ -59,7 +59,7 @@ config VIDEO_HANTRO_SUNXI
 	depends on ARCH_SUNXI || COMPILE_TEST
 	default y
 	help
-	  Enable support for H6 and A133 SoCs.
+	  Enable support for H6 SoC.
 
 config VIDEO_HANTRO_STM32MP25
 	bool "Hantro STM32MP25 support"
