@@ -51,6 +51,7 @@ struct a133_ce {
 	struct clk_bulk_data clocks[3];
 	struct reset_control *reset;
 	struct mutex lifecycle;
+	struct mutex engine; /* Serializes transactions on the single CE. */
 	spinlock_t irq_lock;
 	struct ce_recovery recovery;
 	struct ce_flow flows[4];
@@ -287,6 +288,8 @@ static void ce_trng_work(struct work_struct *work)
 	bool release = true, prepared = false;
 	int ret;
 
+	/* Stock serializes every transaction across the single CE engine. */
+	mutex_lock(&ce->engine);
 	mutex_lock(&ce->lifecycle);
 	if (READ_ONCE(ce->suspending)) {
 		ret = -EAGAIN;
@@ -321,6 +324,7 @@ unlock:
 finish:
 	if (prepared && release)
 		memzero_explicit(s, sizeof(*s));
+	mutex_unlock(&ce->engine);
 	req->result = ret;
 	complete(&req->done);
 }
@@ -419,6 +423,8 @@ static void ce_work(struct work_struct *work)
 	bool release = true, prepared = false;
 	int ret;
 
+	/* The four flow IDs route completion; they are not four AES engines. */
+	mutex_lock(&ce->engine);
 	mutex_lock(&ce->lifecycle);
 	if (READ_ONCE(ce->suspending)) {
 		ret = -EAGAIN;
@@ -457,6 +463,7 @@ unlock:
 finish:
 	if (prepared && release)
 		memzero_explicit(s, sizeof(*s));
+	mutex_unlock(&ce->engine);
 	skcipher_request_complete(req, ret);
 }
 
@@ -654,6 +661,7 @@ static void ce_hash_work(struct work_struct *work)
 	bool release = true, prepared = false;
 	int ret;
 
+	mutex_lock(&ce->engine);
 	mutex_lock(&ce->lifecycle);
 	if (READ_ONCE(ce->suspending)) {
 		ret = -EAGAIN;
@@ -688,6 +696,7 @@ unlock:
 finish:
 	if (prepared && release)
 		memzero_explicit(s, sizeof(*s));
+	mutex_unlock(&ce->engine);
 	ahash_request_complete(req, ret);
 }
 
@@ -882,6 +891,7 @@ static int ce_probe(struct platform_device *pdev)
 	ce->dev = get_device(dev);
 	kref_init(&ce->refs);
 	mutex_init(&ce->lifecycle);
+	mutex_init(&ce->engine);
 	spin_lock_init(&ce->irq_lock);
 	ce->clocks[0].id = "bus";
 	ce->clocks[1].id = "mod";
