@@ -154,9 +154,10 @@ int cedrus_a133_jpeg_codec_prepare(unsigned int width,
 void cedrus_a133_jpeg_program_capture(void __iomem *base,
 				      const struct cedrus_jpeg_capture *capture)
 {
+	/* The A133 latches the write cursor before the capture window. */
+	writel(capture->offset, base + VE_ENC_AVC_BITSTREAM_OFFSET);
 	writel(capture->start, base + VE_ENC_AVC_BITSTREAM_START);
 	writel(capture->end, base + VE_ENC_AVC_BITSTREAM_END);
-	writel(capture->offset, base + VE_ENC_AVC_BITSTREAM_OFFSET);
 	writel(capture->limit, base + VE_ENC_AVC_BITSTREAM_LIMIT);
 }
 
