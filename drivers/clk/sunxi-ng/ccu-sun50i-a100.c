@@ -333,7 +333,7 @@ static SUNXI_CCU_M_WITH_MUX_GATE(g2d_clk, "g2d",
 				 0, 4,		/* M */
 				 24, 3,		/* mux */
 				 BIT(31),	/* gate */
-				 0);
+				 CLK_SET_RATE_NO_REPARENT);
 
 static SUNXI_CCU_GATE(bus_g2d_clk, "bus-g2d", "psi-ahb1-ahb2",
 		      0x63c, BIT(0), 0);
