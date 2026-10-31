@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/panic.h>
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/semaphore.h>
@@ -161,9 +162,25 @@ EXPORT_SYMBOL_GPL(sun50i_a133_ve_domain_acquire);
 void sun50i_a133_ve_domain_release(struct sun50i_a133_ve_domain *domain,
 				   struct device *owner)
 {
+	int ret;
+
 	if (WARN_ON(READ_ONCE(domain->owner) != owner))
 		return;
 
+	/*
+	 * Do not freeze an in-flight VE transaction behind a disabled clock.
+	 * The encoder completion interrupt can precede the final MBUS drain; if
+	 * the next owner enables the clocks after those DMA mappings have been
+	 * released, that stale transaction resumes against unmapped memory.
+	 *
+	 * Holding reset across the idle interval matches the standalone Cedrus
+	 * power lifecycle and guarantees that every next owner starts clean.
+	 */
+	ret = reset_control_assert(domain->reset);
+	if (ret)
+		panic("%s: failed to contain video-engine DMA: %d\n",
+		      dev_name(domain->dev), ret);
+	domain->needs_reset = true;
 	WRITE_ONCE(domain->owner, NULL);
 	clk_bulk_disable(ARRAY_SIZE(domain->clocks), domain->clocks);
 	up(&domain->available);

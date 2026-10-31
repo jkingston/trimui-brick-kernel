@@ -11,9 +11,9 @@ maintainers:
   - Jernej Skrabec <jernej.skrabec@gmail.com>
 
 description:
-  The A133 Cedrus and Hantro G2 decoder blocks share one module clock, bus
-  clock, memory-bus clock and reset line. This domain serializes ownership so
-  recovery of one decoder cannot reset an active peer.
+  The A133 video engine uses one module clock, bus clock, memory-bus clock and
+  reset line. This domain centralizes the Cedrus hardware lifecycle and holds
+  the engine in reset between transactions.
 
 properties:
   compatible:
