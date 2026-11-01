@@ -230,6 +230,14 @@
 	compatible = "allwinner,sun50i-a133-emmc";
 };
 
+&{/timer} {
+	arm,no-tick-in-suspend;
+};
+
+&r_ccu {
+	compatible = "allwinner,sun50i-a133-r-ccu";
+};
+
 &{/soc/watchdog@30090a0} {
 	compatible = "allwinner,sun50i-a133-wdt";
 };

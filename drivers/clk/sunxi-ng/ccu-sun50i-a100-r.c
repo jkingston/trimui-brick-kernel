@@ -5,6 +5,7 @@
 
 #include <linux/clk-provider.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 
 #include "ccu_common.h"
@@ -91,6 +92,8 @@ static const struct clk_parent_data clk_parent_r_apb2[] = {
 static SUNXI_CCU_GATE_DATA(r_apb1_timer_clk, "r-apb1-timer", clk_parent_r_apb1,
 			   0x11c, BIT(0), 0);
 
+static struct clk_init_data sun50i_a133_r_apb1_timer_init;
+
 static SUNXI_CCU_GATE_DATA(r_apb1_twd_clk, "r-apb1-twd", clk_parent_r_apb1,
 			   0x12c, BIT(0), 0);
 
@@ -107,6 +110,8 @@ static SUNXI_CCU_GATE_DATA(r_apb1_ppu_clk, "r-apb1-ppu", clk_parent_r_apb1,
 
 static SUNXI_CCU_GATE_DATA(r_apb2_uart_clk, "r-apb2-uart", clk_parent_r_apb2,
 			   0x18c, BIT(0), 0);
+
+static struct clk_init_data sun50i_a133_r_apb2_uart_init;
 
 static SUNXI_CCU_GATE_DATA(r_apb2_i2c0_clk, "r-apb2-i2c0", clk_parent_r_apb2,
 			   0x19c, BIT(0), 0);
@@ -197,6 +202,19 @@ static int sun50i_a100_r_ccu_probe(struct platform_device *pdev)
 	if (IS_ERR(reg))
 		return PTR_ERR(reg);
 
+	if (of_device_is_compatible(pdev->dev.of_node,
+				    "allwinner,sun50i-a133-r-ccu")) {
+		/* The vendor SCP uses R_TIMER0 while the application CPUs sleep. */
+		sun50i_a133_r_apb1_timer_init = *r_apb1_timer_clk.common.hw.init;
+		sun50i_a133_r_apb1_timer_init.flags |= CLK_IS_CRITICAL;
+		r_apb1_timer_clk.common.hw.init = &sun50i_a133_r_apb1_timer_init;
+
+		/* It also waits for the R_UART transmit FIFO before power-down. */
+		sun50i_a133_r_apb2_uart_init = *r_apb2_uart_clk.common.hw.init;
+		sun50i_a133_r_apb2_uart_init.flags |= CLK_IS_CRITICAL;
+		r_apb2_uart_clk.common.hw.init = &sun50i_a133_r_apb2_uart_init;
+	}
+
 	ret = devm_sunxi_ccu_probe(&pdev->dev, reg, &sun50i_a100_r_ccu_desc);
 	if (ret)
 		return ret;
@@ -206,6 +224,7 @@ static int sun50i_a100_r_ccu_probe(struct platform_device *pdev)
 
 static const struct of_device_id sun50i_a100_r_ccu_ids[] = {
 	{ .compatible = "allwinner,sun50i-a100-r-ccu" },
+	{ .compatible = "allwinner,sun50i-a133-r-ccu" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sun50i_a100_r_ccu_ids);
