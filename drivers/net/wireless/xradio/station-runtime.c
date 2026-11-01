@@ -757,7 +757,7 @@ int xrs_runtime_confirm(struct xradio_common *hw,int id,const u8 *data,size_t si
  }
  if(credits) {
   wsm_release_tx_buffer(hw,credits);
-  dev_info_ratelimited(hw->pdev,"XR829 TX confirmations%u unique-credits%d status%u\n",count,credits,confirm[0].status);
+  dev_dbg_ratelimited(hw->pdev,"XR829 TX confirmations%u unique-credits%d status%u\n",count,credits,confirm[0].status);
  }
  for(k=0;k<XRS_SLOTS;k++)if(completed & BIT(k))report_slot(s,k,!!(acked & BIT(k)));
  return 0;
