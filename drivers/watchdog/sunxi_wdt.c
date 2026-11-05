@@ -21,6 +21,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/types.h>
+#include <linux/stringify.h>
 #include <linux/watchdog.h>
 
 #define WDT_MAX_TIMEOUT         16
@@ -401,7 +402,7 @@ MODULE_PARM_DESC(timeout, "Watchdog heartbeat in seconds");
 
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started "
-		"(default=" __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+		"(default=" __stringify(WATCHDOG_NOWAYOUT) ")");
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Carlo Caione <carlo.caione@gmail.com>");
