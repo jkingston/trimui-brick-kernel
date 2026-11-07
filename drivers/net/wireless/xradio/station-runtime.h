@@ -18,6 +18,9 @@ void xrs_runtime_new_epoch(struct xradio_common *hw);
 int xrs_runtime_add_address(struct xradio_common *hw,const u8 *address);
 void xrs_runtime_remove_address(struct xradio_common *hw);
 void xrs_runtime_pm_complete(struct xradio_common *hw);
+void xrs_runtime_wup_wake(struct xradio_common *hw, unsigned int elapsed_ms,
+			  int error);
+void xrs_runtime_wup_sleep(struct xradio_common *hw, int error);
 void xrs_runtime_stop(struct xradio_common *hw);
 void xrs_runtime_tx(struct xradio_common *hw, struct ieee80211_sta *sta, struct sk_buff *skb);
 int xrs_runtime_get_tx(struct xradio_common *hw, u8 **data, size_t *len);
@@ -31,8 +34,13 @@ void xrs_bss_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 int xrs_runtime_config(struct xradio_common *hw,u32 changed);
 int xrs_get_txpower(struct ieee80211_hw *,struct ieee80211_vif *,unsigned int,int *);
 bool xrs_runtime_joined(struct xradio_common *hw);
+bool xrs_runtime_associated(struct xradio_common *hw);
+bool xrs_runtime_join_stalled(struct xradio_common *hw);
+int xrs_runtime_confirmed_power(struct xradio_common *hw);
 int xrs_set_key(struct ieee80211_hw *,enum set_key_cmd,struct ieee80211_vif *,
                 struct ieee80211_sta *,struct ieee80211_key_conf *);
 int xrs_conf_tx(struct ieee80211_hw *,struct ieee80211_vif *,unsigned int,u16,
                 const struct ieee80211_tx_queue_params *);
+void xrs_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+	       u32 queues, bool drop);
 #endif

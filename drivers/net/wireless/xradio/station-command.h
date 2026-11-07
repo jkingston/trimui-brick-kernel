@@ -29,7 +29,8 @@ static inline int xrs_command_allowed(u16 cmd,const u8 *data,size_t size,int sta
 {
  u16 mib,length;
  if(size<4)return 0;
- if(cmd==7)return xrs_scan_command_valid(data,size) && (station || !data[12]);
+ if(cmd==7)return xrs_scan_command_valid(data,size) &&
+                  (station || (!data[12] && !data[5]));
  if(cmd==9)return size==772;
  if(station) {
   /* VIF0 RESET, preserve statistics; reject link IDs and reserved bits. */
@@ -38,6 +39,14 @@ static inline int xrs_command_allowed(u16 cmd,const u8 *data,size_t size,int sta
   if(cmd==0x0011)return size==12;
   if(cmd==0x0012)return size==16;
   if(cmd==0x0013)return size==48;
+  /* SET_PM: exact four-byte modes emitted by xrs_ps_encode(). */
+  if(cmd==0x0010) {
+   if(size!=8 || data[7])return 0;
+   if(!data[4])return !data[5] && !data[6];
+   if(data[6]!=200)return 0;
+   if(data[4]==1)return !data[5];
+   return data[4]==0x81 && data[5];
+  }
  }
  if(cmd!=6 || size<8)return 0;
  mib=xrw_get16(data+4);length=xrw_get16(data+6);

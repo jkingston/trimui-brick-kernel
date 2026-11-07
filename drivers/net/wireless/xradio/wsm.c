@@ -295,9 +295,15 @@ int wsm_scan(struct xradio_common *hw_priv, const struct wsm_scan *arg,
 {
 	int i;
 	int ret;
+	bool background;
 	struct wsm_buf *buf = &hw_priv->wsm_cmd_buf;
 
- if (if_id || arg->scanFlags || arg->scanType || arg->band ||
+ background = arg->scanType == WSM_SCAN_TYPE_BACKGROUND &&
+              arg->scanFlags == WSM_SCAN_FLAG_FORCE_BACKGROUND;
+ if (if_id ||
+     ((arg->scanType || arg->scanFlags) && !background) ||
+     (background && (!xrs_runtime_joined(hw_priv) ||
+                     !xrs_runtime_associated(hw_priv))) || arg->band ||
      arg->autoScanInterval || !arg->ch || !arg->numOfChannels ||
      arg->numOfChannels>14 || arg->numOfSSIDs>2 ||
      (arg->maxTransmitRate!=0 && arg->maxTransmitRate!=6) ||
@@ -820,9 +826,16 @@ int wsm_handle_rx(struct xradio_common *hw, int id,
  case 0x0801:
   return wsm_startup_indication(hw, &buf);
  case 0x0804:
-  if (xrs_runtime_joined(hw))
+  if (xrs_runtime_joined(hw)) {
+   /* During firmware background scan, publish beacon/probe-response copies
+    * to the scan cache without decoding the same off-channel copy as
+    * ordinary station traffic. */
+   if (xr829_scan_rx(hw, buf.data, buf.end - buf.data))
+    return 0;
    return xrs_runtime_rx(hw, buf.data, buf.end - buf.data);
-  return xr829_scan_rx(hw, buf.data, buf.end - buf.data);
+  }
+  xr829_scan_rx(hw, buf.data, buf.end - buf.data);
+  return 0;
 	case 0x0809:
 		if (!interface_link_id)
 			xrs_runtime_pm_complete(hw);

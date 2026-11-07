@@ -24,6 +24,10 @@
 bool allow_ht = true;
 module_param(allow_ht,bool,0400);
 MODULE_PARM_DESC(allow_ht, "Enable single-stream HT20 long-GI station mode");
+static unsigned int join_timeout_ms;
+module_param(join_timeout_ms, uint, 0400);
+MODULE_PARM_DESC(join_timeout_ms,
+		 "recover firmware if JOIN has not associated by this deadline (0 disables)");
 const bool allow_station = true;
 #define XRS_SLOTS 16
 #define XRS_BUS_BUFFER 4096
@@ -33,6 +37,16 @@ struct xrs_runtime {
  u64 policy_uploads,policy_hits,policy_waits,protection_requests;
  u64 rate_attempts[28],rate_success[28],feedback_rejected,feedback_success_no_rate;
  u64 tx_queued[4],tx_acked[4],tx_failed[4],tx_tid[8],rx_tid[8];
+	u64 departure_queued, departure_confirmed, departure_acked;
+	u64 join_stall_recoveries;
+	u32 departure_last_status, departure_last_latency_ms;
+	u8 departure_last_subtype;
+	u64 pm_requests, pm_indications, pm_successes, pm_failures, pm_total_ms;
+	u32 pm_last_ms;
+	u64 wup_wake_requests, wup_wake_failures, wup_wake_total_ms;
+	u64 wup_sleep_entries, wup_sleep_failures;
+	u8 pm_last[4];
+	unsigned long pm_started;
  spinlock_t lock;
  struct mutex bus_lock; /* held across get_tx -> SDIO write -> written */
  struct mutex control_lock;
@@ -48,6 +62,8 @@ struct xrs_runtime {
  struct sk_buff *skb[XRS_SLOTS];
  struct xrs_tx_confirm feedback[XRS_SLOTS];
  bool feedback_valid[XRS_SLOTS];
+	u8 departure_subtype[XRS_SLOTS];
+	unsigned long departure_started[XRS_SLOTS];
  u8 *wire[XRS_SLOTS];
  size_t length[XRS_SLOTS];
  bool credit[XRS_SLOTS], acked[XRS_SLOTS], poisoned, joined, associated;
@@ -59,6 +75,7 @@ struct xrs_runtime {
  bool keychanging,closing,powerchanging;
  int power_min,power_max,power_confirmed,bss_power;
  unsigned long long next_key_owner;
+	unsigned long joined_at;
  unsigned int rx_reject_reports, rx_beacon_reports;
  u32 enqueue_order;
  unsigned int next_slot;
@@ -76,6 +93,15 @@ static int xrs_stats_show(struct seq_file *file,void *unused)
 {
  struct xrs_runtime *s=file->private;unsigned long flags;
  u64 queued[4],acked[4],failed[4],tx_tid[8],rx_tid[8],uploads,hits,waits;
+	u64 departure_queued,departure_confirmed,departure_acked;
+	u64 join_stall_recoveries;
+	u32 departure_last_status,departure_last_latency_ms;
+	u8 departure_last_subtype;
+ u64 pm_requests,pm_indications,pm_successes,pm_failures,pm_total_ms;
+ u32 pm_last_ms;
+ u64 wup_wake_requests,wup_wake_failures,wup_wake_total_ms;
+ u64 wup_sleep_entries,wup_sleep_failures;
+ u8 pm_last[4];
  unsigned int i,refs=0,ready=0;u64 attempts[28],success[28],rejected,protection,no_rate;
  spin_lock_irqsave(&s->lock,flags);
  memcpy(queued,s->tx_queued,sizeof(queued));memcpy(acked,s->tx_acked,sizeof(acked));
@@ -84,13 +110,44 @@ static int xrs_stats_show(struct seq_file *file,void *unused)
  memcpy(attempts,s->rate_attempts,sizeof(attempts));memcpy(success,s->rate_success,sizeof(success));
  rejected=s->feedback_rejected;protection=s->protection_requests;
  no_rate=s->feedback_success_no_rate;
+	departure_queued=s->departure_queued;
+	departure_confirmed=s->departure_confirmed;
+	departure_acked=s->departure_acked;
+	departure_last_status=s->departure_last_status;
+	departure_last_latency_ms=s->departure_last_latency_ms;
+	departure_last_subtype=s->departure_last_subtype;
+	join_stall_recoveries=s->join_stall_recoveries;
  uploads=s->policy_uploads;hits=s->policy_hits;waits=s->policy_waits;
+ pm_requests=s->pm_requests;pm_indications=s->pm_indications;
+ pm_successes=s->pm_successes;pm_failures=s->pm_failures;
+ pm_total_ms=s->pm_total_ms;pm_last_ms=s->pm_last_ms;
+ memcpy(pm_last,s->pm_last,sizeof(pm_last));
+ wup_wake_requests=s->wup_wake_requests;
+ wup_wake_failures=s->wup_wake_failures;
+ wup_wake_total_ms=s->wup_wake_total_ms;
+ wup_sleep_entries=s->wup_sleep_entries;
+ wup_sleep_failures=s->wup_sleep_failures;
  for(i=0;i<XPC_SLOTS;i++) {refs+=s->policies.slots[i].refs;ready+=s->policies.slots[i].state==XPC_READY;}
  spin_unlock_irqrestore(&s->lock,flags);
  seq_printf(file,"policy uploads=%llu hits=%llu capacity_waits=%llu refs=%u ready_slots=%u\n",
             uploads,hits,waits,refs,ready);
  seq_printf(file,"validated_feedback_rejected=%llu per_rate_protection_requests=%llu\n",rejected,protection);
  seq_printf(file,"firmware_success_without_rate=%llu\n",no_rate);
+ seq_printf(file,
+  "pm requests=%llu indications=%llu successes=%llu failures=%llu indication_last_ms=%u indication_total_ms=%llu last=%02x,%02x,%02x,%02x\n",
+  pm_requests,pm_indications,pm_successes,pm_failures,
+  pm_last_ms,pm_total_ms,
+  pm_last[0],pm_last[1],pm_last[2],pm_last[3]);
+ seq_printf(file,
+  "sdio_wup wake_requests=%llu wake_failures=%llu wake_total_ms=%llu sleep_entries=%llu sleep_failures=%llu\n",
+  wup_wake_requests,wup_wake_failures,wup_wake_total_ms,
+  wup_sleep_entries,wup_sleep_failures);
+	seq_printf(file,
+	 "departure queued=%llu firmware_confirmed=%llu acked=%llu last_subtype=%02x last_status=%u last_latency_ms=%u\n",
+	 departure_queued,departure_confirmed,departure_acked,
+	 departure_last_subtype,departure_last_status,departure_last_latency_ms);
+	seq_printf(file, "join deadline_ms=%u stall_recoveries=%llu\n",
+		   join_timeout_ms, join_stall_recoveries);
  seq_puts(file,"rate attempts successes (0..11=legacy;12..19=HT20LGI;20..27=HT20SGI)\n");
  for(i=0;i<28;i++)if(attempts[i])seq_printf(file,"%u %llu %llu\n",i,attempts[i],success[i]);
  seq_puts(file,"ac queued acked failed (0=VO 1=VI 2=BE 3=BK)\n");
@@ -144,6 +201,17 @@ static void report_slot(struct xrs_runtime *s, unsigned int i, bool acked)
  s->feedback_valid[i]=false;
  if(acked)s->tx_acked[(s->slots[i].cookie>>16)&3]++;
  else s->tx_failed[(s->slots[i].cookie>>16)&3]++;
+	if (s->departure_subtype[i]) {
+		s->departure_last_subtype = s->departure_subtype[i];
+		s->departure_last_status = s->slots[i].status;
+		s->departure_last_latency_ms = jiffies_to_msecs(jiffies -
+							 s->departure_started[i]);
+		if (s->slots[i].confirmed)
+			s->departure_confirmed++;
+		if (acked)
+			s->departure_acked++;
+		s->departure_subtype[i] = 0;
+	}
  if(s->policy_held[i]) {xpc_release(&s->policies,s->policy_lease[i]);s->policy_held[i]=false;}
  s->policy_ready[i]=false;
  xrs_tx_released(&s->slots[i]);
@@ -260,8 +328,42 @@ void xrs_runtime_pm_complete(struct xradio_common *hw)
 	if (!s)
 		return;
 	spin_lock_irqsave(&s->lock, flags);
+	s->pm_indications++;
+	s->pm_last_ms = jiffies_to_msecs(jiffies - s->pm_started);
+	s->pm_total_ms += s->pm_last_ms;
 	if (xrs_ps_indicate(&s->ps))
 		complete(&s->pm_done);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+void xrs_runtime_wup_wake(struct xradio_common *hw, unsigned int elapsed_ms,
+			  int error)
+{
+	struct xrs_runtime *s = hw->station;
+	unsigned long flags;
+
+	if (!s)
+		return;
+	spin_lock_irqsave(&s->lock, flags);
+	s->wup_wake_requests++;
+	s->wup_wake_total_ms += elapsed_ms;
+	if (error)
+		s->wup_wake_failures++;
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+void xrs_runtime_wup_sleep(struct xradio_common *hw, int error)
+{
+	struct xrs_runtime *s = hw->station;
+	unsigned long flags;
+
+	if (!s)
+		return;
+	spin_lock_irqsave(&s->lock, flags);
+	if (error)
+		s->wup_sleep_failures++;
+	else
+		s->wup_sleep_entries++;
 	spin_unlock_irqrestore(&s->lock, flags);
 }
 
@@ -287,6 +389,11 @@ static int station_ps_update(struct xrs_runtime *s, bool enabled, int timeout_ms
 	spin_unlock_irqrestore(&s->lock, flags);
 	if (ret <= 0)
 		return ret;
+	spin_lock_irqsave(&s->lock, flags);
+	s->pm_requests++;
+	memcpy(s->pm_last, wire, sizeof(s->pm_last));
+	s->pm_started = jiffies;
+	spin_unlock_irqrestore(&s->lock, flags);
 	pm.pmMode = wire[0];
 	pm.fastPsmIdlePeriod = wire[1];
 	pm.apPsmChangePeriod = wire[2];
@@ -298,6 +405,10 @@ static int station_ps_update(struct xrs_runtime *s, bool enabled, int timeout_ms
 		ret = -EIO;
 	spin_lock_irqsave(&s->lock, flags);
 	ret = xrs_ps_finish(&s->ps, ret);
+	if (ret)
+		s->pm_failures++;
+	else
+		s->pm_successes++;
 	if (ret) {
 		s->poisoned = true;
 		WRITE_ONCE(hw->bh_error, 1);
@@ -425,6 +536,32 @@ bool xrs_runtime_joined(struct xradio_common *hw)
 {
  return hw->station && smp_load_acquire(&hw->station->joined);
 }
+bool xrs_runtime_associated(struct xradio_common *hw)
+{
+ return hw->station && smp_load_acquire(&hw->station->associated);
+}
+bool xrs_runtime_join_stalled(struct xradio_common *hw)
+{
+	struct xrs_runtime *s = hw->station;
+	unsigned long flags;
+	bool stalled = false;
+
+	if (!s || !join_timeout_ms)
+		return false;
+	spin_lock_irqsave(&s->lock, flags);
+	if (s->joined && !s->associated)
+		stalled = time_after_eq(jiffies, s->joined_at +
+					msecs_to_jiffies(join_timeout_ms));
+	if (stalled)
+		s->join_stall_recoveries++;
+	spin_unlock_irqrestore(&s->lock, flags);
+	return stalled;
+}
+int xrs_runtime_confirmed_power(struct xradio_common *hw)
+{
+ return xrs_runtime_associated(hw) ? READ_ONCE(hw->station->power_confirmed) :
+                                     INT_MIN;
+}
 
 /* control_lock held. Block new host frames across the confirmed power MIB.
  * Already submitted firmware frames cannot be recalled by this command. */
@@ -508,9 +645,8 @@ int xrs_runtime_config(struct xradio_common *hw, u32 changed)
 	if (s->joined &&
 	    (changed & (IEEE80211_CONF_CHANGE_POWER | IEEE80211_CONF_CHANGE_CHANNEL)))
 		ret = station_power_update(s, hw->hw->conf.power_level);
-	if (!ret && s->associated && (changed & IEEE80211_CONF_CHANGE_PS))
-		ret = station_ps_update(s, hw->hw->conf.flags & IEEE80211_CONF_PS,
-					hw->hw->conf.dynamic_ps_timeout);
+	/* With SUPPORTS_DYNAMIC_PS, config(CHANGE_PS) only publishes timeout
+	 * changes.  The actual per-VIF state arrives via BSS_CHANGED_PS. */
 	mutex_unlock(&s->control_lock);
 	return ret;
 }
@@ -523,6 +659,7 @@ void xrs_runtime_tx(struct xradio_common *hw,struct ieee80211_sta *sta,struct sk
  bool protected,rollover=false;
  struct xrs_policy_rate chain[XRS_SELECTED_RATES]={0};unsigned int rate_count=0;
  struct xpc_key policy;bool data_frame=false,protection_requested=false;
+	u8 departure_subtype=0;
  struct xrs_tx tx={.rate=7,.queue=0,.priority=5,.policy=0};
  if(!s || READ_ONCE(hw->recovery_state)!=XRS_RUNNING ||
     !smp_load_acquire(&s->joined) || READ_ONCE(s->poisoned)) goto drop;
@@ -584,6 +721,8 @@ void xrs_runtime_tx(struct xradio_common *hw,struct ieee80211_sta *sta,struct sk
   } else {
    if(subtype!=0 && subtype!=0x20 && subtype!=0xb0 && subtype!=0xa0 && subtype!=0xc0)goto drop;
    if(memcmp(skb->data+4,s->settings.bssid,6))goto drop;
+	if (subtype == 0xa0 || subtype == 0xc0)
+		departure_subtype = subtype;
   }
  } else goto drop;
  wire=kzalloc(XRS_BUS_BUFFER,GFP_ATOMIC);if(!wire)goto drop;
@@ -617,6 +756,11 @@ void xrs_runtime_tx(struct xradio_common *hw,struct ieee80211_sta *sta,struct sk
  s->tx_queued[ac]++;
  if((skb->data[0]&0xfc)==0x88)s->tx_tid[skb->data[24]&7]++;
  s->feedback_valid[i]=false;s->skb[i]=skb;s->wire[i]=wire;s->length[i]=n;s->credit[i]=false;s->acked[i]=false;
+	if (departure_subtype) {
+		s->departure_subtype[i] = departure_subtype;
+		s->departure_started[i] = jiffies;
+		s->departure_queued++;
+	}
  s->slots[i].queued_at=jiffies;
  {
   unsigned int free_slot;
@@ -955,7 +1099,11 @@ static int station_join(struct xradio_common *hw,struct ieee80211_vif *vif,
  ret=wsm_set_output_power(hw,power,0);if(ret)return ret;
  s->power_min=join.minPowerLevel;s->power_max=join.maxPowerLevel;
  s->power_confirmed=power;s->bss_power=vif->bss_conf.txpower;
- s->settings=settings;smp_store_release(&s->joined,true);
+	spin_lock_irqsave(&s->lock, flags);
+	s->settings = settings;
+	s->joined_at = jiffies;
+	smp_store_release(&s->joined, true);
+	spin_unlock_irqrestore(&s->lock, flags);
  dev_info(hw->pdev,"XR829 joined BSS on channel%u at%d/10dBm; management TX enabled\n",
           settings.channel,power);
  return 0;
@@ -993,6 +1141,21 @@ void xrs_bss_changed(struct ieee80211_hw *dev,struct ieee80211_vif *vif,
   mutex_unlock(&s->control_lock);
   if(ret) {ieee80211_connection_loss(vif);return;}
  }
+	/* SUPPORTS_DYNAMIC_PS publishes user policy through vif->cfg.ps and
+	 * BSS_CHANGED_PS; hw->conf.flags is reserved for mac80211-managed PS. */
+	if (s && (changed & BSS_CHANGED_PS) &&
+	    !(changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_HT |
+			 BSS_CHANGED_ERP_PREAMBLE | BSS_CHANGED_ERP_SLOT |
+			 BSS_CHANGED_BEACON_INFO))) {
+		mutex_lock(&s->control_lock);
+		if (s->associated)
+			ret = station_ps_update(s, vif->cfg.ps,
+						dev->conf.dynamic_ps_timeout);
+		mutex_unlock(&s->control_lock);
+		if (ret)
+			ieee80211_connection_loss(vif);
+		return;
+	}
 	if (!s || !(changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_HT |
 			       BSS_CHANGED_ERP_PREAMBLE | BSS_CHANGED_ERP_SLOT |
 			       BSS_CHANGED_BEACON_INFO)))
@@ -1038,7 +1201,7 @@ void xrs_bss_changed(struct ieee80211_hw *dev,struct ieee80211_vif *vif,
 					   1 : s->settings.dtim, 0, 0);
 	if (ret)
 		goto out;
-	ret = station_ps_update(s, dev->conf.flags & IEEE80211_CONF_PS,
+	ret = station_ps_update(s, vif->cfg.ps,
 				dev->conf.dynamic_ps_timeout);
 	if (ret)
 		goto out;
@@ -1112,6 +1275,57 @@ static int station_key_drain(struct xrs_runtime *s)
   msleep(1);
  }
 }
+
+void xrs_flush(struct ieee80211_hw *dev, struct ieee80211_vif *vif,
+	       u32 queues, bool drop)
+{
+	struct xradio_common *hw = dev->priv;
+	struct xrs_runtime *s = hw->station;
+	unsigned long flags;
+	bool wake = false;
+	int ret = 0;
+
+	/*
+	 * mac80211 has already purged its TXQs when drop is true. Firmware-owned
+	 * slots cannot be revoked safely, so wait for their confirmations in both
+	 * modes. In particular, the second, non-dropping MLME flush fences the
+	 * departure frame before BSS_CHANGED_ASSOC resets the firmware station.
+	 */
+	if (!s || (vif && vif->type != NL80211_IFTYPE_STATION))
+		return;
+	mutex_lock(&s->control_lock);
+	if (!s->joined || s->closing)
+		goto out;
+	if (s->poisoned || READ_ONCE(hw->bh_error)) {
+		ret = -EIO;
+		goto failed;
+	}
+	ret = station_key_drain(s);
+	if (ret)
+		goto failed;
+	spin_lock_irqsave(&s->lock, flags);
+	s->keychanging = false;
+	wake = s->joined && !s->closing && !s->powerchanging &&
+	       READ_ONCE(hw->recovery_state) == XRS_RUNNING;
+	spin_unlock_irqrestore(&s->lock, flags);
+	goto out;
+failed:
+	spin_lock_irqsave(&s->lock, flags);
+	s->poisoned = true;
+	s->policies.poisoned = true;
+	WRITE_ONCE(hw->bh_error, 1);
+	spin_unlock_irqrestore(&s->lock, flags);
+	ieee80211_stop_queues(dev);
+	dev_err(hw->pdev, "XR829 TX flush failed %d (queues %#x, drop %u)\n",
+		ret, queues, drop);
+out:
+	mutex_unlock(&s->control_lock);
+	if (wake) {
+		ieee80211_wake_queues(dev);
+		xradio_bh_wakeup(hw);
+	}
+}
+
 static int station_key_send(void *context,u16 command,const u8 *payload,size_t size)
 {
  return wsm_station_key_command(context,command,payload,size);
