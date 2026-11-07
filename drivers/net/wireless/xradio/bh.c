@@ -373,12 +373,16 @@ static int xradio_device_wakeup(struct xradio_common *hw_priv)
 
 	/* To force the device to be always-on, the host sets WLAN_UP to 1 */
 	ret = xradio_reg_write_16(hw_priv, HIF_CONTROL_REG_ID, HIF_CTRL_WUP_BIT);
-	if (WARN_ON(ret))
+	if (WARN_ON(ret)) {
+		xrs_runtime_wup_wake(hw_priv, 0, ret);
 		return ret;
+	}
 
 	ret = xradio_bh_read_ctrl_reg(hw_priv, &ctrl_reg);
-	if (WARN_ON(ret))
+	if (WARN_ON(ret)) {
+		xrs_runtime_wup_wake(hw_priv, 0, ret);
 		return ret;
+	}
 
 	/* If the device returns WLAN_RDY as 1, the device is active and will
 	 * remain active. */
@@ -388,10 +392,12 @@ static int xradio_device_wakeup(struct xradio_common *hw_priv)
 		i++;
 	}
 	if (unlikely(i >= 500)) {
+		xrs_runtime_wup_wake(hw_priv, i, -ETIMEDOUT);
 		dev_err(hw_priv->pdev, "Device cannot wakeup.\n");
 		return -1;
 	} else if (unlikely(i >= 50))
 		dev_warn(hw_priv->pdev, "Device wakeup time=%dms.\n", i);
+	xrs_runtime_wup_wake(hw_priv, i, 0);
 	dev_dbg(hw_priv->pdev, "Device awake, t=%dms.\n", i);
 	return 1;
 }
@@ -814,8 +820,12 @@ static int xradio_bh(void *arg)
 			if (hw_priv->powersave_enabled) {
 				dev_dbg(hw_priv->pdev,
 						"Device idle(host suspend), can sleep.\n");
-				WARN_ON(xradio_reg_write_16(hw_priv, HIF_CONTROL_REG_ID, 0));
-				hw_priv->device_can_sleep = true;
+				int sleep_ret = xradio_reg_write_16(hw_priv,
+					HIF_CONTROL_REG_ID, 0);
+
+				xrs_runtime_wup_sleep(hw_priv, sleep_ret);
+				if (!WARN_ON(sleep_ret))
+					hw_priv->device_can_sleep = true;
 			}
 
 			/* bh thread go to suspend. */

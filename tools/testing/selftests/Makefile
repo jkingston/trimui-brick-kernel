@@ -146,6 +146,7 @@ TARGETS += mm
 TARGETS += vfio
 TARGETS += x86
 TARGETS += x86/bugs
+TARGETS += xradio
 TARGETS += zram
 #Please keep the TARGETS list alphabetically sorted
 # Run "make quicktest=1 run_tests" or

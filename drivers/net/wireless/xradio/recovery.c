@@ -188,6 +188,12 @@ static void recovery_health(struct work_struct *work)
  if(READ_ONCE(hw->recovery_state)==XRS_RUNNING &&
     (READ_ONCE(hw->bh_error) || xr829_scan_poisoned(hw)))
   xrs_recovery_request(hw);
+	else if (READ_ONCE(hw->recovery_state) == XRS_RUNNING &&
+		 xrs_runtime_join_stalled(hw)) {
+		dev_warn(hw->pdev,
+			 "XR829 JOIN did not associate by its deadline; starting fresh firmware epoch\n");
+		xrs_recovery_request(hw);
+	}
  xrs_recovery_monitor(hw);
 }
 void xrs_recovery_monitor(struct xradio_common *hw)

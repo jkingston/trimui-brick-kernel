@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Owned foreground scan requests with serialized firmware batches. */
+/* Owned foreground/background scan requests with serialized firmware batches. */
 #include <linux/firmware.h>
 #include <linux/rtnetlink.h>
 #include "xradio.h"
@@ -20,8 +20,16 @@ struct xr829_scan_request {
  struct wsm_ssid ssids[XRS_SCAN_SSIDS];
  struct sk_buff *probe;
  u8 batch, n_ssids, rate;
+ bool background;
  int requested_power; /* accepted under wiphy mutex; invalidation aborts it */
 };
+
+/* The vendor firmware is sensitive to scan state.  Keep associated scanning
+ * opt-in until it has been exercised across the AP/security matrix. */
+static bool allow_background_scan;
+module_param(allow_background_scan, bool, 0400);
+MODULE_PARM_DESC(allow_background_scan,
+                 "allow firmware background scans while associated");
 
 static enum xr829_scan_phase scan_phase(struct xradio_common *hw)
 {
@@ -108,7 +116,10 @@ static void scan_advance(struct work_struct *work)
   hw->scan_only_channels = batch->count;
   spin_unlock_irqrestore(&hw->scan_only_lock, flags);
   scan.band = 0;
-  scan.scanType = WSM_SCAN_TYPE_FOREGROUND;
+  scan.scanType = r->background ? WSM_SCAN_TYPE_BACKGROUND :
+                                  WSM_SCAN_TYPE_FOREGROUND;
+  if (r->background)
+   scan.scanFlags = WSM_SCAN_FLAG_FORCE_BACKGROUND;
   scan.numOfChannels = batch->count;
   scan.ch = &r->channels[batch->first];
   scan.maxTransmitRate = r->rate;
@@ -120,7 +131,9 @@ static void scan_advance(struct work_struct *work)
    ret = xrs_power_limit(batch->power_dbm, r->requested_power,
                          INT_MIN, hw->scan_power.min_power_level,
                          hw->scan_power.max_power_level, &power);
-   if (!ret) ret = wsm_set_output_power(hw, power, 0);
+   /* JOIN already established this power.  Background scans are accepted
+    * below only when every active channel permits that same limit. */
+   if (!ret && !r->background) ret = wsm_set_output_power(hw, power, 0);
    if (!ret) ret = wsm_set_template_frame(hw, &template, 0);
    scan.numOfProbeRequests = 2;
    scan.numOfSSIDs = r->n_ssids;
@@ -131,6 +144,9 @@ static void scan_advance(struct work_struct *work)
   if (hw->scan_only_state.aborted && !ret) ret = -ECANCELED;
   spin_unlock_irqrestore(&hw->scan_only_lock, flags);
   if (!ret && READ_ONCE(hw->bh_error)) ret = -EIO;
+  if (!ret && r->background)
+   dev_info(hw->pdev, "XR829 background scan submit: channels=%u active=%u\n",
+            batch->count, batch->active);
   if (!ret) ret = wsm_scan(hw, &scan, 0);
   spin_lock_irqsave(&hw->scan_only_lock, flags);
   xr829_scan_submitted(&hw->scan_only_state, ret != 0);
@@ -290,19 +306,32 @@ static int hardware_scan(struct ieee80211_hw *dev, struct ieee80211_vif *vif,
  struct xrs_scan_channel channels[XRS_SCAN_CHANNELS] = {};
  u8 lengths[XRS_SCAN_SSIDS];
  unsigned long flags;
+ bool joined;
  int i, ret;
 
  if (READ_ONCE(hw->bh_error)) return -EIO;
  if (READ_ONCE(hw->recovery_state) != XRS_RUNNING) return -EBUSY;
- if (xrs_runtime_joined(hw) || scan_phase(hw) != XR_SCAN_IDLE) return -EBUSY;
+ joined = xrs_runtime_joined(hw);
+ if (scan_phase(hw) != XR_SCAN_IDLE) return -EBUSY;
+ /* A JOIN without association is exactly the state the reference driver
+  * warns can confuse XR829 firmware.  Never scan in that window. */
+ if (joined && (!allow_background_scan || !xrs_runtime_associated(hw)))
+  return -EBUSY;
  if ((!allow_station && req->n_ssids) || req->n_ssids > XRS_SCAN_SSIDS || req->ie_len > 512 ||
      (req->flags & ~(NL80211_SCAN_FLAG_COLOCATED_6GHZ | NL80211_SCAN_FLAG_FLUSH)) ||
      req->duration_mandatory || !req->n_channels ||
-     req->n_channels > XRS_SCAN_CHANNELS)
+     req->n_channels > XRS_SCAN_CHANNELS) {
+  if (joined)
+   dev_info(hw->pdev,
+            "XR829 background scan rejected: ssids=%u ie=%zu flags=%llx duration=%u channels=%u\n",
+            req->n_ssids, req->ie_len, (unsigned long long)req->flags,
+            req->duration_mandatory, req->n_channels);
   return -EOPNOTSUPP;
+ }
  r = kzalloc(sizeof(*r), GFP_KERNEL);
  if (!r) return -ENOMEM;
  r->n_channels = req->n_channels;
+ r->background = joined;
  r->requested_power = dev->conf.power_level;
  r->n_ssids = req->n_ssids;
  r->rate = req->no_cck ? WSM_TRANSMIT_RATE_6 : WSM_TRANSMIT_RATE_1;
@@ -323,8 +352,8 @@ static int hardware_scan(struct ieee80211_hw *dev, struct ieee80211_vif *vif,
    .power_dbm = ch->max_power,
   };
   r->channels[i].number = ch->hw_value;
-  r->channels[i].minChannelTime = 110;
-  r->channels[i].maxChannelTime = 120;
+  r->channels[i].minChannelTime = joined ? (req->n_ssids ? 15 : 50) : 110;
+  r->channels[i].maxChannelTime = joined ? (req->n_ssids ? 35 : 110) : 120;
  }
  memcpy(r->policy, channels, sizeof(channels));
 	ret = xrs_scan_plan_build(&r->plan, channels, req->n_channels,
@@ -339,6 +368,13 @@ static int hardware_scan(struct ieee80211_hw *dev, struct ieee80211_vif *vif,
                         INT_MIN, hw->scan_power.min_power_level,
                         hw->scan_power.max_power_level, &power);
   if (ret) goto free;
+  if (joined && power != xrs_runtime_confirmed_power(hw)) {
+   dev_info(hw->pdev,
+            "XR829 active background scan power mismatch: channel=%d/10dBm associated=%d/10dBm\n",
+            power, xrs_runtime_confirmed_power(hw));
+   ret = -EOPNOTSUPP;
+   goto free;
+  }
  }
  if (req->n_ssids) {
   if (!is_broadcast_ether_addr(req->bssid) && !is_valid_ether_addr(req->bssid)) {
@@ -372,7 +408,7 @@ free:
  return ret;
 }
 
-int xr829_scan_rx(struct xradio_common *hw, const u8 *data, size_t len)
+bool xr829_scan_rx(struct xradio_common *hw, const u8 *data, size_t len)
 {
 	struct xrw_rx rx;
 	struct sk_buff *skb;
@@ -386,21 +422,21 @@ int xr829_scan_rx(struct xradio_common *hw, const u8 *data, size_t len)
 	     scan_phase(hw) != XR_SCAN_ACTIVE) ||
 	    xrw_rx_decode(&rx, data, len) < 0 || rx.status ||
 	    rx.channel < 1 || rx.channel > 14 || len < 16 + 36)
-		return 0;
+		return false;
 	/* Management beacons/probe responses only; legacy 20 MHz rate domain. */
 	rate = (rx.rate >> 4) & 15;
 	if ((rx.rate & 0xf000) || rate > 13 || rate == 4 || rate == 5)
-		return 0;
+		return false;
 	memcpy(&fc, data + 16, sizeof(fc));
 	if (!ieee80211_is_beacon(fc) && !ieee80211_is_probe_resp(fc))
-		return 0;
+		return false;
 	freq = ieee80211_channel_to_frequency(rx.channel, NL80211_BAND_2GHZ);
 	channel = ieee80211_get_channel(hw->hw->wiphy, freq);
 	if (!channel || channel->flags & IEEE80211_CHAN_DISABLED)
-		return 0;
+		return true;
 	skb = dev_alloc_skb(len - 16);
 	if (!skb)
-		return 0;
+		return true;
 	skb_put_data(skb, data + 16, len - 16);
 	status = IEEE80211_SKB_RXCB(skb);
 	memset(status, 0, sizeof(*status));
@@ -409,7 +445,7 @@ int xr829_scan_rx(struct xradio_common *hw, const u8 *data, size_t len)
 	status->signal = rx.rssi / 2 - 110;
 	status->rate_idx = rate >= 6 ? rate - 2 : rate;
 	ieee80211_rx_irqsafe(hw->hw, skb);
-	return 0;
+	return true;
 }
 
 static void reject_tx(struct ieee80211_hw *dev,
@@ -432,6 +468,10 @@ static int scan_config(struct ieee80211_hw *dev, int radio_idx, u32 changed)
   * command can finish, but no subsequent batch may start. */
  spin_lock_irqsave(&hw->scan_only_lock, flags);
  active = hw->scan_only_state.phase != XR_SCAN_IDLE;
+ if (active)
+  dev_info(hw->pdev, "XR829 config during scan: changed=%x background=%u phase=%u\n",
+           changed, hw->scan_request ? hw->scan_request->background : 0,
+           hw->scan_only_state.phase);
  if (active && hw->scan_request) {
   hw->scan_only_state.aborted = true;
   hw->scan_only_state.poison = true;
@@ -523,6 +563,7 @@ const struct ieee80211_ops xr829_scan_ops = {
  .ampdu_action = xrs_ampdu_action,
 	.set_key = xrs_set_key,
 	.conf_tx = xrs_conf_tx,
+	.flush = xrs_flush,
 	.mgd_prepare_tx = xrs_mgd_prepare,
 	.bss_info_changed = xrs_bss_changed,
 	.start = scan_start, .stop = scan_stop,

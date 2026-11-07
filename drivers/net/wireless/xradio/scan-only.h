@@ -15,5 +15,5 @@ int xr829_restore_interface(struct xradio_common *hw,struct ieee80211_vif *vif);
 void xr829_scan_new_epoch(struct xradio_common *hw);
 void xr829_scan_init(struct xradio_common *hw);
 void xr829_scan_done(struct xradio_common *hw, u32 status, u8 channels);
-int xr829_scan_rx(struct xradio_common *hw, const u8 *data, size_t len);
+bool xr829_scan_rx(struct xradio_common *hw, const u8 *data, size_t len);
 #endif

@@ -9,7 +9,9 @@ static inline int xrs_scan_command_valid(const u8 *data,size_t size)
  unsigned int channels,ssids,i,j;size_t offset;
  if(size<16)return 0;
  channels=data[13];ssids=data[14];
- if(data[4] || data[5] || xrw_get32(data+8) ||
+ /* Encoded byte5 is scanFlags | scanType << 6.  Permit only foreground
+  * (0x00) or the documented forced-background pair (0x41). */
+ if(data[4] || (data[5] && data[5]!=0x41) || xrw_get32(data+8) ||
     (xrw_get16(data+6)!=0 && xrw_get16(data+6)!=0x60) ||
     !channels || channels>14 || ssids>2 ||
     (data[12]!=0 && data[12]!=2) ||
