@@ -863,8 +863,8 @@ static int rotate_probe(struct platform_device *pdev)
 	bool a133 = of_device_is_compatible(pdev->dev.of_node,
 					   "allwinner,sun50i-a133-g2d");
 
-	dev = a133 ? kzalloc(sizeof(*dev), GFP_KERNEL) :
-		devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = a133 ? kzalloc_obj(*dev, GFP_KERNEL) :
+		devm_kzalloc_obj(&pdev->dev, *dev);
 	if (!dev)
 		return -ENOMEM;
 
