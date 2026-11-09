@@ -240,23 +240,32 @@ int a133_gpu_internal_off(struct device *consumer)
 	}
 	/* Pair with successful boot initialization publication. */
 	if (!smp_load_acquire(&p->boot_ready) ||
-	    p->handoff_state != A133_SW_HOST) {
+	    (p->handoff_state != A133_SW_HOST && p->handoff_state != A133_HW)) {
+		dev_err(p->dev, "stopped-off rejected ownership state %u\n", p->handoff_state);
 		ret = -EINVAL;
 		goto out;
 	}
+	/* Validate powered PPU accessibility before reading separate DFS MMIO. */
 	s = a133_ppu_snapshot(p);
-	if (!(s.reset & 1) || !(s.gate & 1) || (s.isolation & 3) != 2 ||
-	    (s.status & 3) != 1 || (s.control & 3) != 1 || (s.irqmask & 1)) {
+	if (!brick_ppu_stopped_accessible(s.reset, s.gate, s.isolation, s.status,
+			s.control, s.irqmask, p->handoff_state == A133_HW ? 2 : 1)) {
+		dev_err(p->dev, "stopped-off rejected PPU reset=%#x gate=%#x iso=%#x status=%#x control=%#x mask=%#x\n",
+			s.reset, s.gate, s.isolation, s.status, s.control, s.irqmask);
 		ret = -EINVAL;
 		goto out;
 	}
 	s = a133_snapshot(p);
-	if (!a133_handoff_valid(&s, 1, true, p->dfs_code)) {
+	if (s.rate != A133_GPU_FIXED_RATE || s.dfs != p->dfs_code) {
+		dev_err(p->dev, "stopped-off rejected clock %lu DFS=%#x expected=%#x\n",
+			s.rate, s.dfs, p->dfs_code);
 		ret = -EINVAL;
 		goto out;
 	}
 	/* No attempt can be retried after the first destructive operation. */
-	brick_ppu_power_off(p->ppu);
+	if (!brick_ppu_stopped_power_off(p->ppu)) {
+		ret = a133_fault(p, "stopped-off-handoff", -EIO);
+		goto out;
+	}
 	s = a133_ppu_snapshot(p);
 
 	if (!a133_internal_tuple(&s, true)) {

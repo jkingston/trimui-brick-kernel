@@ -709,7 +709,12 @@ static PVRSRV_ERROR sunxi_post_power(IMG_HANDLE handle,
 
 	if (next == PVRSRV_SYS_POWER_STATE_OFF)
 		eligible = stop_consume(&gpu->stop, next, old_state, flags);
+	/* A verified non-forced stop goes directly through the IRQ barrier to
+	 * the stock SW/HOST -> ALLOFF sequence. HOST is written by the stock
+	 * post-power callback; it is not a prerequisite hardware idle event.
+	 */
 	if (next == PVRSRV_SYS_POWER_STATE_OFF &&
+	    (!eligible || (flags & PVRSRV_POWER_FLAGS_FORCED)) &&
 	    a133_gpu_apm_handoff(gpu->dev, false,
 	     !!(flags & PVRSRV_POWER_FLAGS_FORCED)))
 		return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
@@ -723,6 +728,9 @@ static PVRSRV_ERROR sunxi_post_power(IMG_HANDLE handle,
 		int cut;
 
 		if (barrier < 0) {
+			dev_err(gpu->dev, "idle IRQ barrier failed %d phase=%u held=%llu stop=%llu\n",
+				barrier, gpu->irq_owner.state.phase,
+				gpu->irq_owner.state.stop_sequence, gpu->stop.sequence);
 			sunxi_latch_fault(gpu, barrier);
 			return PVRSRV_ERROR_DEVICE_POWER_CHANGE_FAILURE;
 		}

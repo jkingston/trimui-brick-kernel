@@ -27,11 +27,19 @@ GPU
 GE8300, BVNC 22.102.54.38, vendor DDK 1.19@6345021. Matching firmware and
 userspace libraries are required. The A133 power domain sequences power-on
 and hands the PPU to hardware control before the GPU driver probes.
-The operating point is fixed at 432 MHz, DFS=1. Power-off, suspend and DVFS
-are unsupported; a failed power-on requires reboot.
+The inherited operating point is fixed at 702 MHz, DFS=1, confirmed by
+runtime readback. Runtime internal power-off/wake has bounded device coverage;
+the stopped-off path follows the stock SW/HOST handoff only after verified
+firmware stop and IRQ drain. Unknown or failed transitions require reboot.
+DVFS is unsupported. The s2idle retention path is not qualified by these tests.
+See the platform's ``rgx_sunxi/PROVENANCE.txt`` for exact stock evidence and
+runtime validation limits.
 
 The optional display-metadata adapter supports stock NULL_WSEGL pbuffer
-rendering. It does not provide scanout or zero-copy KMS presentation.
+rendering. The adapter itself does not provide scanout. A separate experimental
+Zig client has rendered into exported display DMA-BUFs through vendor EGL and
+presented them with KMS, without a CPU framebuffer copy; the production shell
+still uses its CPU renderer.
 
 Controls
 --------
@@ -84,7 +92,7 @@ Armed or queued alarms block time writes. Awake one-shot alarms use absolute
 day/time, with a 255-day scheduling horizon matching stock policy. Clock
 outputs remain boot-established. The system clock is initialized from the RTC;
 automatic RTC writeback and suspend/power-off wake are unsupported. Wireless operation, USB host mode
-and GPU power management remain unsupported. All CPU operating points,
+and GPU DVFS remain unsupported. All CPU operating points,
 clock-failure recovery, automatic scaling and passive thermal throttling have
 been exercised. Audio DMA and amplifier sequencing have been exercised;
 audible output remains unverified.

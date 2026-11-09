@@ -11,5 +11,42 @@ pvrsrvkm.ko (SHA256 ce2097f29c225e2b95333e15ed651b43552d8faa3a8c2cd4174622794254
 
 The kernel power domain must establish GPU power, reset release and PPU
 hardware mode before probe. This platform layer validates that state and
-retains the inherited 432 MHz / DFS=1 operating point. It does not change
-voltage, DFS or PPU control, and does not support suspend or DVFS.
+retains the inherited 702 MHz / DFS=1 operating point, confirmed by runtime
+clock-framework and DFS readback on 2026-11-09. The earlier 432 MHz/no-PM
+description was stale. There is no DVFS or voltage change in this spike.
+Runtime internal power-off/wake and s2idle retention have platform paths;
+the tests below qualify only bounded runtime idle/wake, not system suspend.
+
+2026-11-09 stopped-off correction
+--------------------------------
+Exact reference: stock TG3040_Brick_firmware_v1.1.1.zip rootfs,
+/lib/modules/4.9.191/pvrsrvkm.ko, SHA256 above. AArch64 disassembly of
+sunxiPostPowerState, 0x86d20..0x86da8, masks PPU request IRQ (+0x2c bit 0),
+selects SW=1 (+0x24 low two bits), reads back, then writes HOST=1
+(+0x20 low two bits). HOST is protocol metadata, not independent proof of
+firmware/IRQ quiescence. The platform erroneously waited for HOST first,
+latching non-forced OFF failures even after successful firmware stop.
+
+The verified non-forced path now consumes same-transaction firmware-stop
+evidence, drains the GPU IRQ synchronously, validates accessible PPU/DFS/clock
+state, and executes the stock SW/HOST -> internal ALLOFF ordering. Existing
+forced/unknown-state handling remains separate. Readbacks and fault latching
+are retained; no retry follows a failed destructive transition.
+
+A second device iteration captured reset=1 gate=1 isolation=0 status=1
+control=2 mask=0. HOST may precede 3D isolation. Accept this powered tuple
+only in the stopped-off path; do not weaken wake/general ownership checks.
+
+Host regression: tools/testing/selftests/sunxi_gpu/ppu_stop_test.c mocks
+MMIO, verifies exact write ordering and preserved bits, rejects inaccessible
+states, and injects failed SW/HOST writes before any physical power cut.
+
+Device: matching kernel/modules, vendor 1.19@6345021 UM and stock firmware,
+GE8300 BVNC 22.102.54.38. Final revision passed 120 measured 250 ms live-context
+idle/wake cycles across three process invocations, followed by all-pixel
+retained-texture checks; six additional idle warmups are excluded from that
+count. Pango-shaped texture coverage also matched the CPU oracle. KMS and
+process restart/recovery tests are recorded in the custom-firmware repository's
+docs/display-runtime-validation.md. Driver/firmware status and all fault/HWR
+counters were clear; dmesg was checked for the separately latched PM failures.
+This is bounded bring-up evidence, not production or suspend qualification.
