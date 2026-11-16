@@ -1644,7 +1644,8 @@ static int sunxi_mmc_resource_request(struct sunxi_mmc_host *host,
 	}
 
 	ret = devm_request_threaded_irq(&pdev->dev, host->irq, sunxi_mmc_irq,
-			sunxi_mmc_handle_manual_stop, 0, "sunxi-mmc", host);
+					sunxi_mmc_handle_manual_stop, 0,
+					"sunxi-mmc", host);
 	if (ret)
 		goto error_disable_mmc;
 
@@ -1681,7 +1682,7 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 	if (!host->sg_cpu) {
 		ret = dev_err_probe(&pdev->dev, -ENOMEM,
 				    "Failed to allocate DMA descriptor mem\n");
-		goto error_disable_host;
+		goto error_disable_mmc;
 	}
 
 	if (host->cfg->ccu_has_timings_switch) {
@@ -1779,11 +1780,8 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 
 	ret = mmc_add_host(mmc);
-	if (ret) {
-		if (host->cfg->a133_emmc)
-			goto error_disable_pm;
-		goto error_free_dma;
-	}
+	if (ret)
+		goto error_disable_rpm;
 
 	if (host->cfg->a133_emmc) {
 		pm_runtime_mark_last_busy(&pdev->dev);
@@ -1796,16 +1794,13 @@ static int sunxi_mmc_probe(struct platform_device *pdev)
 
 	return 0;
 
-error_disable_pm:
+error_disable_rpm:
 	pm_runtime_disable(&pdev->dev);
-	pm_runtime_put_noidle(&pdev->dev);
+	if (host->cfg->a133_emmc)
+		pm_runtime_put_noidle(&pdev->dev);
 error_free_dma:
-	disable_irq(host->irq);
-	sunxi_mmc_disable(host);
 	dma_free_coherent(&pdev->dev, PAGE_SIZE, host->sg_cpu, host->sg_dma);
-	return ret;
-
-error_disable_host:
+error_disable_mmc:
 	disable_irq(host->irq);
 	sunxi_mmc_disable(host);
 	return ret;
